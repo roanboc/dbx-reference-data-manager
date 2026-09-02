@@ -71,7 +71,9 @@ def test_user_without_access_sees_nothing(seeded_backend):
 def test_search_on_domain_title_keeps_all_forms(seeded_backend, admin):
     svc = service(seeded_backend, admin)
     assert _nav(svc.navigation("finance")) == {FINANCE: (Role.ADMIN, ["cost_centres", "gl_account_mappings"])}
-    assert _nav(svc.navigation("Cost Management")) == {FINANCE: (Role.ADMIN, ["cost_centres", "gl_account_mappings"])}
+    assert _nav(svc.navigation("Cost Management")) == {
+        FINANCE: (Role.ADMIN, ["cost_centres", "gl_account_mappings"])
+    }
     # domain description matches too
     assert _nav(svc.navigation("HR Systems")) == {HR: (Role.ADMIN, ["employment_types"])}
     # matching the schema name works as well

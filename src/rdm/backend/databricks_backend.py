@@ -545,6 +545,9 @@ class DatabricksBackend(DatabaseBackend):
             order = f" ORDER BY {_q(order_by)} {direction} NULLS LAST"
             if form.has_system_columns:
                 order += f", {_q(ID_COLUMN)}"
+        elif form.key_columns:
+            keys = ", ".join(f"{_q(k.name)} {direction} NULLS LAST" for k in form.key_columns)
+            order = f" ORDER BY {keys}, {_q(ID_COLUMN)}"
         elif form.has_system_columns:
             order = f" ORDER BY {_q(CREATED_AT_COLUMN)} {direction} NULLS LAST, {_q(ID_COLUMN)}"
         elif cols:

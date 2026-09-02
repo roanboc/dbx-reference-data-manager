@@ -48,9 +48,16 @@ def sample_rows() -> pd.DataFrame:
             "price": pd.Series([9.99, 120.5, 0.05, None], dtype=object),
             "ratio": pd.Series([0.5, 0.25, 1.0, None], dtype=object),
             "active": pd.Series([True, False, True, None], dtype=object),
-            "start_date": pd.Series([date(2024, 1, 1), date(2024, 2, 15), date(2023, 12, 31), None], dtype=object),
+            "start_date": pd.Series(
+                [date(2024, 1, 1), date(2024, 2, 15), date(2023, 12, 31), None], dtype=object
+            ),
             "last_seen": pd.Series(
-                [datetime(2024, 1, 1, 10, 30), datetime(2024, 3, 5, 8, 0), datetime(2024, 6, 30, 23, 59, 59), None],
+                [
+                    datetime(2024, 1, 1, 10, 30),
+                    datetime(2024, 3, 5, 8, 0),
+                    datetime(2024, 6, 30, 23, 59, 59),
+                    None,
+                ],
                 dtype=object,
             ),
         }
@@ -94,7 +101,9 @@ def viewer() -> User:
 @pytest.fixture
 def sample_form(backend: DuckDBBackend, admin: User) -> FormDef:
     backend.create_domain(
-        DomainDef(SAMPLE_DOMAIN, display_name="Test Domain", description="Fixture domain", owner="owner@example.org"),
+        DomainDef(
+            SAMPLE_DOMAIN, display_name="Test Domain", description="Fixture domain", owner="owner@example.org"
+        ),
         admin,
     )
     counter = itertools.count(1)

@@ -85,7 +85,9 @@ def test_sanitize_identifier_truncates_to_max_length():
     assert len(sanitize_identifier("x y " * 40)) <= MAX_IDENTIFIER_LENGTH
 
 
-@pytest.mark.parametrize("raw", ["Cost Centre (GBP)", "2024 Budget", "select", "", "a" * 100, "£$%", "Ünïcode"])
+@pytest.mark.parametrize(
+    "raw", ["Cost Centre (GBP)", "2024 Budget", "select", "", "a" * 100, "£$%", "Ünïcode"]
+)
 def test_sanitize_identifier_output_is_always_a_valid_user_identifier(raw):
     name = sanitize_identifier(raw)
     assert validate_identifier(name, allow_leading_underscore=False) == name
@@ -137,8 +139,8 @@ def test_humanize(name, expected):
 
 
 def test_system_column_helpers():
-    assert SYSTEM_COLUMNS == ("_id", "_created_at", "_created_by", "_updated_at", "_updated_by")
-    assert AUDIT_COLUMNS == SYSTEM_COLUMNS[1:]
+    assert SYSTEM_COLUMNS == ("_id", "_version", "_created_at", "_created_by", "_updated_at", "_updated_by")
+    assert AUDIT_COLUMNS == SYSTEM_COLUMNS[2:]
     assert is_system_column(ID_COLUMN)
     assert is_system_column(UPDATED_AT_COLUMN)
     assert not is_system_column("id")
@@ -234,7 +236,10 @@ def test_permissions_defaults_and_catalog_admin():
 
 
 def test_column_decimal_params_defaults():
-    assert ColumnDef("x", DataType.DECIMAL).decimal_params == (DEFAULT_DECIMAL_PRECISION, DEFAULT_DECIMAL_SCALE)
+    assert ColumnDef("x", DataType.DECIMAL).decimal_params == (
+        DEFAULT_DECIMAL_PRECISION,
+        DEFAULT_DECIMAL_SCALE,
+    )
     assert ColumnDef("x", DataType.DECIMAL, precision=10, scale=0).decimal_params == (10, 0)
     assert ColumnDef("x", DataType.DECIMAL, precision=10).decimal_params == (10, DEFAULT_DECIMAL_SCALE)
 
@@ -287,8 +292,14 @@ def test_system_columns_definition():
     assert [c.name for c in cols] == list(SYSTEM_COLUMNS)
     assert all(c.is_system for c in cols)
     assert cols[0].data_type is DataType.STRING and not cols[0].nullable
-    assert [c.data_type for c in cols[1:]] == [DataType.TIMESTAMP, DataType.STRING, DataType.TIMESTAMP, DataType.STRING]
-    assert all(c.nullable for c in cols[1:])
+    assert cols[1].name == "_version" and cols[1].data_type is DataType.INTEGER and not cols[1].nullable
+    assert [c.data_type for c in cols[2:]] == [
+        DataType.TIMESTAMP,
+        DataType.STRING,
+        DataType.TIMESTAMP,
+        DataType.STRING,
+    ]
+    assert all(c.nullable for c in cols[2:])
     assert all(c.validate() is c for c in cols)
 
 
@@ -385,7 +396,11 @@ def test_column_config_only_lists_user_columns_with_settings():
     cfg = _configured_form().column_config()
     assert cfg == {
         "version": 1,
-        "columns": {"code": {"key": True}, "category": {"options": ["A", "B"]}, "both": {"options": ["x"], "key": True}},
+        "columns": {
+            "code": {"key": True},
+            "category": {"options": ["A", "B"]},
+            "both": {"options": ["x"], "key": True},
+        },
     }
     assert ID_COLUMN not in cfg["columns"] and "plain" not in cfg["columns"]
 
@@ -400,7 +415,9 @@ def test_column_config_json_is_compact_and_sorted():
 def test_apply_column_config_round_trip_from_json_and_dict():
     source = _configured_form()
     for raw in (source.column_config_json(), source.column_config()):
-        target = _form(*system_columns(), ColumnDef("code"), ColumnDef("category"), ColumnDef("both"), ColumnDef("plain"))
+        target = _form(
+            *system_columns(), ColumnDef("code"), ColumnDef("category"), ColumnDef("both"), ColumnDef("plain")
+        )
         target.apply_column_config(raw)
         assert target.column_config() == source.column_config()
         assert target.column("category").options == ["A", "B"]
@@ -424,7 +441,9 @@ def test_apply_column_config_coerces_option_values_and_key_flags():
     assert target.column("code").is_key is True
 
 
-@pytest.mark.parametrize("raw", [None, "", {}, "{}", '{"version": 1}', "not json", "[1, 2]", 42, {"columns": {"code": "x"}}])
+@pytest.mark.parametrize(
+    "raw", [None, "", {}, "{}", '{"version": 1}', "not json", "[1, 2]", 42, {"columns": {"code": "x"}}]
+)
 def test_apply_column_config_ignores_garbage(raw):
     target = _form(ColumnDef("code", options=["keep"], is_key=True))
     target.apply_column_config(raw)
@@ -438,7 +457,9 @@ def test_apply_column_config_ignores_garbage(raw):
     reason="BUG rdm/models.py FormDef.apply_column_config: a non-dict 'columns' value (str/list/None) "
     "reaches cols.get() outside the try block and raises AttributeError instead of being ignored.",
 )
-@pytest.mark.parametrize("raw", [{"columns": "abc"}, {"columns": None}, {"columns": [1]}, '{"columns": "abc"}'])
+@pytest.mark.parametrize(
+    "raw", [{"columns": "abc"}, {"columns": None}, {"columns": [1]}, '{"columns": "abc"}']
+)
 def test_apply_column_config_ignores_non_dict_columns_value(raw):
     target = _form(ColumnDef("code", options=["keep"], is_key=True))
     target.apply_column_config(raw)

@@ -36,7 +36,6 @@ RESERVED_WORDS = frozenset(
         "case",
         "cast",
         "check",
-        "column",
         "constraint",
         "create",
         "cross",
@@ -159,9 +158,9 @@ def sanitize_identifier(raw: Any, fallback: str = "column") -> str:
         text = fallback
     if not text[0].isalpha():
         text = f"col_{text}"
-    if text in RESERVED_WORDS:
-        text = f"{text}_"
     text = text[:MAX_IDENTIFIER_LENGTH].rstrip("_") or fallback
+    if text in RESERVED_WORDS:
+        text = f"{text[: MAX_IDENTIFIER_LENGTH - 1]}_"
     return text
 
 
@@ -550,6 +549,7 @@ class ValidationIssue:
     row_label: str
     column: str | None
     message: str
+    row_id: str | None = None  # set when the issue can be tied to a specific row
 
     def __str__(self) -> str:
         where = f"{self.row_label}, column '{self.column}'" if self.column else self.row_label

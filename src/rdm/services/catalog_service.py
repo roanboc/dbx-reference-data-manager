@@ -46,12 +46,12 @@ class CatalogService:
         filtered = []
         for item in items:
             d = item.domain
-            if _matches(search, d.name, d.title, d.description):
-                filtered.append(item)
-                continue
             forms = [f for f in item.forms if _matches(search, f.name, f.title, f.description, f.owner)]
             if forms:
+                # Matching forms take precedence: show only them under their domain.
                 filtered.append(NavDomain(d, item.role, forms))
+            elif _matches(search, d.name, d.title, d.description, d.owner):
+                filtered.append(item)
         return filtered
 
     def get_form(self, domain: str, name: str) -> FormDef:

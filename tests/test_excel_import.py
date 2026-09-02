@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from datetime import date, datetime
+from decimal import Decimal
 
 import pandas as pd
 import pytest
@@ -61,7 +62,10 @@ def types_of(df: pd.DataFrame) -> dict[str, DataType]:
         ([True, False], (DataType.BOOLEAN, None, None)),
         ([True, None, False], (DataType.BOOLEAN, None, None)),
         (pd.to_datetime(["2024-01-01", "2024-02-01"]), (DataType.DATE, None, None)),
-        (pd.to_datetime(["2024-01-01 10:30", "2024-02-01"]), (DataType.TIMESTAMP, None, None)),
+        (
+            pd.to_datetime(["2024-01-01 10:30", "2024-02-01"], format="mixed"),
+            (DataType.TIMESTAMP, None, None),
+        ),
         ([datetime(2024, 1, 1), datetime(2024, 2, 1)], (DataType.DATE, None, None)),
         ([datetime(2024, 1, 1, 8, 30), None], (DataType.TIMESTAMP, None, None)),
         (["yes", "no", "Yes"], (DataType.BOOLEAN, None, None)),
@@ -86,7 +90,11 @@ def types_of(df: pd.DataFrame) -> dict[str, DataType]:
     ],
 )
 def test_infer_type(values, expected):
-    series = values if isinstance(values, pd.Series | pd.DatetimeIndex) else pd.Series(values, dtype=object if values and any(isinstance(v, str) for v in values) else None)
+    series = (
+        values
+        if isinstance(values, pd.Series | pd.DatetimeIndex)
+        else pd.Series(values, dtype=object if values and any(isinstance(v, str) for v in values) else None)
+    )
     if isinstance(series, pd.DatetimeIndex):
         series = pd.Series(series)
     assert infer_type(series) == expected
@@ -153,7 +161,18 @@ def _catalogue_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "Product Code": [f"P{i:03d}" for i in range(1, 11)],
-            "Category": ["Hardware", "Software", "Hardware", "Service", "Software", "Hardware", "Service", "Software", "Hardware", "Service"],
+            "Category": [
+                "Hardware",
+                "Software",
+                "Hardware",
+                "Service",
+                "Software",
+                "Hardware",
+                "Service",
+                "Software",
+                "Hardware",
+                "Service",
+            ],
             "Description": [f"unique text {i}" for i in range(10)],
             "Quantity": list(range(10, 20)),
             "Price": [1.25, 2.5, 3.75, 5.0, 6.25, 7.5, 8.75, 10.0, 11.25, 12.5],
@@ -261,7 +280,9 @@ def test_parse_file_without_columns_fails():
 
 def test_parse_file_with_header_row_offset():
     buf = io.BytesIO()
-    pd.DataFrame([["Title row", None], ["Code", "Qty"], ["A", 1], ["B", 2]]).to_excel(buf, index=False, header=False)
+    pd.DataFrame([["Title row", None], ["Code", "Qty"], ["A", 1], ["B", 2]]).to_excel(
+        buf, index=False, header=False
+    )
     parsed = parse_file(buf.getvalue(), "f.xlsx", header_row=1)
     assert [c.name for c in parsed.columns] == ["code", "qty"]
     assert parsed.row_count == 2
@@ -286,7 +307,8 @@ def test_read_table_csv_and_tsv_and_txt():
     for name, sep in (("t.csv", ","), ("t.tsv", "\t"), ("t.txt", ","), ("T.CSV", ";")):
         out = read_table(csv_bytes(df, sep=sep), name)
         assert out.columns.tolist() == ["Code", "Qty"], name
-        assert out["Code"].tolist() == ["A", "B"] and out["Qty"].tolist() == [1, 2]
+        # values are read as text (dtype=object) so that codes such as "0042" survive; typing happens in coerce_frame
+        assert out["Code"].tolist() == ["A", "B"] and out["Qty"].tolist() == ["1", "2"]
 
 
 def test_read_table_excel_sheet_selection_and_header_row():
@@ -352,13 +374,28 @@ def test_coerce_frame_reports_issues_with_excel_row_numbers_and_blanks_invalid_c
             "Flag": ["yes", "maybe", None],
         }
     )
-    source = {"code": "Code", "category": "Category", "qty": "Qty", "price": "Price", "start_date": "Start", "flag": "Flag"}
+    source = {
+        "code": "Code",
+        "category": "Category",
+        "qty": "Qty",
+        "price": "Price",
+        "start_date": "Start",
+        "flag": "Flag",
+    }
     df, issues = coerce_frame(raw, _target_columns(), source)
-    assert df.columns.tolist() == ["code", "category", "qty", "price", "start_date", "flag", "missing_in_file"]
+    assert df.columns.tolist() == [
+        "code",
+        "category",
+        "qty",
+        "price",
+        "start_date",
+        "flag",
+        "missing_in_file",
+    ]
     assert df["code"].tolist() == ["A", None, "C"]
     assert df["category"].tolist() == ["A", "Z", None]  # invalid options stay (reported), blanks stay None
     assert df["qty"].tolist() == [1, None, 3]
-    assert df["price"].tolist()[0] == pytest.approx(1.01) and df["price"].tolist()[1] is None
+    assert df["price"].tolist()[0] == Decimal("1.01") and df["price"].tolist()[1] is None
     assert df["start_date"].tolist() == [date(2024, 1, 1), None, None]
     assert df["flag"].tolist() == [True, None, None]
     assert df["missing_in_file"].tolist() == [None, None, None]
@@ -384,14 +421,20 @@ def test_coerce_frame_defaults_source_name_to_column_name():
     raw = pd.DataFrame({"qty": [1.0, 2.0]})
     df, issues = coerce_frame(raw, [ColumnDef("qty", DataType.INTEGER)], {})
     assert df["qty"].tolist() == [1, 2] and issues == []
-    assert df.dtypes["qty"] == object
+    assert str(df.dtypes["qty"]) == "object"
 
 
 def test_map_frame_to_form_matches_exact_and_sanitised_headers():
     form = FormDef(
         "dom",
         "frm",
-        columns=[ColumnDef("_id"), ColumnDef("cost_centre_code"), ColumnDef("name"), ColumnDef("amount"), ColumnDef("missing")],
+        columns=[
+            ColumnDef("_id"),
+            ColumnDef("cost_centre_code"),
+            ColumnDef("name"),
+            ColumnDef("amount"),
+            ColumnDef("missing"),
+        ],
     )
     raw = pd.DataFrame({"Cost Centre Code": [1], "name": ["x"], "AMOUNT (GBP)": [2], "Unrelated": [3]})
     mapping, unmatched = map_frame_to_form(raw, form)
@@ -428,4 +471,4 @@ def test_end_to_end_upload_round_trip(backend, admin):
     df = backend.read_rows(form)
     assert sorted(df["product_code"]) == [f"P{i:03d}" for i in range(1, 11)]
     assert df["active"].map(bool).sum() == 5
-    assert df["available_from"].min() == pd.Timestamp("2024-01-01")
+    assert df["available_from"].min() == date(2024, 1, 1)

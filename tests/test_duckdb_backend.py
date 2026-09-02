@@ -8,8 +8,8 @@ from decimal import Decimal
 import duckdb
 import pandas as pd
 import pytest
-from conftest import SAMPLE_DOMAIN, SAMPLE_FORM, sample_columns, sample_rows
 
+from conftest import SAMPLE_DOMAIN, SAMPLE_FORM, sample_columns, sample_rows
 from rdm.backend.base import BackendError, ConflictError, NotFoundError
 from rdm.backend.duckdb_backend import CATALOG_LEVEL, META_SCHEMA, DuckDBBackend
 from rdm.models import (
@@ -24,6 +24,7 @@ from rdm.models import (
     SYSTEM_COLUMNS,
     UPDATED_AT_COLUMN,
     UPDATED_BY_COLUMN,
+    VERSION_COLUMN,
     ChangeSet,
     ColumnDef,
     DataType,
@@ -57,8 +58,9 @@ def _row(df: pd.DataFrame, code: str) -> pd.Series:
     return match.iloc[0]
 
 
-def _updated_at(row: pd.Series) -> datetime:
-    return pd.Timestamp(row[UPDATED_AT_COLUMN]).to_pydatetime()
+def _version(row: pd.Series) -> int:
+    """The optimistic-concurrency token of a row as loaded by ``read_rows``."""
+    return int(row[VERSION_COLUMN])
 
 
 def _meta_count(backend: DuckDBBackend, table: str, **where: str) -> int:
@@ -80,7 +82,8 @@ def test_fresh_backend_has_no_domains_and_describes_itself(backend: DuckDBBacken
 
 def test_create_domain_returns_metadata_and_grants_creator_admin(backend: DuckDBBackend, admin: User):
     created = backend.create_domain(
-        DomainDef("finance", display_name="Finance", description="Money things", owner="cfo@example.org"), admin
+        DomainDef("finance", display_name="Finance", description="Money things", owner="cfo@example.org"),
+        admin,
     )
     assert created.name == "finance"
     assert created.display_name == "Finance"
@@ -144,8 +147,14 @@ def test_list_domains_sorted_with_form_counts(backend: DuckDBBackend, admin: Use
 
 def test_update_domain(backend: DuckDBBackend, admin: User):
     backend.create_domain(DomainDef("finance", "Finance", "old", "old@example.org"), admin)
-    updated = backend.update_domain(DomainDef("finance", "Finance & Co", "new text", "new@example.org"), admin)
-    assert (updated.display_name, updated.description, updated.owner) == ("Finance & Co", "new text", "new@example.org")
+    updated = backend.update_domain(
+        DomainDef("finance", "Finance & Co", "new text", "new@example.org"), admin
+    )
+    assert (updated.display_name, updated.description, updated.owner) == (
+        "Finance & Co",
+        "new text",
+        "new@example.org",
+    )
     assert updated.properties["created_by"] == admin.username  # untouched
     assert backend.get_domain("finance").description == "new text"
 
@@ -162,8 +171,8 @@ def test_update_domain_not_found(backend: DuckDBBackend, admin: User):
 
 def test_create_form_adds_system_columns_in_front(backend: DuckDBBackend, sample_form: FormDef):
     names = [c.name for c in sample_form.columns]
-    assert names[:5] == list(SYSTEM_COLUMNS)
-    assert names[5:] == [c.name for c in sample_columns()]
+    assert names[:6] == list(SYSTEM_COLUMNS)
+    assert names[6:] == [c.name for c in sample_columns()]
     id_col = sample_form.column(ID_COLUMN)
     assert id_col.data_type is DataType.STRING and not id_col.nullable and id_col.is_system
     assert id_col.description == "Row identifier (generated)"
@@ -172,7 +181,9 @@ def test_create_form_adds_system_columns_in_front(backend: DuckDBBackend, sample
     assert [c.position for c in sample_form.columns] == list(range(len(sample_form.columns)))
 
 
-def test_create_form_persists_comments_properties_tags_and_column_config(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_create_form_persists_comments_properties_tags_and_column_config(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
     assert form.description == "Sample products"
     assert form.display_name == "Products" and form.title == "Products"
@@ -205,7 +216,11 @@ def test_create_form_persists_comments_properties_tags_and_column_config(backend
 
 def test_create_form_defaults_owner_to_actor_and_reorders_system_columns(backend: DuckDBBackend, admin: User):
     backend.create_domain(DomainDef("dom"), admin)
-    form = FormDef("dom", "frm", columns=[ColumnDef("code"), ColumnDef("_id", DataType.STRING, "ignored", nullable=False)])
+    form = FormDef(
+        "dom",
+        "frm",
+        columns=[ColumnDef("code"), ColumnDef("_id", DataType.STRING, "ignored", nullable=False)],
+    )
     created = backend.create_form(form, admin)
     assert created.owner == admin.username
     assert created.tags["rdm_owner"] == admin.username
@@ -267,7 +282,9 @@ def test_get_form_not_found(backend: DuckDBBackend, admin: User):
 
 
 def test_list_forms_is_lightweight_and_sorted(backend: DuckDBBackend, admin: User, sample_form: FormDef):
-    backend.create_form(FormDef(SAMPLE_DOMAIN, "aardvark", display_name="Aardvarks", columns=[ColumnDef("x")]), admin)
+    backend.create_form(
+        FormDef(SAMPLE_DOMAIN, "aardvark", display_name="Aardvarks", columns=[ColumnDef("x")]), admin
+    )
     forms = backend.list_forms(SAMPLE_DOMAIN)
     assert [f.name for f in forms] == ["aardvark", SAMPLE_FORM]
     products = forms[1]
@@ -312,18 +329,21 @@ def test_external_table_without_system_columns_is_read_only(backend: DuckDBBacke
 # ======================================================================================
 
 
-def test_read_rows_returns_system_columns_and_normalised_types(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_read_rows_returns_system_columns_and_normalised_types(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     df = backend.read_rows(sample_form)
     assert df.columns.tolist() == [c.name for c in sample_form.columns]
     assert df["code"].tolist() == ["A001", "B002", "C003", "D004"]
     assert str(df[CREATED_AT_COLUMN].dtype) == "datetime64[us]"
-    assert str(df["start_date"].dtype) == "datetime64[us]"
+    assert str(df["start_date"].dtype) == "object"  # datetime.date objects
     assert str(df["last_seen"].dtype) == "datetime64[us]"
+    assert str(df[VERSION_COLUMN].dtype) == "Int64" and df[VERSION_COLUMN].tolist() == [1, 1, 1, 1]
     assert df[CREATED_BY_COLUMN].tolist() == [admin.username] * 4
     assert df[ID_COLUMN].tolist() == ["row-0001", "row-0002", "row-0003", "row-0004"]
     last = _row(df, "D004")
     assert last["category"] is None
-    assert pd.isna(last["qty"]) and pd.isna(last["price"]) and pd.isna(last["ratio"])
+    assert int(last["qty"]) == 40 and pd.isna(last["price"]) and pd.isna(last["ratio"])
     assert pd.isna(last["active"]) and pd.isna(last["start_date"]) and pd.isna(last["last_seen"])
     first = _row(df, "A001")
     assert first["category"] == "Hardware"
@@ -331,7 +351,7 @@ def test_read_rows_returns_system_columns_and_normalised_types(backend: DuckDBBa
     assert float(first["price"]) == pytest.approx(9.99)
     assert float(first["ratio"]) == 0.5
     assert bool(first["active"]) is True
-    assert first["start_date"] == pd.Timestamp("2024-01-01")
+    assert first["start_date"] == date(2024, 1, 1)
     assert first["last_seen"] == pd.Timestamp("2024-01-01 10:30:00")
 
 
@@ -366,7 +386,9 @@ def test_read_rows_search_is_case_insensitive_and_spans_columns(backend: DuckDBB
     assert missing.empty and missing.columns.tolist() == [c.name for c in sample_form.columns]
 
 
-def test_read_rows_search_does_not_match_system_columns(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_read_rows_search_does_not_match_system_columns(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     assert backend.read_rows(sample_form, search="row-0001").empty
     assert backend.read_rows(sample_form, search=admin.username).empty
 
@@ -374,7 +396,15 @@ def test_read_rows_search_does_not_match_system_columns(backend: DuckDBBackend, 
 def test_read_rows_search_escapes_like_wildcards(backend: DuckDBBackend, admin: User, sample_form: FormDef):
     backend.apply_changes(
         sample_form,
-        ChangeSet(inserts=[RowInsert({"code": "100%"}), RowInsert({"code": "1000"}), RowInsert({"code": "a_b"}), RowInsert({"code": "axb"}), RowInsert({"code": "back\\slash"})]),
+        ChangeSet(
+            inserts=[
+                RowInsert({"code": "100%"}),
+                RowInsert({"code": "1000"}),
+                RowInsert({"code": "a_b"}),
+                RowInsert({"code": "axb"}),
+                RowInsert({"code": "back\\slash"}),
+            ]
+        ),
         admin,
     )
     assert backend.read_rows(sample_form, search="100%")["code"].tolist() == ["100%"]
@@ -392,7 +422,9 @@ def test_count_rows(backend: DuckDBBackend, sample_form: FormDef):
 # ======================================================================================
 
 
-def test_apply_changes_insert_stamps_audit_columns(backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch):
+def test_apply_changes_insert_stamps_audit_columns(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch
+):
     _freeze(monkeypatch, T1)
     values = {
         "code": "E005",
@@ -405,7 +437,13 @@ def test_apply_changes_insert_stamps_audit_columns(backend: DuckDBBackend, admin
         "last_seen": datetime(2024, 5, 1, 9, 15),
     }
     result = backend.apply_changes(sample_form, ChangeSet(inserts=[RowInsert(values, "New row 1")]), admin)
-    assert (result.inserted, result.updated, result.deleted, result.conflicts, result.errors) == (1, 0, 0, [], [])
+    assert (result.inserted, result.updated, result.deleted, result.conflicts, result.errors) == (
+        1,
+        0,
+        0,
+        [],
+        [],
+    )
     assert result.ok and result.applied == 1
     assert backend.count_rows(sample_form) == 5
     row = _row(backend.read_rows(sample_form), "E005")
@@ -415,15 +453,26 @@ def test_apply_changes_insert_stamps_audit_columns(backend: DuckDBBackend, admin
     assert row["category"] == "Service" and int(row["qty"]) == 7
     assert float(row["price"]) == pytest.approx(12.34) and float(row["ratio"]) == 0.75
     assert bool(row["active"]) is False
-    assert row["start_date"] == pd.Timestamp("2024-05-01")
+    assert row["start_date"] == date(2024, 5, 1)
     assert row["last_seen"] == pd.Timestamp("2024-05-01 09:15:00")
+    assert int(row[VERSION_COLUMN]) == 1
 
 
-def test_apply_changes_insert_with_numpy_values_and_missing_columns(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_apply_changes_insert_with_numpy_values_and_missing_columns(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     import numpy as np
 
     result = backend.apply_changes(
-        sample_form, ChangeSet(inserts=[RowInsert({"code": "N001", "qty": np.int64(3), "ratio": np.float64("nan"), "active": np.bool_(True)})]), admin
+        sample_form,
+        ChangeSet(
+            inserts=[
+                RowInsert(
+                    {"code": "N001", "qty": np.int64(3), "ratio": np.float64("nan"), "active": np.bool_(True)}
+                )
+            ]
+        ),
+        admin,
     )
     assert result.inserted == 1
     row = _row(backend.read_rows(sample_form), "N001")
@@ -431,7 +480,9 @@ def test_apply_changes_insert_with_numpy_values_and_missing_columns(backend: Duc
     assert row["category"] is None and pd.isna(row["price"])
 
 
-def test_apply_changes_update_and_delete_with_matching_token(backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch):
+def test_apply_changes_update_and_delete_with_matching_token(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch
+):
     before = backend.read_rows(sample_form)
     a, b = _row(before, "A001"), _row(before, "B002")
     _freeze(monkeypatch, T2)
@@ -439,8 +490,10 @@ def test_apply_changes_update_and_delete_with_matching_token(backend: DuckDBBack
     result = backend.apply_changes(
         sample_form,
         ChangeSet(
-            updates=[RowUpdate(a[ID_COLUMN], {"qty": 11, "category": "Service"}, _updated_at(a), "Row code=A001")],
-            deletes=[RowDelete(b[ID_COLUMN], _updated_at(b), "Row code=B002")],
+            updates=[
+                RowUpdate(a[ID_COLUMN], {"qty": 11, "category": "Service"}, _version(a), "Row code=A001")
+            ],
+            deletes=[RowDelete(b[ID_COLUMN], _version(b), "Row code=B002")],
         ),
         other,
     )
@@ -450,33 +503,47 @@ def test_apply_changes_update_and_delete_with_matching_token(backend: DuckDBBack
     assert after["code"].tolist() == ["A001", "C003", "D004"]
     a2 = _row(after, "A001")
     assert int(a2["qty"]) == 11 and a2["category"] == "Service"
+    assert int(a2[VERSION_COLUMN]) == 2  # incremented on update
     assert a2[UPDATED_AT_COLUMN] == pd.Timestamp(T2) and a2[UPDATED_BY_COLUMN] == "bob@example.org"
     assert a2[CREATED_AT_COLUMN] == a[CREATED_AT_COLUMN] and a2[CREATED_BY_COLUMN] == admin.username
     form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
     assert form.row_count == 3 and form.updated_by == "bob@example.org" and form.updated_at == T2
 
 
-def test_apply_changes_update_ignores_system_and_unknown_columns(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_apply_changes_update_ignores_system_and_unknown_columns(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     a = _row(backend.read_rows(sample_form), "A001")
     history_before = len(backend.get_history(sample_form))
     result = backend.apply_changes(
-        sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {ID_COLUMN: "hacked", "ghost": 1}, _updated_at(a))]), admin
+        sample_form,
+        ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {ID_COLUMN: "hacked", "ghost": 1}, _version(a))]),
+        admin,
     )
     assert result.updated == 0 and result.conflicts == [] and result.ok
     assert _row(backend.read_rows(sample_form), "A001")[ID_COLUMN] == "row-0001"
     assert len(backend.get_history(sample_form)) == history_before
 
 
-def test_apply_changes_stale_token_is_reported_as_conflict(backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch):
+def test_apply_changes_stale_token_is_reported_as_conflict(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch
+):
     a = _row(backend.read_rows(sample_form), "A001")
-    stale = _updated_at(a)
+    stale = _version(a)
     _freeze(monkeypatch, T1)
-    assert backend.apply_changes(sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"qty": 1}, stale)]), User("carol")).updated == 1
+    assert (
+        backend.apply_changes(
+            sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"qty": 1}, stale)]), User("carol")
+        ).updated
+        == 1
+    )
     result = backend.apply_changes(
         sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"qty": 2}, stale, "Row code=A001")]), admin
     )
     assert result.updated == 0 and not result.ok
-    assert result.conflicts == ["Row code=A001: modified by carol at 2024-01-01 12:00:00 UTC after you loaded it."]
+    assert result.conflicts == [
+        "Row code=A001: modified by carol at 2024-01-02 12:00:00 UTC after you loaded it."
+    ]
     assert result.summary() == "nothing changed; 1 row(s) skipped because they were changed by someone else"
     assert int(_row(backend.read_rows(sample_form), "A001")["qty"]) == 1
     # a stale delete is a conflict too, and the label falls back to the row id
@@ -485,20 +552,31 @@ def test_apply_changes_stale_token_is_reported_as_conflict(backend: DuckDBBacken
     assert backend.count_rows(sample_form) == 4
 
 
-def test_apply_changes_none_token_conflicts_with_stamped_row(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_apply_changes_none_token_conflicts_with_stamped_row(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     a = _row(backend.read_rows(sample_form), "A001")
-    result = backend.apply_changes(sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"qty": 1}, None, "A")]), admin)
+    result = backend.apply_changes(
+        sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"qty": 1}, None, "A")]), admin
+    )
     assert result.updated == 0 and len(result.conflicts) == 1
 
 
-def test_apply_changes_deleted_row_is_reported_as_conflict(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_apply_changes_deleted_row_is_reported_as_conflict(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     b = _row(backend.read_rows(sample_form), "B002")
-    assert backend.apply_changes(sample_form, ChangeSet(deletes=[RowDelete(b[ID_COLUMN], _updated_at(b))]), admin).deleted == 1
+    assert (
+        backend.apply_changes(
+            sample_form, ChangeSet(deletes=[RowDelete(b[ID_COLUMN], _version(b))]), admin
+        ).deleted
+        == 1
+    )
     result = backend.apply_changes(
         sample_form,
         ChangeSet(
-            updates=[RowUpdate(b[ID_COLUMN], {"qty": 1}, _updated_at(b), "Row code=B002")],
-            deletes=[RowDelete(b[ID_COLUMN], _updated_at(b), "Row code=B002")],
+            updates=[RowUpdate(b[ID_COLUMN], {"qty": 1}, _version(b), "Row code=B002")],
+            deletes=[RowDelete(b[ID_COLUMN], _version(b), "Row code=B002")],
         ),
         admin,
     )
@@ -506,14 +584,19 @@ def test_apply_changes_deleted_row_is_reported_as_conflict(backend: DuckDBBacken
     assert result.conflicts == ["Row code=B002: the row was deleted by someone else."] * 2
 
 
-def test_apply_changes_conflicts_do_not_block_other_rows(backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch):
+def test_apply_changes_conflicts_do_not_block_other_rows(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch
+):
     df = backend.read_rows(sample_form)
     a, c = _row(df, "A001"), _row(df, "C003")
     result = backend.apply_changes(
         sample_form,
         ChangeSet(
             inserts=[RowInsert({"code": "E005"})],
-            updates=[RowUpdate(a[ID_COLUMN], {"qty": 99}, datetime(1999, 1, 1), "stale A"), RowUpdate(c[ID_COLUMN], {"qty": 33}, _updated_at(c), "C")],
+            updates=[
+                RowUpdate(a[ID_COLUMN], {"qty": 99}, 999, "stale A"),
+                RowUpdate(c[ID_COLUMN], {"qty": 33}, _version(c), "C"),
+            ],
             deletes=[RowDelete("no-such-row", None, "ghost")],
         ),
         admin,
@@ -527,7 +610,9 @@ def test_apply_changes_conflicts_do_not_block_other_rows(backend: DuckDBBackend,
     assert int(_row(after, "A001")["qty"]) == 10
 
 
-def test_apply_changes_not_null_violation_rolls_back_whole_batch(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_apply_changes_not_null_violation_rolls_back_whole_batch(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     a = _row(backend.read_rows(sample_form), "A001")
     history_before = len(backend.get_history(sample_form))
     with pytest.raises((BackendError, duckdb.Error), match="NOT NULL"):
@@ -535,7 +620,7 @@ def test_apply_changes_not_null_violation_rolls_back_whole_batch(backend: DuckDB
             sample_form,
             ChangeSet(
                 inserts=[RowInsert({"code": "OK1"}), RowInsert({"code": None, "category": "Hardware"})],
-                updates=[RowUpdate(a[ID_COLUMN], {"qty": 555}, _updated_at(a))],
+                updates=[RowUpdate(a[ID_COLUMN], {"qty": 555}, _version(a))],
             ),
             admin,
         )
@@ -544,13 +629,20 @@ def test_apply_changes_not_null_violation_rolls_back_whole_batch(backend: DuckDB
     assert int(_row(after, "A001")["qty"]) == 10
     assert len(backend.get_history(sample_form)) == history_before
     # the backend is still usable after the rollback
-    assert backend.apply_changes(sample_form, ChangeSet(inserts=[RowInsert({"code": "OK2"})]), admin).inserted == 1
+    assert (
+        backend.apply_changes(sample_form, ChangeSet(inserts=[RowInsert({"code": "OK2"})]), admin).inserted
+        == 1
+    )
 
 
-def test_apply_changes_update_to_null_on_required_column_rolls_back(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_apply_changes_update_to_null_on_required_column_rolls_back(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     a = _row(backend.read_rows(sample_form), "A001")
     with pytest.raises((BackendError, duckdb.Error)):
-        backend.apply_changes(sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"code": None}, _updated_at(a))]), admin)
+        backend.apply_changes(
+            sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"code": None}, _version(a))]), admin
+        )
     assert _row(backend.read_rows(sample_form), "A001")[UPDATED_AT_COLUMN] == a[UPDATED_AT_COLUMN]
 
 
@@ -565,7 +657,9 @@ def test_apply_changes_empty_changeset(backend: DuckDBBackend, admin: User, samp
 # ======================================================================================
 
 
-def test_append_rows_fills_missing_columns_and_parses_date_strings(backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch):
+def test_append_rows_fills_missing_columns_and_parses_date_strings(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch
+):
     _freeze(monkeypatch, T2)
     other = User("importer@example.org")
     rows = pd.DataFrame(
@@ -580,7 +674,7 @@ def test_append_rows_fills_missing_columns_and_parses_date_strings(backend: Duck
     df = backend.read_rows(sample_form)
     assert backend.count_rows(sample_form) == 6
     x1, x2 = _row(df, "X1"), _row(df, "X2")
-    assert x1["start_date"] == pd.Timestamp("2024-05-01") and pd.isna(x2["start_date"])
+    assert x1["start_date"] == date(2024, 5, 1) and pd.isna(x2["start_date"])
     assert x1["last_seen"] == pd.Timestamp("2024-05-01 10:30:00")
     assert x2["last_seen"] == pd.Timestamp("2024-06-01 08:00:00")
     assert x1["category"] is None and pd.isna(x1["qty"]) and pd.isna(x1["active"])
@@ -599,7 +693,9 @@ def test_append_rows_empty_frame_inserts_nothing(backend: DuckDBBackend, admin: 
     assert backend.count_rows(sample_form) == 4
 
 
-def test_append_rows_not_null_violation_is_backend_error_and_rolls_back(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_append_rows_not_null_violation_is_backend_error_and_rolls_back(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     rows = pd.DataFrame({"code": ["OK", None], "qty": [1, 2]})
     with pytest.raises(BackendError, match="Import failed"):
         backend.append_rows(sample_form, rows, admin)
@@ -612,14 +708,27 @@ def test_append_rows_not_null_violation_is_backend_error_and_rolls_back(backend:
 # ======================================================================================
 
 
-def test_get_history_newest_first_with_change_types_and_images(backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch):
+def test_get_history_newest_first_with_change_types_and_images(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch
+):
     df = backend.read_rows(sample_form)
     a, b = _row(df, "A001"), _row(df, "B002")
     _freeze(monkeypatch, T1, T2)
-    backend.apply_changes(sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"qty": 11, "ratio": 0.9, "category": "Hardware"}, _updated_at(a))]), User("upd"))
-    backend.apply_changes(sample_form, ChangeSet(deletes=[RowDelete(b[ID_COLUMN], _updated_at(b))]), User("del"))
+    backend.apply_changes(
+        sample_form,
+        ChangeSet(
+            updates=[RowUpdate(a[ID_COLUMN], {"qty": 11, "ratio": 0.9, "category": "Hardware"}, _version(a))]
+        ),
+        User("upd"),
+    )
+    backend.apply_changes(sample_form, ChangeSet(deletes=[RowDelete(b[ID_COLUMN], _version(b))]), User("del"))
     history = backend.get_history(sample_form)
-    assert history.columns.tolist() == [*HISTORY_COLUMNS, "changed_fields", ID_COLUMN, *[c.name for c in sample_form.user_columns]]
+    assert history.columns.tolist() == [
+        *HISTORY_COLUMNS,
+        "changed_fields",
+        ID_COLUMN,
+        *[c.name for c in sample_form.user_columns],
+    ]
     assert len(history) == 6  # 4 inserts + update + delete
     assert history["version"].is_monotonic_decreasing
     assert history["change_type"].tolist() == ["delete", "update", "insert", "insert", "insert", "insert"]
@@ -654,7 +763,9 @@ def test_get_history_for_form_without_changes(backend: DuckDBBackend, admin: Use
 # ======================================================================================
 
 
-def test_add_column_persists_description_and_config(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_add_column_persists_description_and_config(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     new = ColumnDef("colour", DataType.STRING, "Colour", nullable=False, options=["Red", "Blue"])
     form = backend.add_column(sample_form, new, admin)
     col = form.column("colour")
@@ -701,7 +812,9 @@ def test_drop_column_removes_column_and_config(backend: DuckDBBackend, admin: Us
 
 
 @pytest.mark.parametrize("name", SYSTEM_COLUMNS)
-def test_drop_column_protects_system_columns(backend: DuckDBBackend, admin: User, sample_form: FormDef, name: str):
+def test_drop_column_protects_system_columns(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef, name: str
+):
     with pytest.raises(BackendError, match="System columns cannot be removed"):
         backend.drop_column(sample_form, name, admin)
 
@@ -711,7 +824,9 @@ def test_drop_column_missing(backend: DuckDBBackend, admin: User, sample_form: F
         backend.drop_column(sample_form, "ghost", admin)
 
 
-def test_update_form_metadata_persists_descriptions_owner_and_config(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_update_form_metadata_persists_descriptions_owner_and_config(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
     form.description = "New description"
     form.display_name = "Product Catalogue"
@@ -740,13 +855,20 @@ def test_update_form_metadata_toggles_not_null(backend: DuckDBBackend, admin: Us
     relaxed = backend.update_form_metadata(form, admin)
     assert relaxed.column("code").nullable is True
     # now nulls are allowed on code
-    assert backend.apply_changes(relaxed, ChangeSet(inserts=[RowInsert({"category": "Hardware"})]), admin).inserted == 1
+    assert (
+        backend.apply_changes(
+            relaxed, ChangeSet(inserts=[RowInsert({"category": "Hardware"})]), admin
+        ).inserted
+        == 1
+    )
     relaxed.column("code").nullable = False
     with pytest.raises(BackendError, match="Cannot make 'code' required"):
         backend.update_form_metadata(relaxed, admin)
 
 
-def test_update_form_metadata_not_null_failure_rolls_back_everything(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_update_form_metadata_not_null_failure_rolls_back_everything(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
     form.description = "should not persist"
     form.column("category").nullable = False  # D004 has no category
@@ -757,9 +879,13 @@ def test_update_form_metadata_not_null_failure_rolls_back_everything(backend: Du
     assert fresh.column("category").nullable is True
 
 
-def test_update_form_metadata_set_not_null_when_no_nulls(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_update_form_metadata_set_not_null_when_no_nulls(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     c = _row(backend.read_rows(sample_form), "C003")
-    backend.apply_changes(sample_form, ChangeSet(updates=[RowUpdate(c[ID_COLUMN], {"qty": 30}, _updated_at(c))]), admin)
+    backend.apply_changes(
+        sample_form, ChangeSet(updates=[RowUpdate(c[ID_COLUMN], {"qty": 30}, _version(c))]), admin
+    )
     form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
     form.column("qty").nullable = False
     updated = backend.update_form_metadata(form, admin)
@@ -779,7 +905,9 @@ def test_update_form_metadata_errors(backend: DuckDBBackend, admin: User, sample
         backend.update_form_metadata(FormDef(SAMPLE_DOMAIN, SAMPLE_FORM), admin)
 
 
-def test_drop_form_removes_table_metadata_and_history(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+def test_drop_form_removes_table_metadata_and_history(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
     assert _meta_count(backend, "object_properties", table_name=SAMPLE_FORM) > 0
     assert _meta_count(backend, "change_log", table_name=SAMPLE_FORM) == 4
     backend.drop_form(sample_form, admin)
@@ -794,7 +922,11 @@ def test_drop_form_removes_table_metadata_and_history(backend: DuckDBBackend, ad
         backend.drop_form(sample_form, admin)
     # the name can be reused and starts from a clean slate
     recreated = backend.create_form(FormDef(SAMPLE_DOMAIN, SAMPLE_FORM, columns=[ColumnDef("only")]), admin)
-    assert recreated.row_count == 0 and recreated.display_name == "" and [c.name for c in recreated.user_columns] == ["only"]
+    assert (
+        recreated.row_count == 0
+        and recreated.display_name == ""
+        and [c.name for c in recreated.user_columns] == ["only"]
+    )
 
 
 # ======================================================================================
@@ -857,7 +989,11 @@ def test_grant_replace_and_revoke(backend: DuckDBBackend, admin: User):
     _domains(backend, admin, "a")
     backend.grant_domain_role("a", "zeta", Role.EDITOR, admin)
     backend.grant_domain_role("a", "  beta  ", Role.VIEWER, admin)
-    assert backend.list_domain_grants("a") == [(admin.username, Role.ADMIN), ("beta", Role.VIEWER), ("zeta", Role.EDITOR)]
+    assert backend.list_domain_grants("a") == [
+        (admin.username, Role.ADMIN),
+        ("beta", Role.VIEWER),
+        ("zeta", Role.EDITOR),
+    ]
     backend.grant_domain_role("a", "zeta", Role.VIEWER, admin)  # replaces
     assert dict(backend.list_domain_grants("a"))["zeta"] is Role.VIEWER
     backend.grant_domain_role("a", "zeta", Role.NONE, admin)  # revokes
@@ -890,10 +1026,14 @@ def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
     try:
         assert path.exists() and b.describe() == f"DuckDB ({path})"
         b.create_domain(DomainDef("dom", display_name="Dom", description="persisted"), admin)
-        form = b.create_form(FormDef("dom", "frm", display_name="Frm", columns=sample_columns()), admin, sample_rows())
+        form = b.create_form(
+            FormDef("dom", "frm", display_name="Frm", columns=sample_columns()), admin, sample_rows()
+        )
         b.grant_domain_role("dom", "readers", Role.VIEWER, admin)
         row = _row(b.read_rows(form), "A001")
-        b.apply_changes(form, ChangeSet(updates=[RowUpdate(row[ID_COLUMN], {"qty": 12}, _updated_at(row))]), admin)
+        b.apply_changes(
+            form, ChangeSet(updates=[RowUpdate(row[ID_COLUMN], {"qty": 12}, _version(row))]), admin
+        )
     finally:
         b.close()
 
@@ -904,7 +1044,11 @@ def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
         assert domain.display_name == "Dom" and domain.description == "persisted" and domain.form_count == 1
         form = reopened.get_form("dom", "frm")
         assert form.row_count == 4 and form.display_name == "Frm"
-        assert form.column("code").is_key and form.column("category").options == ["Hardware", "Software", "Service"]
+        assert form.column("code").is_key and form.column("category").options == [
+            "Hardware",
+            "Software",
+            "Service",
+        ]
         df = reopened.read_rows(form)
         assert sorted(df["code"].tolist()) == ["A001", "B002", "C003", "D004"]
         assert int(_row(df, "A001")["qty"]) == 12
@@ -913,7 +1057,10 @@ def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
         assert reopened.list_domain_grants("dom") == [(admin.username, Role.ADMIN), ("readers", Role.VIEWER)]
         assert reopened.get_permissions(User("x", groups=("readers",))).role_for("dom") is Role.VIEWER
         # the meta schema is created idempotently
-        assert reopened.apply_changes(form, ChangeSet(inserts=[RowInsert({"code": "E005"})]), admin).inserted == 1
+        assert (
+            reopened.apply_changes(form, ChangeSet(inserts=[RowInsert({"code": "E005"})]), admin).inserted
+            == 1
+        )
     finally:
         reopened.close()
 
@@ -925,7 +1072,11 @@ def test_close_is_idempotent(backend: DuckDBBackend):
 
 def test_seeded_backend_contains_demo_content(seeded_backend: DuckDBBackend):
     domains = {d.name: d for d in seeded_backend.list_domains()}
-    assert set(domains) == {"student__survey_service_improvement", "finance__cost_management", "hr__reference"}
+    assert set(domains) == {
+        "student__survey_service_improvement",
+        "finance__cost_management",
+        "hr__reference",
+    }
     assert domains["finance__cost_management"].form_count == 2
     assert domains["hr__reference"].display_name == "HR Reference"
     forms = {(f.domain, f.name): f for d in domains for f in seeded_backend.list_forms(d)}
@@ -938,7 +1089,13 @@ def test_seeded_backend_contains_demo_content(seeded_backend: DuckDBBackend):
     }
     questions = seeded_backend.get_form("student__survey_service_improvement", "survey_questions")
     assert questions.row_count == 6
-    assert questions.column("category").options == ["Teaching", "Assessment", "Support", "Facilities", "Overall"]
+    assert questions.column("category").options == [
+        "Teaching",
+        "Assessment",
+        "Support",
+        "Facilities",
+        "Overall",
+    ]
     assert [c.name for c in questions.key_columns] == ["question_code"]
     grants = dict(seeded_backend.list_domain_grants("finance__cost_management"))
     assert grants["finance_stewards"] is Role.EDITOR and grants["finance_readers"] is Role.VIEWER

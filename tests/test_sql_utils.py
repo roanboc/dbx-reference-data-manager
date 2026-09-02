@@ -26,7 +26,9 @@ def test_quote_ident_default_and_backtick():
     assert quote_ident("_id") == '"_id"'
 
 
-@pytest.mark.parametrize("bad", ['a"b', "a`b", "a;drop table x", "Abc", "1abc", "", "a b", "x" * 64, "a-b", "a.b"])
+@pytest.mark.parametrize(
+    "bad", ['a"b', "a`b", "a;drop table x", "Abc", "1abc", "", "a b", "x" * 64, "a-b", "a.b"]
+)
 def test_quote_ident_rejects_bad_identifiers(bad):
     with pytest.raises(ValueError, match="Invalid identifier"):
         quote_ident(bad)

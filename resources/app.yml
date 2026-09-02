@@ -14,9 +14,9 @@ resources:
       # Runtime configuration. Mirrors app.yaml at the repository root (which serves
       # `databricks apps deploy` / `run-local`); when deployed by the bundle this block wins.
       # Do not set the variables the runtime injects (DATABRICKS_HOST, DATABRICKS_CLIENT_ID/
-      # SECRET, DATABRICKS_APP_*, STREAMLIT_SERVER_*).
+      # SECRET, DATABRICKS_APP_*, DATABRICKS_APP_PORT).
       config:
-        command: ["streamlit", "run", "app.py"]
+        command: ["python", "app.py"]
         env:
           - name: DATABRICKS_WAREHOUSE_ID
             value_from: sql-warehouse            # resolved from the app resource below
@@ -25,9 +25,7 @@ resources:
           - name: RDM_AUTH
             value: databricks                    # identity from the X-Forwarded-* headers
           - name: RDM_CATALOG
-            value: ${resources.catalogs.forms.name}
-          - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
-            value: "false"                       # same value the runtime sets; never anything else
+            value: ${resources.catalogs.forms.name}                       # same value the runtime sets; never anything else
           # - name: RDM_MAX_ROWS
           #   value: "5000"
 

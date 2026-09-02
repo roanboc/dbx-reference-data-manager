@@ -1,0 +1,253 @@
+"""Application shell: header, navigation sidebar and the routed page container."""
+
+from __future__ import annotations
+
+from urllib.parse import quote
+
+import dash_mantine_components as dmc
+from dash import dcc, html
+
+from rdm.config import APP_TITLE
+from rdm.models import Role
+from rdm.services import NavDomain
+from rdm.ui import ids
+from rdm.ui.components import ROLE_COLORS, ROLE_ICONS, icon, link_button, role_badge
+from rdm.ui.context import AppContext
+
+THEME = {
+    "primaryColor": "indigo",
+    "fontFamily": "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+    "defaultRadius": "md",
+    "headings": {"fontWeight": "650"},
+}
+
+
+def form_href(domain: str, form: str) -> str:
+    return f"/f/{quote(domain)}/{quote(form)}"
+
+
+def domain_href(domain: str) -> str:
+    return f"/d/{quote(domain)}"
+
+
+def shell() -> dmc.MantineProvider:
+    return dmc.MantineProvider(
+        theme=THEME,
+        children=[
+            dcc.Location(id=ids.URL, refresh=False),
+            dcc.Store(id=ids.PERSONA, storage_type="session"),
+            dcc.Store(id=ids.NAV_VERSION, data=0),
+            dcc.Download(id=ids.DOWNLOAD),
+            dmc.NotificationContainer(id=ids.NOTIFY, position="top-right"),
+            dmc.AppShell(
+                [
+                    dmc.AppShellHeader(html.Div(id="header-content"), px="md"),
+                    dmc.AppShellNavbar(
+                        id="navbar",
+                        children=dmc.Stack(
+                            [
+                                dmc.TextInput(
+                                    id=ids.NAV_SEARCH,
+                                    placeholder="Search forms by name or description",
+                                    leftSection=icon("tabler:search"),
+                                    debounce=350,
+                                    size="sm",
+                                ),
+                                html.Div(
+                                    id=ids.NAVBAR,
+                                    style={
+                                        "flex": 1,
+                                        "minHeight": 0,
+                                        "display": "flex",
+                                        "flexDirection": "column",
+                                    },
+                                ),
+                            ],
+                            gap="sm",
+                            h="100%",
+                        ),
+                        p="sm",
+                    ),
+                    dmc.AppShellMain(
+                        dmc.Container(html.Div(id=ids.PAGE), size="xl", px="md", py="md", fluid=True)
+                    ),
+                ],
+                header={"height": 56},
+                navbar={"width": 330, "breakpoint": "sm", "collapsed": {"mobile": True}},
+                padding="md",
+            ),
+        ],
+    )
+
+
+def header(ctx: AppContext, persona: str | None) -> dmc.Group:
+    left = dmc.Group(
+        [
+            dmc.ThemeIcon(icon("tabler:table-options", 20), size="lg", radius="md", variant="light"),
+            dmc.Title(APP_TITLE, order=4),
+            dmc.Badge(ctx.backend.describe(), variant="outline", color="gray", size="sm"),
+        ],
+        gap="sm",
+    )
+    if ctx.auth.supports_persona_switching:
+        personas = ctx.auth.personas()
+        current = persona if persona in {p.key for p in personas} else ctx.settings.persona
+        right = dmc.Group(
+            [
+                dmc.Text("Local persona", size="sm", c="dimmed"),
+                dmc.Select(
+                    id=ids.PERSONA_SELECT,
+                    data=[{"value": p.key, "label": p.label} for p in personas],
+                    value=current,
+                    size="sm",
+                    w=200,
+                    allowDeselect=False,
+                    leftSection=icon("tabler:user-circle"),
+                ),
+            ],
+            gap="xs",
+        )
+    else:
+        mode = "queries run as you" if ctx.auth.access_token() else "queries run as the app service principal"
+        right = dmc.Group(
+            [
+                icon("tabler:user-circle", 20),
+                dmc.Stack(
+                    [dmc.Text(ctx.user.label, size="sm", fw=500), dmc.Text(mode, size="xs", c="dimmed")],
+                    gap=0,
+                ),
+            ],
+            gap="xs",
+        )
+    return dmc.Group([left, right], justify="space-between", h=56)
+
+
+def navbar(ctx: AppContext, items: list[NavDomain], pathname: str, search: str | None) -> dmc.Stack:
+    perms = ctx.permissions
+    persona = ctx.auth.personas()
+    caption = next((p.description for p in persona if p.user.username == ctx.user.username), "")
+    blocks = []
+    if caption:
+        blocks.append(dmc.Text(caption, size="xs", c="dimmed"))
+    if not items:
+        blocks.append(
+            dmc.Alert(
+                "No matches. Try another word."
+                if search
+                else "You have not been granted access to any domain yet.",
+                color="gray",
+                variant="light",
+                icon=icon("tabler:search-off" if search else "tabler:lock"),
+            )
+        )
+    current_domain = _current_domain(pathname)
+    accordion_items = []
+    opened = []
+    for item in items:
+        d = item.domain
+        if search or d.name == current_domain:
+            opened.append(d.name)
+        links = [
+            dmc.NavLink(
+                label="Domain overview",
+                href=domain_href(d.name),
+                active=pathname == domain_href(d.name),
+                leftSection=icon("tabler:folder-open"),
+                variant="light",
+            )
+        ]
+        for f in item.forms:
+            links.append(
+                dmc.NavLink(
+                    label=f.title,
+                    description=(f.description[:80] + "…")
+                    if f.description and len(f.description) > 80
+                    else (f.description or None),
+                    href=form_href(d.name, f.name),
+                    active=pathname == form_href(d.name, f.name),
+                    leftSection=icon("tabler:table"),
+                    variant="light",
+                )
+            )
+        if not item.forms:
+            links.append(
+                dmc.Text(
+                    "No forms yet." + (" Use New form to create one." if item.role.can_admin else ""),
+                    size="xs",
+                    c="dimmed",
+                    px="sm",
+                )
+            )
+        accordion_items.append(
+            dmc.AccordionItem(
+                [
+                    dmc.AccordionControl(
+                        dmc.Group(
+                            [
+                                dmc.Text(d.title, size="sm", fw=600),
+                                dmc.Badge(
+                                    item.role.label, size="xs", color=ROLE_COLORS[item.role], variant="light"
+                                ),
+                            ],
+                            justify="space-between",
+                            wrap="nowrap",
+                        ),
+                        icon=icon(ROLE_ICONS[item.role]),
+                    ),
+                    dmc.AccordionPanel(dmc.Stack(links, gap=0)),
+                ],
+                value=d.name,
+            )
+        )
+    if accordion_items:
+        blocks.append(
+            dmc.ScrollArea(
+                dmc.Accordion(
+                    accordion_items, multiple=True, value=opened, variant="separated", chevronPosition="left"
+                ),
+                type="auto",
+                style={"flex": 1},
+            )
+        )
+    actions = []
+    if perms.is_admin_anywhere:
+        actions.append(
+            link_button(
+                "New form",
+                "/new-form",
+                leftSection=icon("tabler:circle-plus"),
+                variant="light",
+                fullWidth=True,
+                disabled=not perms.admin_domains,
+            )
+        )
+    if perms.can_create_domain:
+        actions.append(
+            link_button(
+                "New domain",
+                "/new-domain",
+                leftSection=icon("tabler:folder-plus"),
+                variant="light",
+                fullWidth=True,
+            )
+        )
+    actions.append(
+        link_button("Home", "/", leftSection=icon("tabler:home"), variant="subtle", fullWidth=True)
+    )
+    blocks.append(dmc.Divider())
+    blocks.append(dmc.Stack(actions, gap="xs"))
+    blocks.append(
+        dmc.Group(
+            [dmc.Text("Roles:", size="xs", c="dimmed")]
+            + [role_badge(r, size="xs") for r in (Role.VIEWER, Role.EDITOR, Role.ADMIN)],
+            gap=4,
+        )
+    )
+    return dmc.Stack(blocks, gap="sm", h="100%")
+
+
+def _current_domain(pathname: str) -> str | None:
+    parts = [p for p in (pathname or "").split("/") if p]
+    if len(parts) >= 2 and parts[0] in ("d", "f"):
+        return parts[1]
+    return None

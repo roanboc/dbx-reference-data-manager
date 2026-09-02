@@ -83,7 +83,9 @@ def test_databricks_provider_reads_identity_headers(fake_groups):
     assert provider.name == "databricks"
     assert not provider.supports_persona_switching and provider.personas() == []
     user = provider.current_user()
-    assert user == User(username="jane", display_name="jane", groups=("group_a", "group_b"), email="jane@example.org")
+    assert user == User(
+        username="jane", display_name="jane", groups=("group_a", "group_b"), email="jane@example.org"
+    )
     assert provider.access_token() == "tok-123"
     assert fake_groups == [("jane", "tok-123")]
     assert provider.current_user("viewer") == user  # persona is ignored
@@ -103,7 +105,9 @@ def test_databricks_provider_username_only(fake_groups):
     assert user.username == "svc" and user.email is None
 
 
-@pytest.mark.parametrize("headers", [{}, None, {HEADER_ACCESS_TOKEN: "tok"}, {HEADER_EMAIL: "", HEADER_USERNAME: ""}])
+@pytest.mark.parametrize(
+    "headers", [{}, None, {HEADER_ACCESS_TOKEN: "tok"}, {HEADER_EMAIL: "", HEADER_USERNAME: ""}]
+)
 def test_databricks_provider_without_identity_headers_raises(fake_groups, headers):
     provider = DatabricksAuthProvider(lambda: headers)
     with pytest.raises(RuntimeError, match="No user identity headers"):
@@ -190,7 +194,9 @@ def test_groups_for_lookup_failure_is_best_effort(monkeypatch):
             raise ConnectionError("no workspace")
 
     monkeypatch.setattr("databricks.sdk.WorkspaceClient", Broken)
-    provider = DatabricksAuthProvider(lambda: {HEADER_USERNAME: "jane", HEADER_ACCESS_TOKEN: "tok"}, group_cache_ttl=0)
+    provider = DatabricksAuthProvider(
+        lambda: {HEADER_USERNAME: "jane", HEADER_ACCESS_TOKEN: "tok"}, group_cache_ttl=0
+    )
     user = provider.current_user()
     assert user.groups == ()
     assert user.principals == {"jane"}
@@ -212,7 +218,13 @@ def test_settings_defaults_from_empty_env():
 
 
 def test_settings_databricks_backend_defaults_auth_and_derives_http_path():
-    s = Settings.from_env({"RDM_BACKEND": " Databricks ", "DATABRICKS_HOST": "https://x.cloud.databricks.com", "DATABRICKS_WAREHOUSE_ID": "abc123"})
+    s = Settings.from_env(
+        {
+            "RDM_BACKEND": " Databricks ",
+            "DATABRICKS_HOST": "https://x.cloud.databricks.com",
+            "DATABRICKS_WAREHOUSE_ID": "abc123",
+        }
+    )
     assert s.backend == "databricks" and s.is_databricks
     assert s.auth == "databricks"
     assert s.databricks_host == "https://x.cloud.databricks.com"
@@ -222,7 +234,9 @@ def test_settings_databricks_backend_defaults_auth_and_derives_http_path():
 
 
 def test_settings_explicit_http_path_wins_over_warehouse_id():
-    s = Settings.from_env({"DATABRICKS_WAREHOUSE_ID": "abc123", "DATABRICKS_HTTP_PATH": "/sql/1.0/warehouses/custom"})
+    s = Settings.from_env(
+        {"DATABRICKS_WAREHOUSE_ID": "abc123", "DATABRICKS_HTTP_PATH": "/sql/1.0/warehouses/custom"}
+    )
     assert s.warehouse_http_path == "/sql/1.0/warehouses/custom"
     assert Settings(databricks_warehouse_id="w1").warehouse_http_path == "/sql/1.0/warehouses/w1"
     assert Settings(databricks_http_path="/p", databricks_warehouse_id="w1").warehouse_http_path == "/p"
@@ -261,7 +275,14 @@ def test_settings_invalid_integer_raises():
 
 def test_settings_from_process_environment(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)  # no .env file here
-    for key in ("RDM_BACKEND", "RDM_AUTH", "RDM_PERSONA", "RDM_MAX_ROWS", "DATABRICKS_WAREHOUSE_ID", "DATABRICKS_HTTP_PATH"):
+    for key in (
+        "RDM_BACKEND",
+        "RDM_AUTH",
+        "RDM_PERSONA",
+        "RDM_MAX_ROWS",
+        "DATABRICKS_WAREHOUSE_ID",
+        "DATABRICKS_HTTP_PATH",
+    ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("RDM_PERSONA", "VIEWER")
     monkeypatch.setenv("RDM_MAX_ROWS", "42")

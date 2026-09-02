@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import numpy as np
 import pandas as pd
 import pytest
-from conftest import SAMPLE_OPTIONS, sample_columns
 
+from conftest import sample_columns
 from rdm.backend.base import PermissionDenied
 from rdm.backend.duckdb_backend import DuckDBBackend
 from rdm.models import (
     ID_COLUMN,
     UPDATED_AT_COLUMN,
+    VERSION_COLUMN,
     ChangeSet,
     ColumnDef,
     DataType,
@@ -59,15 +60,20 @@ T_LOADED = datetime(2024, 1, 1, 12, 0, 0)
 
 
 def make_form(columns: list[ColumnDef] | None = None) -> FormDef:
-    return FormDef("dom", "frm", columns=system_columns() + (columns if columns is not None else sample_columns()))
+    return FormDef(
+        "dom", "frm", columns=system_columns() + (columns if columns is not None else sample_columns())
+    )
 
 
-def make_snapshot(form: FormDef, rows: list[dict], loaded_at: datetime | None = T_LOADED) -> pd.DataFrame:
+def make_snapshot(
+    form: FormDef, rows: list[dict], loaded_at: datetime | None = T_LOADED, version: int | None = 1
+) -> pd.DataFrame:
     """A DataFrame shaped like ``backend.read_rows`` output for the given user values."""
     records = []
     for i, values in enumerate(rows, 1):
         rec = {
             ID_COLUMN: f"row-{i:04d}",
+            VERSION_COLUMN: version,
             "_created_at": loaded_at,
             "_created_by": "seed",
             UPDATED_AT_COLUMN: loaded_at,
@@ -82,9 +88,33 @@ def make_snapshot(form: FormDef, rows: list[dict], loaded_at: datetime | None = 
 
 
 SNAPSHOT_ROWS = [
-    {"code": "A001", "category": "Hardware", "qty": 10, "price": 9.99, "ratio": 0.5, "active": True, "start_date": date(2024, 1, 1)},
-    {"code": "B002", "category": "Software", "qty": 20, "price": 120.5, "ratio": 0.25, "active": False, "start_date": date(2024, 2, 15)},
-    {"code": "C003", "category": "Service", "qty": None, "price": 0.05, "ratio": 1.0, "active": True, "start_date": None},
+    {
+        "code": "A001",
+        "category": "Hardware",
+        "qty": 10,
+        "price": 9.99,
+        "ratio": 0.5,
+        "active": True,
+        "start_date": date(2024, 1, 1),
+    },
+    {
+        "code": "B002",
+        "category": "Software",
+        "qty": 20,
+        "price": 120.5,
+        "ratio": 0.25,
+        "active": False,
+        "start_date": date(2024, 2, 15),
+    },
+    {
+        "code": "C003",
+        "category": "Service",
+        "qty": None,
+        "price": 0.05,
+        "ratio": 1.0,
+        "active": True,
+        "start_date": None,
+    },
 ]
 
 
@@ -152,7 +182,16 @@ def test_coerce_integer(value, expected):
     assert result == expected and type(result) is int
 
 
-@pytest.mark.parametrize(("value", "message"), [(12.5, "whole number"), ("12.5", "whole number"), (Decimal("1.5"), "whole number"), ("abc", "not a valid whole number"), ("1/2", "not a valid")])
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (12.5, "whole number"),
+        ("12.5", "whole number"),
+        (Decimal("1.5"), "whole number"),
+        ("abc", "not a valid whole number"),
+        ("1/2", "not a valid"),
+    ],
+)
 def test_coerce_integer_errors(value, message):
     with pytest.raises(CoercionError, match=message):
         coerce_value(INTEGER, value)
@@ -178,7 +217,7 @@ def test_coerce_integer_keeps_precision_above_2_pow_53():
         (1.1, Decimal("1.10")),
         (3, Decimal("3.00")),
         (np.float64(2.5), Decimal("2.50")),
-        (Decimal("99999999.999"), Decimal("100000000.00")),
+        (Decimal("9999999.999"), Decimal("10000000.00")),
         (" 10 ", Decimal("10.00")),
     ],
 )
@@ -196,8 +235,12 @@ def test_coerce_decimal_scale_zero_and_default_scale():
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        ("123456789.00", "too large for DECIMAL(10,2)"),
-        (Decimal("99999999.999"), None),  # rounds to 100000000.00: exactly 10 digits -> fine
+        ("123456789.00", "too large for DECIMAL"),
+        (
+            Decimal("99999999.999"),
+            "too large for DECIMAL",
+        ),  # rounds to 100000000.00: 11 digits > precision 10
+        (Decimal("9999999.999"), None),  # rounds to 10000000.00: exactly 10 digits -> fine
         ("abc", "not a valid decimal"),
         ("nan", "finite"),
         ("inf", "finite"),
@@ -207,7 +250,7 @@ def test_coerce_decimal_scale_zero_and_default_scale():
 )
 def test_coerce_decimal_errors(value, message):
     if message is None:
-        assert coerce_value(DECIMAL_10_2, value) == Decimal("100000000.00")
+        assert coerce_value(DECIMAL_10_2, value) == Decimal("10000000.00")
         return
     with pytest.raises(CoercionError, match=message):
         coerce_value(DECIMAL_10_2, value)
@@ -221,14 +264,25 @@ def test_coerce_decimal_too_large_after_rounding():
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [("1,234.5", 1234.5), ("1 234.5", 1234.5), (3, 3.0), (np.int64(3), 3.0), (Decimal("0.1"), 0.1), (2.5, 2.5), ("-1e-3", -0.001)],
+    [
+        ("1,234.5", 1234.5),
+        ("1 234.5", 1234.5),
+        (3, 3.0),
+        (np.int64(3), 3.0),
+        (Decimal("0.1"), 0.1),
+        (2.5, 2.5),
+        ("-1e-3", -0.001),
+    ],
 )
 def test_coerce_double(value, expected):
     result = coerce_value(DOUBLE, value)
     assert result == expected and type(result) is float
 
 
-@pytest.mark.parametrize(("value", "message"), [("abc", "not a valid floating point"), (True, "must be a number"), (False, "must be a number")])
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [("abc", "not a valid floating point"), (True, "must be a number"), (False, "must be a number")],
+)
 def test_coerce_double_errors(value, message):
     with pytest.raises(CoercionError, match=message):
         coerce_value(DOUBLE, value)
@@ -304,7 +358,7 @@ def test_coerce_date_errors(value):
         ("2024-01-15T10:30:00Z", datetime(2024, 1, 15, 10, 30)),
         (datetime(2024, 1, 15, 10, 30), datetime(2024, 1, 15, 10, 30)),
         (datetime(2024, 1, 15, 10, 30, tzinfo=timezone(timedelta(hours=-5))), datetime(2024, 1, 15, 15, 30)),
-        (datetime(2024, 1, 15, 10, 30, tzinfo=timezone.utc), datetime(2024, 1, 15, 10, 30)),
+        (datetime(2024, 1, 15, 10, 30, tzinfo=UTC), datetime(2024, 1, 15, 10, 30)),
         (pd.Timestamp("2024-01-15 10:30:00.123456"), datetime(2024, 1, 15, 10, 30, 0, 123456)),
         (pd.Timestamp("2024-01-15 10:30", tz="Europe/Paris"), datetime(2024, 1, 15, 9, 30)),
         (date(2024, 1, 15), datetime(2024, 1, 15, 0, 0)),
@@ -334,7 +388,11 @@ def test_coerce_other_is_read_only():
 
 
 def test_editor_state_from_session_normalises_keys():
-    raw = {"edited_rows": {"3": {"qty": "5"}, 1: {"code": "x"}}, "added_rows": [{"code": "n"}], "deleted_rows": ["2", 4]}
+    raw = {
+        "edited_rows": {"3": {"qty": "5"}, 1: {"code": "x"}},
+        "added_rows": [{"code": "n"}],
+        "deleted_rows": ["2", 4],
+    }
     state = EditorState.from_session(raw)
     assert state.edited_rows == {3: {"qty": "5"}, 1: {"code": "x"}}
     assert state.added_rows == [{"code": "n"}]
@@ -345,7 +403,15 @@ def test_editor_state_from_session_normalises_keys():
     assert state.added_rows[0]["code"] == "n"
 
 
-@pytest.mark.parametrize("raw", [None, {}, {"edited_rows": {}, "added_rows": [], "deleted_rows": []}, {"edited_rows": None, "added_rows": None, "deleted_rows": None}])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        {},
+        {"edited_rows": {}, "added_rows": [], "deleted_rows": []},
+        {"edited_rows": None, "added_rows": None, "deleted_rows": None},
+    ],
+)
 def test_editor_state_from_session_empty(raw):
     state = EditorState.from_session(raw)
     assert state.is_empty
@@ -399,18 +465,18 @@ def test_build_changeset_maps_positions_to_ids_and_tokens():
     [upd] = changes.updates
     assert upd.row_id == "row-0002"
     assert upd.changes == {"qty": 25, "category": "Service", "active": False}
-    assert upd.expected_updated_at == T_LOADED and type(upd.expected_updated_at) is datetime
+    assert upd.expected_version == 1 and type(upd.expected_version) is int
     assert upd.label == "Row code=B002"
     [dele] = changes.deletes
-    assert dele.row_id == "row-0003" and dele.expected_updated_at == T_LOADED and dele.label == "Row code=C003"
+    assert dele.row_id == "row-0003" and dele.expected_version == 1 and dele.label == "Row code=C003"
 
 
-def test_build_changeset_expected_token_is_none_when_snapshot_has_no_timestamp():
+def test_build_changeset_expected_token_is_none_when_snapshot_has_no_version():
     form = make_form()
-    snapshot = make_snapshot(form, SNAPSHOT_ROWS, loaded_at=None)
+    snapshot = make_snapshot(form, SNAPSHOT_ROWS, loaded_at=None, version=None)
     changes, _ = build_changeset(form, snapshot, EditorState(edited_rows={0: {"qty": 1}}, deleted_rows=[1]))
-    assert changes.updates[0].expected_updated_at is None
-    assert changes.deletes[0].expected_updated_at is None
+    assert changes.updates[0].expected_version is None
+    assert changes.deletes[0].expected_version is None
 
 
 def test_build_changeset_ignores_system_and_unknown_columns():
@@ -437,7 +503,9 @@ def test_build_changeset_ignores_edits_to_deleted_and_out_of_range_positions():
 def test_build_changeset_required_options_and_type_issues():
     form = make_form()
     snapshot = make_snapshot(form, SNAPSHOT_ROWS)
-    state = EditorState(edited_rows={0: {"code": "", "category": "Toys", "qty": "abc", "price": "1e9", "active": "maybe"}})
+    state = EditorState(
+        edited_rows={0: {"code": "", "category": "Toys", "qty": "abc", "price": "1e9", "active": "maybe"}}
+    )
     changes, issues = build_changeset(form, snapshot, state)
     messages = sorted(str(i) for i in issues)
     assert messages == [
@@ -459,7 +527,9 @@ def test_build_changeset_type_error_only_yields_no_update():
 
 
 def test_build_changeset_other_column_is_read_only():
-    form = make_form([ColumnDef("code", is_key=True), ColumnDef("blob", DataType.OTHER, native_type="STRUCT<a INT>")])
+    form = make_form(
+        [ColumnDef("code", is_key=True), ColumnDef("blob", DataType.OTHER, native_type="STRUCT<a INT>")]
+    )
     snapshot = make_snapshot(form, [{"code": "A", "blob": None}])
     state = EditorState(edited_rows={0: {"blob": "x"}}, added_rows=[{"code": "B", "blob": "y"}])
     changes, issues = build_changeset(form, snapshot, state)
@@ -471,7 +541,17 @@ def test_build_changeset_other_column_is_read_only():
 def test_build_changeset_inserts_cover_every_user_column():
     form = make_form()
     snapshot = make_snapshot(form, SNAPSHOT_ROWS)
-    state = EditorState(added_rows=[{"code": " E005 ", "qty": "5", "category": "Hardware", "start_date": "2024-06-01", "last_seen": "2024-06-01T08:00:00+01:00"}])
+    state = EditorState(
+        added_rows=[
+            {
+                "code": " E005 ",
+                "qty": "5",
+                "category": "Hardware",
+                "start_date": "2024-06-01",
+                "last_seen": "2024-06-01T08:00:00+01:00",
+            }
+        ]
+    )
     changes, issues = build_changeset(form, snapshot, state)
     assert issues == []
     [ins] = changes.inserts
@@ -520,7 +600,7 @@ def test_build_changeset_update_duplicates_earlier_row():
     form = make_form()
     snapshot = make_snapshot(form, SNAPSHOT_ROWS)
     _, issues = build_changeset(form, snapshot, EditorState(edited_rows={1: {"code": "A001"}}))
-    assert [str(i) for i in issues] == ["Row code=A001, column 'code': duplicates Row code=A001"]
+    assert [str(i) for i in issues] == ["Row code=A001, column 'code': duplicates existing Row code=A001"]
 
 
 @pytest.mark.xfail(
@@ -545,7 +625,9 @@ def test_build_changeset_delete_frees_key_and_update_can_change_key():
 
 
 def test_build_changeset_composite_keys_and_missing_keys_are_skipped():
-    form = make_form([ColumnDef("a", is_key=True), ColumnDef("b", DataType.INTEGER, is_key=True), ColumnDef("txt")])
+    form = make_form(
+        [ColumnDef("a", is_key=True), ColumnDef("b", DataType.INTEGER, is_key=True), ColumnDef("txt")]
+    )
     snapshot = make_snapshot(form, [{"a": "x", "b": 1}, {"a": "x", "b": 2}])
     state = EditorState(added_rows=[{"a": "X", "b": "1.0"}, {"a": "X", "b": 3}, {"txt": "no key"}])
     _, issues = build_changeset(form, snapshot, state)
@@ -562,7 +644,11 @@ def test_build_changeset_without_key_columns_skips_uniqueness():
 def test_build_changeset_on_empty_snapshot():
     form = make_form()
     snapshot = make_snapshot(form, [])
-    changes, issues = build_changeset(form, snapshot, EditorState(added_rows=[{"code": "A"}, {"code": "a"}], edited_rows={0: {"qty": 1}}, deleted_rows=[0]))
+    changes, issues = build_changeset(
+        form,
+        snapshot,
+        EditorState(added_rows=[{"code": "A"}, {"code": "a"}], edited_rows={0: {"qty": 1}}, deleted_rows=[0]),
+    )
     assert changes.updates == [] and changes.deletes == []
     assert len(changes.inserts) == 2
     assert [str(i) for i in issues] == ["New row 2, column 'code': duplicates New row 1"]
@@ -594,7 +680,10 @@ def test_service_roles_per_persona(seeded_backend, admin, editor, viewer):
 def test_viewer_cannot_save(seeded_backend, viewer):
     svc = service(seeded_backend, viewer)
     form = svc.get_form(STUDENT, "service_areas")
-    with pytest.raises(PermissionDenied, match="Editor access to domain 'student__survey_service_improvement' is required \\(you have: Viewer\\)"):
+    with pytest.raises(
+        PermissionDenied,
+        match="Editor access to domain 'student__survey_service_improvement' is required \\(you have: Viewer\\)",
+    ):
         svc.save(form, ChangeSet(inserts=[RowInsert({"area_code": "X"})]))
     with pytest.raises(PermissionDenied):
         svc.save(form, ChangeSet())  # even an empty save needs editor rights
@@ -610,7 +699,10 @@ def test_viewer_can_read_visible_domains_only(seeded_backend, viewer):
     assert len(svc.load_rows(form, search="lib")) == 1
     assert len(svc.load_rows(form, search="", limit=2)) == 2
     assert len(svc.history(form)) == 5
-    with pytest.raises(PermissionDenied, match="Viewer access to domain 'finance__cost_management' is required \\(you have: No access\\)"):
+    with pytest.raises(
+        PermissionDenied,
+        match="Viewer access to domain 'finance__cost_management' is required \\(you have: No access\\)",
+    ):
         svc.get_form(FINANCE, "cost_centres")
     finance_form = seeded_backend.get_form(FINANCE, "cost_centres")
     with pytest.raises(PermissionDenied):
@@ -665,9 +757,13 @@ def test_catalog_admin_can_create_domain_and_form(seeded_backend, admin):
     assert domain.owner == admin.username
     # permissions were resolved before the domain existed; refresh them
     svc = service(seeded_backend, admin)
-    form = svc.create_form(FormDef("library", "loans", columns=[ColumnDef("loan_id", nullable=False, is_key=True)]))
+    form = svc.create_form(
+        FormDef("library", "loans", columns=[ColumnDef("loan_id", nullable=False, is_key=True)])
+    )
     assert form.row_count == 0
-    updated = svc.update_domain(DomainDef("library", display_name="Library Services", owner="lib@example.org"))
+    updated = svc.update_domain(
+        DomainDef("library", display_name="Library Services", owner="lib@example.org")
+    )
     assert updated.display_name == "Library Services"
     svc.grant_domain_role("library", "library_readers", Role.VIEWER)
     assert ("library_readers", Role.VIEWER) in svc.list_domain_grants("library")
@@ -718,7 +814,9 @@ def test_editor_stale_edit_is_reported_not_applied(seeded_backend, editor, admin
     changes, _ = build_changeset(form, snapshot, EditorState(edited_rows={pos: {"target_score": 90}}))
     # someone else changes the same row in between
     other = service(seeded_backend, admin)
-    other_changes, _ = build_changeset(form, other.load_rows(form), EditorState(edited_rows={pos: {"target_score": 91}}))
+    other_changes, _ = build_changeset(
+        form, other.load_rows(form), EditorState(edited_rows={pos: {"target_score": 91}})
+    )
     assert other.save(form, other_changes).updated == 1
     result = svc.save(form, changes)
     assert not result.ok and result.updated == 0

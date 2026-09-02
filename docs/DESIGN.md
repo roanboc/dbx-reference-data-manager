@@ -1,219 +1,228 @@
 # Reference Data Manager (SCD Manager) — Design
 
 This document is the architecture and decision log for the Databricks Reference Data
-Stewardship App. It is written so that a reviewer can challenge the decisions before
-the production (Databricks) backend is switched on.
+Stewardship App. It is written so that a reviewer can challenge the decisions before the
+production (Databricks) backend is switched on. The UI framework decision is recorded
+separately in [FRAMEWORK_DECISION.md](FRAMEWORK_DECISION.md) (Dash + AG Grid; the earlier
+Streamlit implementation is kept in git history).
 
 ## 1. Goals and non-goals
 
 **Goals**
 
-* One generic Streamlit app that manages every "CRUD list" and slowly-changing reference
+* One generic web application that manages every "CRUD list" and slowly changing reference
   table of the platform, replacing SharePoint lists.
-* Data lives in Unity Catalog Delta tables (`<catalog>.<domain>.<form>`), governance is
-  Unity Catalog grants at schema level, infrastructure is a Databricks Asset Bundle.
+* Data lives in Unity Catalog Delta tables (`<catalog>.<domain>.<form>`), governance is Unity
+  Catalog grants at schema level, infrastructure is a Databricks Asset Bundle.
 * The UI never contains SQL. Every database interaction goes through a `DatabaseBackend`
   interface with a DuckDB implementation for local development and a Databricks SQL
   implementation for production.
-* Three UI tiers: Administrator, Editor (User), Viewer.
+* Three UI tiers per domain: Administrator, Editor (User), Viewer.
 
 **Non-goals**
 
 * Editing tables with millions of rows. Reference lists are small (hundreds to tens of
   thousands of rows). The grid loads a bounded page (`RDM_MAX_ROWS`, default 5,000) with
-  server-side search.
-* Replacing pipelines that build SCD Type 2 dimensions. The app owns the *current state* of
-  a list plus its full change history; Type 2 dimensions are derived downstream (see §7).
+  server-side search and sorting.
+* Replacing pipelines that build SCD Type 2 dimensions. The app owns the *current state* of a
+  list plus its change history; Type 2 dimensions are derived downstream (see §7).
 
 ## 2. Repository layout
 
 ```
-app.py                      Streamlit entrypoint (thin: wiring + page routing)
+app.py                      Dash entrypoint: gunicorn in production, dev server with --dev
 app.yaml                    Databricks Apps runtime config
-databricks.yml              Databricks Asset Bundle (catalog, schemas, grants, app, setup job)
-resources/                  Bundle resource files
+databricks.yml, resources/  Databricks Asset Bundle (catalog, domain schemas + grants, app)
 src/rdm/
   config.py                 Settings from environment (.env for local)
   models.py                 DataType, ColumnDef, FormDef, DomainDef, User, Role, ChangeSet, ...
+  coercion.py               Value coercion shared by grid edits, imports and backends
   backend/base.py           DatabaseBackend abstract interface
   backend/duckdb_backend.py Local backend (DuckDB file, emulates UC metadata in _rdm_meta)
-  backend/databricks_backend.py  Databricks SQL warehouse backend (databricks-sql-connector)
-  backend/sql_utils.py      Identifier validation/quoting, type maps
-  backend/factory.py        Backend + auth selection from settings
-  auth/provider.py          AuthProvider: MockAuthProvider (personas), DatabricksAuthProvider (headers)
-  services/catalog_service.py   Navigation model: visible domains/forms, search
-  services/form_service.py      Grid data, change-set building, validation, save
+  backend/databricks_backend.py  SQL warehouse backend (databricks-sql-connector)
+  backend/sql_utils.py      Identifier quoting, literal escaping, type maps, frame normalisation
+  auth/provider.py          MockAuthProvider (personas), DatabricksAuthProvider (headers)
+  services/catalog_service.py   Navigation: visible domains/forms, search
+  services/form_service.py      Role guards, positional change-set builder, validation
+  services/draft.py             Row-id keyed draft -> ChangeSet (used by the grid)
   services/excel_import.py      Excel/CSV parsing, type inference, column sanitising
-  ui/                       Streamlit views (sidebar, grid, form creator, schema editor, history)
-tests/                      Unit, contract (backend-parametrised) and AppTest UI tests
-scripts/seed_demo.py        Creates the local DuckDB file with demo domains/forms
-docs/                       This document + deployment notes
+  ui/                       Dash shell, routing, pages, AG Grid configuration
+tests/                      Unit, backend contract and Dash server tests
 ```
 
 ## 3. Domain model
 
 | Concept | Local (DuckDB) | Production (Unity Catalog) |
 |---|---|---|
-| Catalog | DuckDB database file | `_forms` (configurable `RDM_CATALOG`) |
+| Catalog | DuckDB database file | `_forms` (configurable `RDM_CATALOG`, per bundle target) |
 | Domain | schema | schema, e.g. `student__survey_service_improvement` |
 | Form | table | Delta table |
-| Form description | `COMMENT ON TABLE` | `COMMENT ON TABLE` |
+| Form description | `COMMENT ON TABLE` | table `COMMENT` |
 | Column description | `COMMENT ON COLUMN` | column `COMMENT` |
-| Display name, owner, column config | `_rdm_meta.object_properties` | `TBLPROPERTIES ('rdm.display_name', 'rdm.owner', 'rdm.column_config')` + tags `rdm_display_name`, `rdm_owner` |
-| Domain description/owner | `_rdm_meta.object_properties` (DuckDB cannot comment schemas) | `COMMENT ON SCHEMA` + schema tags |
-| Change history | `_rdm_meta.change_log` | Delta Change Data Feed + `DESCRIBE HISTORY` |
-| Permissions | `_rdm_meta.grants` (persona groups) | UC schema privileges via `information_schema` |
+| Display name, owner, column config | `_rdm_meta.object_properties` | `TBLPROPERTIES ('rdm.display_name', 'rdm.owner', 'rdm.column_config')`, mirrored to tags `rdm_display_name` / `rdm_owner` (bulk-readable from `information_schema.table_tags`) |
+| Domain description / owner | `_rdm_meta.object_properties` (DuckDB cannot comment schemas) | `COMMENT ON SCHEMA` + schema tags |
+| Change history | `_rdm_meta.change_log` | `<catalog>._rdm_meta.change_log` (same shape) + Delta Change Data Feed |
+| Permissions | `_rdm_meta.grants` (persona groups) | UC schema/catalog privileges via `information_schema` |
+| Domains and grants | created/granted in the app | infrastructure: bundle only (the app refuses) |
 
 ### 3.1 Portable data types
 
-The app exposes a deliberately small type set so that a form created locally is created
-identically in Databricks:
-
 | RDM type | DuckDB | Databricks | Grid editor |
 |---|---|---|---|
-| `STRING` | `VARCHAR` | `STRING` | TextColumn / SelectboxColumn when options are defined |
-| `INTEGER` | `BIGINT` | `BIGINT` | NumberColumn(step=1) |
-| `DECIMAL(p,s)` | `DECIMAL(p,s)` | `DECIMAL(p,s)` | NumberColumn(format) |
-| `DOUBLE` | `DOUBLE` | `DOUBLE` | NumberColumn |
-| `BOOLEAN` | `BOOLEAN` | `BOOLEAN` | CheckboxColumn |
-| `DATE` | `DATE` | `DATE` | DateColumn |
-| `TIMESTAMP` | `TIMESTAMP` | `TIMESTAMP` | DatetimeColumn |
+| `STRING` | `VARCHAR` | `STRING` | text, or select when allowed values are defined |
+| `INTEGER` | `BIGINT` | `BIGINT` | number (precision 0) |
+| `DECIMAL(p,s)` | `DECIMAL(p,s)` | `DECIMAL(p,s)` | number (precision s), formatted |
+| `DOUBLE` | `DOUBLE` | `DOUBLE` | number |
+| `BOOLEAN` | `BOOLEAN` | `BOOLEAN` | checkbox |
+| `DATE` | `DATE` | `DATE` | date picker (ISO string) |
+| `TIMESTAMP` | `TIMESTAMP` | `TIMESTAMP` | text, ISO `YYYY-MM-DD HH:MM:SS`, stored as UTC |
 
 Unknown native types (tables created outside the app) are surfaced as `OTHER`, shown
-read-only in the grid, and never silently converted.
+read-only, and never converted. `read_rows` always returns a frame with dtypes fixed by the
+RDM type (`normalise_frame`), whatever the driver returned: INTEGER→`Int64`, DECIMAL→`Decimal`
+objects, DATE→`date` objects, TIMESTAMP→naive UTC `datetime64[us]`, BOOLEAN→`boolean`.
 
 ### 3.2 System columns (SharePoint-style)
 
-Every form created by the app carries hidden/read-only system columns:
-
 | Column | Type | Purpose |
 |---|---|---|
-| `_id` | STRING, NOT NULL, PK | Stable row identity (UUID). Required so grid edits map to `UPDATE/DELETE ... WHERE _id = ?`. |
+| `_id` | STRING NOT NULL, PK (informational on Databricks) | Stable row identity (UUID) so edits map to `MERGE ... ON _id`. |
+| `_version` | BIGINT NOT NULL | Optimistic-concurrency token, incremented on every update; compared as an integer, so it survives every timestamp round trip. |
 | `_created_at`, `_created_by` | TIMESTAMP, STRING | Audit |
-| `_updated_at`, `_updated_by` | TIMESTAMP, STRING | Audit and optimistic concurrency token |
+| `_updated_at`, `_updated_by` | TIMESTAMP, STRING | Audit (display only) |
 
 Business keys (e.g. `cost_centre_code`) are optional column flags used for uniqueness
-validation before save; `_id` remains the technical key. This keeps SharePoint's familiar
-"ID / Created / Modified / Modified By" semantics and makes tables safe to edit concurrently.
+validation and as the default sort order; `_id` remains the technical key. Business-key
+uniqueness is validated in the app (Unity Catalog does not enforce PRIMARY KEY).
 
 ## 4. `DatabaseBackend` interface (summary)
 
 ```
-# metadata
-list_domains() -> list[DomainDef]
-get_domain(name) -> DomainDef
-create_domain(DomainDef)                       # admin
-list_forms(domain) -> list[FormDef]            # cheap: names, description, display name, owner
-get_form(domain, name) -> FormDef              # full: columns, properties, tags, row count
-create_form(FormDef, rows: DataFrame | None)   # admin
-update_form_metadata(FormDef)                  # description, display name, owner, column config
-add_column / drop_column / set_column_description
-drop_form(domain, name)                        # admin
-# data
-read_rows(FormDef, search: str | None, limit: int) -> DataFrame   (includes system columns)
-apply_changes(FormDef, ChangeSet, actor: User) -> SaveResult      (inserts/updates/deletes, conflicts)
-append_rows(FormDef, DataFrame, actor) -> int
-get_history(FormDef, limit) -> DataFrame       # standard columns: version, changed_at, changed_by, change_type, row columns
-# authorisation
-get_domain_roles(user) -> dict[str, Role]      # effective role per domain for this user
-grant_domain_role(domain, principal, role)     # admin; UC: GRANT ... ON SCHEMA
+list_domains / get_domain / create_domain / update_domain
+list_forms(domain)          light: names, description, display name, owner
+get_form(domain, name)      full: columns, properties, tags, row count, last change
+create_form(FormDef, actor, rows) / update_form_metadata / add_column / drop_column / drop_form
+read_rows(form, search, limit, order_by, descending)   normalised frame incl. system columns
+count_rows / apply_changes(form, ChangeSet, actor) -> SaveResult / append_rows / get_history
+get_permissions(user) -> Permissions / list_domain_grants / grant_domain_role
 ```
 
 Design rules:
 
-* Identifiers are validated with a strict regex (`^[a-z][a-z0-9_]{0,62}$`) at the model
-  layer and quoted by the backend; values are always bound as parameters, never interpolated.
-* All writes for one "Save" are applied as a batch: DuckDB uses a transaction; Databricks
-  uses one `INSERT ... VALUES`, one `MERGE` (updates) and one `DELETE` per save, chunked to
-  respect the 255-parameter limit of native parameters. Delta guarantees atomicity per
-  statement; the UI reports partial failures explicitly.
-* Updates and deletes carry the row's `_updated_at` seen at load time
-  (`WHERE _id = ? AND _updated_at IS NOT DISTINCT FROM ?`). A mismatch is reported as a
-  conflict ("row changed by someone else") instead of overwriting.
+* Identifiers are validated with a strict regex at the model layer (leading underscores are
+  reserved for system objects) and quoted by the backend; values are always bound as
+  parameters. DDL clauses that cannot take parameters (comments, properties, tags) are escaped
+  per dialect: `''` doubling for DuckDB, backslash escapes for Databricks (adjacent literals
+  are concatenated by Spark, so `''` would silently corrupt text).
+* **One save = one atomic write.** DuckDB wraps the change set in a transaction. Databricks
+  sends the whole change set as a single JSON parameter to one `MERGE INTO ... USING (SELECT
+  inline(from_json(:payload, '<struct schema>')))`: no 255-marker limit, one Delta commit,
+  idempotent on retry (row ids are generated once). Updates carry the full row (current values
+  merged with the edits) so `UPDATE SET` needs no per-column flags. Bulk loads use the same
+  source shape in 500-row chunks.
+* Updates and deletes carry the `_version` seen at load time (`WHERE _id = ? AND _version =
+  ?` / `ON ... AND t._version = s._version`). A mismatch is reported as a conflict with who
+  changed the row and when, never overwritten. Non-conflicting rows in the same save are
+  applied.
+* Forms are created with `delta.enableChangeDataFeed`, `delta.columnMapping.mode = name`
+  (required for `DROP COLUMN`) and `delta.enableDeletionVectors` (row-level concurrency).
 
 ## 5. Authentication and authorisation
 
-* `AuthProvider.current_user() -> User(email, display_name, groups)`.
-  * Local: `MockAuthProvider` with three personas (sidebar switcher or `RDM_PERSONA` env var).
-  * Databricks: `DatabricksAuthProvider` reads `st.context.headers`
+* `AuthProvider.current_user() -> User(username, display_name, groups)`.
+  * Local: `MockAuthProvider` with three personas (header switcher or `RDM_PERSONA`).
+  * Databricks: `DatabricksAuthProvider` reads the request headers Databricks Apps injects
     (`X-Forwarded-Email`, `X-Forwarded-Preferred-Username`, `X-Forwarded-User`,
-    `X-Forwarded-Access-Token`).
+    `X-Forwarded-Access-Token`). Dash callbacks are plain Flask requests, so identity is
+    request-scoped; SQL connections are cached per user token (15 min).
 * **Recommended production mode: user authorization (on-behalf-of-user) with the `sql`
-  scope.** Every SQL statement then runs *as the signed-in user*, so Unity Catalog is the
-  real enforcement point. The app's role logic only decides what to render.
-* Role derivation from UC privileges on the schema (or inherited from the catalog):
+  scope.** Every statement runs as the signed-in user, so Unity Catalog is the enforcement
+  point; the app's role logic only decides what to render. Roles are derived inside the SQL
+  session (`information_schema.schema_privileges` / `catalog_privileges` where
+  `grantee = current_user() OR is_account_group_member(grantee)`, plus schema ownership), so
+  nested account groups resolve without any SCIM call.
 
-| Role | Unity Catalog privileges on the domain schema |
+| Role | Unity Catalog privileges (schema, plus `USE CATALOG`) |
 |---|---|
-| Viewer | `USE CATALOG`, `USE SCHEMA`, `SELECT` |
+| Viewer | `USE SCHEMA`, `SELECT` |
 | Editor | Viewer + `MODIFY` |
-| Administrator | Editor + `CREATE TABLE` + `MANAGE` (or schema ownership) |
+| Administrator | Editor + `CREATE TABLE`, `MANAGE`, `APPLY TAG` (or schema ownership) |
 
-  Grants are given to groups in the bundle (`resources.schemas.<x>.grants`). Tables created
-  by the app are re-owned to the schema owner group so every administrator can alter them.
-* Fallback (service-principal mode, no OBO): the app still resolves roles from UC grants
-  for the user's groups, but the service principal must hold the union of privileges and
-  the app becomes the security boundary. Documented, but not recommended.
+  `MANAGE` on the schema is inherited by every table, so all administrators can alter and
+  drop forms whoever created them. Note that UC `MODIFY` also permits column DDL outside the
+  app; the app is the workflow, `DESCRIBE HISTORY` is the audit of such changes.
+* Domains and grants are infrastructure in production (`resources/schemas.yml`); the
+  Databricks backend refuses `create_domain` / `grant_domain_role` so that a bundle deploy
+  never silently reverts a runtime grant. Locally both are available for convenience.
+* Service-principal fallback (no OBO): roles are computed from the principals resolved by the
+  provider and the service principal must hold the union of privileges - documented, not
+  recommended.
 
-## 6. Grid editing model
+## 6. Grid editing model (Dash + AG Grid)
 
-1. `read_rows` returns a DataFrame including `_id` and `_updated_at` (hidden via
-   `column_config`).
-2. `st.data_editor(num_rows="dynamic", key=<form>-<version>)` renders; the widget state
-   (`edited_rows`, `added_rows`, `deleted_rows`) is positional.
-3. `FormService.build_changeset(snapshot_df, editor_state, form)` resolves positions to
-   `_id`s, coerces values to the column type, and validates (required, options, unique
-   business keys, type). Issues are shown inline; Save is disabled until they are fixed.
-4. Save calls `backend.apply_changes`, shows a summary (inserted/updated/deleted/conflicts),
-   bumps the editor version (which clears widget state) and reloads.
-5. While there are pending changes the search box and persona switcher are locked, because
-   changing the displayed rows would invalidate positional edits.
+1. `read_rows` → JSON records; the grid uses `getRowId = _id`, `_id`/`_version` are data
+   fields without columns (nothing to reveal or edit).
+2. Edits arrive as `cellValueChanged` events (row id, column, new value, row data with
+   `_version`) and are folded into a browser-side `Draft` store keyed by `_id`
+   (`updates`, `inserts` with temporary ids, `deletes`). Reloading rows (search, sort,
+   refresh) re-applies the draft as an overlay, so searching while editing is safe.
+3. `build_changeset_from_draft` validates on every edit (coercion, required, allowed
+   values, unique business keys); issues are listed and the offending cells are highlighted
+   through per-row flags. Save is disabled while issues exist.
+4. Save → `FormService.save` → `apply_changes`; the result is shown as a notification and
+   conflicts as an alert; the grid reloads.
+5. Viewers get the same grid read-only; editor controls are rendered hidden for them (Dash
+   callbacks need their components present) and the service layer enforces the role again.
+
+Multi-cell clipboard paste is an AG Grid Enterprise feature; bulk changes come through the
+Excel/CSV import (append) instead.
 
 ## 7. History and slowly changing dimensions
 
 * The grid is the **current state** (SCD Type 1 semantics) of a reference list.
-* Every save stamps `_updated_at/_updated_by`; the History tab shows row-level changes:
-  * DuckDB: `_rdm_meta.change_log` (before/after JSON per row, batch id, actor).
-  * Databricks: Delta Change Data Feed (`table_changes(...)`) joined with `DESCRIBE HISTORY`
-    for the operation and user. CDF is enabled at table creation
-    (`delta.enableChangeDataFeed = true`).
+* Every save writes row-level entries (before/after JSON, actor, batch) to
+  `_rdm_meta.change_log` on both backends, so the History tab is identical locally and in
+  production and does not depend on Delta log retention. Delta Change Data Feed stays enabled
+  on every form for downstream pipelines and is the fallback if the audit table is missing.
 * Type 2 dimensions should be built downstream from CDF (Lakeflow Declarative Pipelines
   `AUTO CDC ... STORED AS SCD TYPE 2`), not maintained by hand in the grid.
-* Optional "effective-dated" form template adds `valid_from`, `valid_to`, `is_current`
-  business columns for lists whose changes must be authored ahead of time.
+* Optional "effective-dated" form template adds `valid_from`, `valid_to` business columns.
 
-## 8. Admin features
+## 8. Administrator features
 
-* **Form creator (Excel upload)**: sheet selection → inferred columns (name sanitised, type,
-  description, required, business key, allowed values) editable in a grid → domain/table
-  name/display name/description/owner → create table (+ system columns, comments,
-  properties, tags) and optionally load the rows.
-* **Schema editor**: edit descriptions, add/drop columns, edit allowed values, business
-  keys, owner and display name. Type changes are intentionally not offered (Delta requires
-  a rewrite); the guided path is "add a column, migrate, drop the old one".
-* **Domain creator**: new schema with description and owner (requires catalog-level admin).
+* **Form creator**: upload → sheet/header choice → inferred columns editable in a grid
+  (name, type, description, required, business key, allowed values suggested for
+  low-cardinality text) → domain/name/description/owner → review with coercion issues →
+  create (+ system columns, comments, properties, tags) and load the rows.
+* **Schema editor**: descriptions, required, business key, allowed values; add and remove
+  columns. Types are fixed after creation (a type change is a rewrite).
+* **Settings**: display name, description, owner; delete form with typed confirmation.
+* **Domains**: overview, metadata, grants (local only; bundle in production).
 
 ## 9. Local development and testing strategy
 
-DuckDB is the local *runtime* backend; it is not the whole testing story:
+DuckDB is the local *runtime* backend; it is deliberately not the only truth:
 
 | Layer | What | Runs where |
 |---|---|---|
-| Unit | change-set diffing, validation, type inference, identifier rules, SQL generation of the Databricks backend against a fake cursor | every commit, milliseconds |
-| Contract | one parametrised suite executed against **every** backend (`DuckDBBackend` always; `DatabricksBackend` against a dev catalog when `RDM_TEST_DATABRICKS=1`) | local + CI job in the workspace |
-| UI | Streamlit `AppTest` (headless, no browser) for persona flows | every commit |
-| Visual | Playwright smoke for screenshots | on demand |
-| Real | `databricks apps run-local` against a dev workspace (injects the `X-Forwarded-*` headers) | before release |
+| Unit | models, coercion, draft/change-set building, validation, type inference, identifier rules, Databricks SQL generation against a fake connection | every commit, milliseconds |
+| Contract | `DatabaseBackend` behaviour against DuckDB (create/alter, read, save, conflicts, history, permissions) | every commit |
+| Server | Dash app boots, layout and callbacks resolve (Flask test client) | every commit |
+| Browser | Playwright: edit/add/delete/save, wizard, import, schema, persona switch | on demand (`scripts` in the session; add to CI when a browser is available) |
+| Real | `databricks apps run-local` against a dev workspace; the contract suite against a dev catalog with `RDM_TEST_DATABRICKS=1` (to be wired when a workspace is available) | before release |
+
+Known DuckDB/Databricks divergences (covered by the Databricks SQL-generation tests rather
+than by DuckDB): PRIMARY KEY enforcement, literal escaping, DROP COLUMN requirements,
+timestamp semantics (naive vs session-zone), MERGE metrics, tags/properties, CDF retention.
 
 ## 10. Databricks Apps practices applied
 
-* `app.yaml` at repo root; `command: ["streamlit", "run", "app.py"]`; warehouse injected
-  via `valueFrom: sql-warehouse` → `DATABRICKS_WAREHOUSE_ID`; no secrets in code.
-* Do not override `STREAMLIT_SERVER_PORT`/`STREAMLIT_SERVER_ADDRESS`; the runtime sets
-  them. `STREAMLIT_BROWSER_GATHER_USAGE_STATS=false`.
-* Connections are cached per user token with `st.cache_resource(ttl=...)`; metadata reads
-  cached with `st.cache_data` and an explicit "Refresh" action.
-* Native parameter binding, identifier validation, least-privilege service principal
-  (only `CAN_USE` on the warehouse; data access through user authorization).
+* `app.yaml` at repo root runs `python app.py`, which starts gunicorn on
+  `DATABRICKS_APP_PORT`; the SQL warehouse is injected with `valueFrom: sql-warehouse`.
+* Request-scoped identity from the forwarded headers; no secrets in code; least privilege for
+  the app service principal (`CAN_USE` on the warehouse; data access through user
+  authorization).
+* Native parameter binding, identifier validation, per-user connection cache, short
+  navigation/permission caches (`RDM_METADATA_CACHE_TTL`).
 * Serverless SQL warehouse recommended (cold-start latency dominates UX otherwise).
-* Everything (catalog, schemas, grants, app, setup job) is declared in the bundle.
+* Everything (catalog, schemas, grants, app) is declared in the bundle.

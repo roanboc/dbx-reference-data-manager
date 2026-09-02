@@ -21,7 +21,7 @@ catalog, the domain schemas with their grants, the SQL-warehouse binding and the
 How the pieces fit at runtime:
 
 ```
-browser --> Databricks Apps proxy --> streamlit run app.py
+browser --> Databricks Apps proxy --> python app.py (gunicorn, listens on DATABRICKS_APP_PORT)
              adds X-Forwarded-Email / -Preferred-Username / -User
              adds X-Forwarded-Access-Token   (user authorization, scope `sql`)
                                                   |
@@ -182,7 +182,7 @@ because `Settings.from_env` loads `.env` without overriding variables that are a
 If the CLI exports an empty `DATABRICKS_WAREHOUSE_ID`, export the real value in your shell
 before starting.
 
-Plain `streamlit run app.py` with `RDM_AUTH=databricks` fails with "No user identity
+Plain `python app.py --dev` with `RDM_AUTH=databricks` fails with "No user identity
 headers found" - that is expected: use `run-local`, or `RDM_AUTH=mock` with the DuckDB
 backend for UI work.
 
@@ -239,5 +239,5 @@ administrators can still alter and drop tables that the app or other users creat
 | Group memberships missing in the sidebar (roles look wrong) | `iam.current-user:read` scope missing (user authorization) or, in service-principal mode, the service principal cannot read users. Roles are still enforced by Unity Catalog; only rendering is affected. |
 | Domain names look odd in `dev` (`dev_alice_...`) | Development-mode prefix on schemas; expected. `prod` uses the plain names. |
 | Catalog name `_forms` (leading underscore) | Valid Unity Catalog name and a valid unquoted identifier in Databricks SQL; the backend quotes every identifier with backticks anyway. Some organisations reserve leading underscores for system objects in their naming policy - check yours, and note the app itself rejects leading underscores for *domain* names. |
-| App status `UNAVAILABLE` / crash loop after deploy | Open `<app URL>/logz`. Usual causes: dependency pin in `requirements.txt` incompatible with the Apps Python runtime, or a `STREAMLIT_SERVER_*` variable set in `app.yaml`/`config` (never override the runtime's values). |
+| App status `UNAVAILABLE` / crash loop after deploy | Open `<app URL>/logz`. Usual causes: dependency pin in `requirements.txt` incompatible with the Apps Python runtime, or a `PORT`/`DATABRICKS_APP_PORT` override in `app.yaml`/`config` (the runtime sets the port; `app.py` reads it). |
 | `DATABRICKS_WAREHOUSE_ID (or DATABRICKS_HTTP_PATH) must be set` | The `sql-warehouse` app resource is missing or its key differs from `valueFrom`/`value_from`. Check `resources/app.yml` (bundle) or the app's Resources tab (manual deploy). |

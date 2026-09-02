@@ -1,1 +1,1 @@
-"""Streamlit views. Only this package imports ``streamlit``."""
+"""Dash user interface. Only this package imports ``dash``."""

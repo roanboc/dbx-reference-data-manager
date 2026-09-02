@@ -1,6 +1,10 @@
 # Runtime dependencies for the Databricks App (and local development).
 # Pinned to the minor version; Databricks Apps installs these with pip on deploy.
-streamlit~=1.63
+dash~=4.4
+dash-ag-grid~=35.3
+dash-mantine-components~=2.8
+dash-iconify~=0.1
+gunicorn~=23.0
 pandas~=3.0
 pyarrow~=25.0
 openpyxl~=3.1

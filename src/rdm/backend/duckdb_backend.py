@@ -33,6 +33,7 @@ from rdm.backend.sql_utils import (
     quote_ident,
     to_db_scalar,
 )
+from rdm.coercion import CoercionError, coerce_value
 from rdm.models import (
     CREATED_AT_COLUMN,
     CREATED_BY_COLUMN,
@@ -69,6 +70,13 @@ CATALOG_LEVEL = "*"
 def utcnow() -> datetime:
     """Naive UTC timestamps are the app's canonical representation."""
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _coerce_for_import(col: ColumnDef, value: Any) -> Any:
+    try:
+        return coerce_value(col, value)
+    except CoercionError as exc:
+        raise BackendError(f"Import failed: column '{col.name}': {exc}") from exc
 
 
 def _json_default(value: Any) -> Any:
@@ -383,13 +391,13 @@ class DuckDBBackend(DatabaseBackend):
                     f"SELECT min({quote_ident(CREATED_AT_COLUMN)}), max({quote_ident(UPDATED_AT_COLUMN)}) FROM {self._t(form)}"
                 ).fetchone()
                 form.created_at, form.updated_at = row[0], row[1]
-                if form.updated_at is not None:
-                    who = cur.execute(
-                        f"SELECT {quote_ident(UPDATED_BY_COLUMN)} FROM {self._t(form)} "
-                        f"WHERE {quote_ident(UPDATED_AT_COLUMN)} = ? LIMIT 1",
-                        [form.updated_at],
-                    ).fetchone()
-                    form.updated_by = (who[0] if who else "") or ""
+                last = cur.execute(
+                    f"SELECT changed_at, changed_by FROM {qualified([META_SCHEMA, 'change_log'])} "
+                    "WHERE schema_name = ? AND table_name = ? ORDER BY id DESC LIMIT 1",
+                    [domain, name],
+                ).fetchone()
+                if last is not None:
+                    form.updated_at, form.updated_by = last[0], last[1] or ""
             if "created_at" in props:
                 try:
                     form.created_at = datetime.fromisoformat(props["created_at"])
@@ -571,6 +579,9 @@ class DuckDBBackend(DatabaseBackend):
             order = f" ORDER BY {quote_ident(order_by)} {direction} NULLS LAST"
             if form.has_system_columns:
                 order += f", {quote_ident(ID_COLUMN)}"
+        elif form.key_columns:
+            keys = ", ".join(f"{quote_ident(k.name)} {direction} NULLS LAST" for k in form.key_columns)
+            order = f" ORDER BY {keys}, {quote_ident(ID_COLUMN)}"
         elif form.has_system_columns:
             order = (
                 f" ORDER BY {quote_ident(CREATED_AT_COLUMN)} {direction} NULLS LAST, {quote_ident(ID_COLUMN)}"
@@ -729,13 +740,10 @@ class DuckDBBackend(DatabaseBackend):
         df.insert(3, CREATED_BY_COLUMN, actor.username)
         df.insert(4, UPDATED_AT_COLUMN, now)
         df.insert(5, UPDATED_BY_COLUMN, actor.username)
-        for c in form.columns:
-            if (
-                c.data_type in (DataType.DATE, DataType.TIMESTAMP)
-                and c.name in df.columns
-                and not c.is_system
-            ):
-                df[c.name] = pd.to_datetime(df[c.name], errors="coerce")
+        for c in form.user_columns:
+            if c.name in df.columns and c.data_type is not DataType.OTHER:
+                df[c.name] = df[c.name].map(lambda v, col=c: _coerce_for_import(col, v)).astype(object)
+                df[c.name] = df[c.name].where(df[c.name].notna(), None)
         view = f"rdm_import_{batch}"
         cur.register(view, df)
         col_list = ", ".join(quote_ident(c) for c in df.columns)

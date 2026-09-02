@@ -157,8 +157,8 @@ def infer_type(series: pd.Series) -> tuple[DataType, int | None, int | None]:
         return DataType.STRING, None, None
     if all(isinstance(v, bool) for v in values):
         return DataType.BOOLEAN, None, None
-    if all(isinstance(v, int | float) and not isinstance(v, bool) for v in values):
-        return _numeric_type(pd.Series(values, dtype="float64"))
+    if all(isinstance(v, int | float) for v in values):  # bool is an int: mixed bool/number -> number
+        return _numeric_type(pd.Series([float(v) for v in values], dtype="float64"))
     strings = [str(v).strip() for v in values]
     lowered = {v.lower() for v in strings}
     if (

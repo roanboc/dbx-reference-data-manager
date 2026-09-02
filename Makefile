@@ -1,7 +1,6 @@
-.PHONY: install seed run test lint format check
+.PHONY: install seed run serve test lint format check
 
 PY ?= .venv/bin/python
-STREAMLIT ?= .venv/bin/streamlit
 
 install:
 	uv venv .venv --python 3.11 || python3 -m venv .venv
@@ -11,7 +10,10 @@ seed:
 	$(PY) scripts/seed_demo.py
 
 run:
-	$(STREAMLIT) run app.py
+	$(PY) app.py --dev
+
+serve:
+	$(PY) app.py
 
 test:
 	$(PY) -m pytest

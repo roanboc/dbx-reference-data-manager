@@ -13,12 +13,10 @@
 #
 # Never set the variables the Databricks Apps runtime injects itself:
 #   DATABRICKS_APP_PORT, DATABRICKS_APP_NAME, DATABRICKS_WORKSPACE_ID, DATABRICKS_HOST,
-#   DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET, STREAMLIT_SERVER_PORT,
-#   STREAMLIT_SERVER_ADDRESS, STREAMLIT_SERVER_HEADLESS,
-#   STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION, STREAMLIT_SERVER_ENABLE_CORS.
+#   DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET, DATABRICKS_APP_PORT (the port the app must listen on; app.py reads it).
 # Secrets never belong here; bind a secret scope as an app resource instead.
 
-command: ["streamlit", "run", "app.py"]
+command: ["python", "app.py"]
 
 env:
   # SQL warehouse ID injected from the app resource whose key is `sql-warehouse`
@@ -42,10 +40,8 @@ env:
     value: "_forms"
 
   # Streamlit telemetry off. The Apps runtime already sets this to "false"; it is repeated
-  # (with the same value) so that `databricks apps run-local` and a plain `streamlit run`
+  # (with the same value) so that `databricks apps run-local` and a plain `python app.py`
   # behave identically. Never set it to anything else.
-  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
-    value: "false"
 
   # Optional tuning - defaults live in rdm.config.Settings:
   # - name: RDM_MAX_ROWS            # rows loaded into the grid per form (default 5000)
