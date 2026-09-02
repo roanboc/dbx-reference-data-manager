@@ -6,7 +6,8 @@ stamping; authorisation decisions are made in the service layer (and, in product
 enforced again by Unity Catalog because statements run as the user).
 
 Hierarchy: **domain** (a classifier kept in the registry, maintained by global admins) >
-**function** (a schema) > **form** (a table).
+**function** (a schema) > **form** (a table) or **file** (a CSV/Parquet file in the
+function's volume).
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from rdm.models import (
     ChangeSet,
     ColumnDef,
     DomainDef,
+    FileDef,
     FormDef,
     FunctionDef,
     Permissions,
@@ -101,7 +103,7 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def drop_function(self, function: FunctionDef, actor: User) -> None:
-        """Drop the schema and its metadata. Raises :class:`ConflictError` while it has forms."""
+        """Drop the schema and its metadata. Raises :class:`ConflictError` while it has forms or files."""
 
     # -- forms -------------------------------------------------------------------------------
 
@@ -169,6 +171,50 @@ class DatabaseBackend(ABC):
         ``row_id`` restricts the history to one row (the item form shows it with a restore
         action per version).
         """
+
+    # -- files (CSV / Parquet datasets in the function's volume) ---------------------------
+
+    @abstractmethod
+    def list_files(self, function: str) -> list[FileDef]:
+        """Files of a function: registry entries merged with what the storage holds."""
+
+    @abstractmethod
+    def get_file(self, function: str, name: str) -> FileDef:
+        """Raise :class:`NotFoundError` if the file does not exist in storage."""
+
+    @abstractmethod
+    def put_file(self, file: FileDef, data: bytes, actor: User, replace: bool = False) -> FileDef:
+        """Store a new file (``replace=False``, conflict if it exists) or replace its content.
+
+        Records size and row count, writes the registry entry and an audit entry.
+        """
+
+    @abstractmethod
+    def update_file_metadata(self, file: FileDef, actor: User) -> FileDef:
+        """Persist display name, description and owner of a file."""
+
+    @abstractmethod
+    def read_file(self, file: FileDef) -> bytes:
+        """The file content (for download)."""
+
+    @abstractmethod
+    def preview_file(self, file: FileDef, limit: int = 100) -> pd.DataFrame:
+        """The first ``limit`` rows of the file, parsed with the backend's reader."""
+
+    @abstractmethod
+    def file_columns(self, file: FileDef) -> list[ColumnDef]:
+        """Column names and (native) types as the backend's reader infers them."""
+
+    @abstractmethod
+    def file_history(self, file: FileDef, limit: int = 200) -> pd.DataFrame:
+        """Uploads, replacements and deletions of the file, newest first.
+
+        Columns: ``version, changed_at, changed_by, change_type, size_bytes, row_count``.
+        """
+
+    @abstractmethod
+    def drop_file(self, file: FileDef, actor: User) -> None:
+        """Delete the file from storage and the registry (the audit entries are kept)."""
 
     # -- authorisation -------------------------------------------------------------------
 

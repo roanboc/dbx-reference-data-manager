@@ -65,6 +65,7 @@ def test_page_callback_renders_home_for_admin(client):
         ("/domains", "editor", "Global admins only"),
         ("/new-function", "admin", "New function"),
         ("/fn/nowhere", "admin", "Access denied"),
+        ("/file/finance__cost_management/nothing.csv", "admin", "Access denied"),
     ],
 )
 def test_page_callback_routes(client, pathname, persona, expected):

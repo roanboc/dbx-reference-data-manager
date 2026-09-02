@@ -21,6 +21,7 @@ from rdm.models import (
     ColumnDef,
     DataType,
     DomainDef,
+    FileDef,
     FormDef,
     FunctionDef,
     Permissions,
@@ -34,8 +35,11 @@ from rdm.models import (
     humanize,
     is_system_column,
     new_row_id,
+    sanitize_file_name,
     sanitize_identifier,
+    split_file_name,
     system_columns,
+    validate_file_name,
     validate_identifier,
 )
 
@@ -553,3 +557,46 @@ def test_save_result_conflicts_and_errors():
 def test_validation_issue_str():
     assert str(ValidationIssue("New row 1", "code", "is required")) == "New row 1, column 'code': is required"
     assert str(ValidationIssue("New row 1", None, "is empty")) == "New row 1: is empty"
+
+
+# --------------------------------------------------------------------------------------
+# Files
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("GL Transactions 2024.CSV", "gl_transactions_2024.csv"),
+        ("C:\\exports\\FX rates.parquet", "fx_rates.parquet"),
+        ("/tmp/a.b.csv", "a_b.csv"),
+        ("noext", "noext"),
+        ("Select.csv", "select_.csv"),
+        ("", "file"),
+    ],
+)
+def test_sanitize_file_name(raw, expected):
+    assert sanitize_file_name(raw) == expected
+
+
+def test_split_and_validate_file_name():
+    assert split_file_name("gl.csv") == ("gl", "csv")
+    assert split_file_name("GL.PARQUET") == ("GL", "parquet")
+    assert split_file_name("plain") == ("plain", "")
+    assert validate_file_name("gl_2024.parquet") == "gl_2024.parquet"
+    for bad in ["gl.txt", "gl", "Bad.csv", "_hidden.csv", "1st.parquet"]:
+        with pytest.raises(ValueError):
+            validate_file_name(bad)
+
+
+def test_file_def_properties_and_validation():
+    f = FileDef("finance__cost", "gl_transactions.csv", description="d")
+    assert (f.stem, f.format, f.full_name) == ("gl_transactions", "csv", "finance__cost/gl_transactions.csv")
+    assert f.title == "Gl Transactions" and f.registered and f.size_bytes is None
+    assert FileDef("finance__cost", "x.parquet", display_name="X").title == "X"
+    assert f.validate() is f
+    with pytest.raises(ValueError, match="Invalid function name"):
+        FileDef("Bad", "x.csv").validate()
+    with pytest.raises(ValueError, match="extension"):
+        FileDef("fin", "x.xlsx").validate()
+    assert FunctionDef("fin", file_count=2).file_count == 2

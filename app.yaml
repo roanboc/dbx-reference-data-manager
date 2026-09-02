@@ -37,7 +37,7 @@ env:
   # Unity Catalog catalog that holds the domains (schemas) and forms (tables).
   # Must match the catalog declared in resources/catalog.yml (bundle variable `catalog`).
   - name: RDM_CATALOG
-    value: "_forms"
+    value: "_reference_data"
 
   # Optional tuning - defaults live in rdm.config.Settings:
   # - name: RDM_MAX_ROWS            # rows loaded into the grid per form (default 5000)

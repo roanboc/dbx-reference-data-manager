@@ -5,7 +5,10 @@ What Unity Catalog has and DuckDB lacks is emulated in a private ``_catalog`` sc
 also holds the registry tables the Databricks backend maintains in ``<catalog>._catalog``:
 
 * ``domains``            - the domain list (business classifier above functions)
-* ``functions`` / ``forms`` - registry of functions (schemas) and forms with their attributes
+* ``functions`` / ``forms`` / ``files`` - registry of functions (schemas), forms and files
+* files themselves live on disk under ``<database dir>/files/<function>/<name>`` (the local
+  stand-in for the function's Unity Catalog volume) and are read with DuckDB's CSV/Parquet
+  readers
 * ``change_log``         - row-level history (audit trail)
 * ``object_properties``  - table properties / tags / schema comments (local emulation)
 * ``grants``             - schema-level roles for groups (local emulation of UC grants)
@@ -15,6 +18,8 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+import tempfile
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -35,11 +40,14 @@ from rdm.backend.sql_utils import (
     qualified,
     quote_ident,
     to_db_scalar,
+    validate_identifier,
 )
 from rdm.coercion import CoercionError, coerce_value
 from rdm.models import (
     CREATED_AT_COLUMN,
     CREATED_BY_COLUMN,
+    FILE_CHANGE_TYPES,
+    FILE_FORMATS,
     HISTORY_COLUMNS,
     ID_COLUMN,
     PROP_COLUMN_CONFIG,
@@ -56,6 +64,7 @@ from rdm.models import (
     ColumnDef,
     DataType,
     DomainDef,
+    FileDef,
     FormDef,
     FunctionDef,
     Permissions,
@@ -63,12 +72,15 @@ from rdm.models import (
     SaveResult,
     User,
     new_row_id,
+    split_file_name,
     system_columns,
+    validate_file_name,
 )
 
 log = logging.getLogger(__name__)
 
 META_SCHEMA = "_catalog"
+FILES_DIRNAME = "files"
 #: Groups that exist in the local sandbox (the persona groups plus demo grants).
 DEFAULT_LOCAL_GROUPS = (
     "rdm_admins",
@@ -108,10 +120,18 @@ def _json_default(value: Any) -> Any:
 class DuckDBBackend(DatabaseBackend):
     name = "duckdb"
 
-    def __init__(self, path: str = ":memory:") -> None:
+    def __init__(self, path: str = ":memory:", files_dir: str | None = None) -> None:
         self.path = path
+        self._temp_files_dir = False
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
+        if files_dir:
+            self.files_dir = Path(files_dir)
+        elif path != ":memory:":
+            self.files_dir = Path(path).parent / FILES_DIRNAME
+        else:
+            self.files_dir = Path(tempfile.mkdtemp(prefix="rdm_files_"))
+            self._temp_files_dir = True
         self._conn = duckdb.connect(path)
         self._ensure_meta()
 
@@ -125,6 +145,8 @@ class DuckDBBackend(DatabaseBackend):
             self._conn.close()
         except Exception:  # pragma: no cover
             pass
+        if self._temp_files_dir:
+            shutil.rmtree(self.files_dir, ignore_errors=True)
 
     @contextmanager
     def _cursor(self) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -218,6 +240,21 @@ class DuckDBBackend(DatabaseBackend):
                         updated_by    VARCHAR,
                         PRIMARY KEY (function_name, name))"""
             )
+            cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "files"])} (
+                        function_name VARCHAR NOT NULL,
+                        name          VARCHAR NOT NULL,
+                        display_name  VARCHAR,
+                        description   VARCHAR,
+                        owner         VARCHAR,
+                        size_bytes    BIGINT,
+                        row_count     BIGINT,
+                        created_at    TIMESTAMP,
+                        created_by    VARCHAR,
+                        updated_at    TIMESTAMP,
+                        updated_by    VARCHAR,
+                        PRIMARY KEY (function_name, name))"""
+            )
 
     @staticmethod
     def _migrate_meta(cur) -> None:
@@ -302,6 +339,58 @@ class DuckDBBackend(DatabaseBackend):
             f"DELETE FROM {qualified([META_SCHEMA, 'forms'])} WHERE function_name = ? AND name = ?",
             [function, name],
         )
+
+    def _register_file(self, cur, file: FileDef, actor: User) -> None:
+        now = utcnow()
+        existing = cur.execute(
+            f"SELECT created_at, created_by FROM {qualified([META_SCHEMA, 'files'])} "
+            "WHERE function_name = ? AND name = ?",
+            [file.function, file.name],
+        ).fetchone()
+        created_at, created_by = existing if existing else (now, actor.username)
+        cur.execute(
+            f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'files'])} "
+            "(function_name, name, display_name, description, owner, size_bytes, row_count, created_at, "
+            "created_by, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                file.function,
+                file.name,
+                file.display_name,
+                file.description,
+                file.owner,
+                file.size_bytes,
+                file.row_count,
+                created_at,
+                created_by,
+                now,
+                actor.username,
+            ],
+        )
+
+    def _unregister_file(self, cur, function: str, name: str) -> None:
+        cur.execute(
+            f"DELETE FROM {qualified([META_SCHEMA, 'files'])} WHERE function_name = ? AND name = ?",
+            [function, name],
+        )
+
+    def _file_registry(self, cur, function: str) -> dict[str, dict[str, Any]]:
+        cols = [
+            "name",
+            "display_name",
+            "description",
+            "owner",
+            "size_bytes",
+            "row_count",
+            "created_at",
+            "created_by",
+            "updated_at",
+            "updated_by",
+        ]
+        rows = cur.execute(
+            f"SELECT {', '.join(cols)} FROM {qualified([META_SCHEMA, 'files'])} WHERE function_name = ?",
+            [function],
+        ).fetchall()
+        return {r[0]: dict(zip(cols, r, strict=True)) for r in rows}
 
     @staticmethod
     def _t(form: FormDef) -> str:
@@ -479,6 +568,14 @@ class DuckDBBackend(DatabaseBackend):
             )
             return [self._function_from(cur, n, counts.get(n, 0)) for n in names]
 
+    def _stored_file_names(self, function: str) -> list[str]:
+        folder = self.files_dir / function
+        if not folder.is_dir():
+            return []
+        return sorted(
+            p.name for p in folder.iterdir() if p.is_file() and split_file_name(p.name)[1] in FILE_FORMATS
+        )
+
     def _function_from(self, cur, name: str, form_count: int | None) -> FunctionDef:
         props = self._get_props(cur, "schema", name)
         return FunctionDef(
@@ -489,6 +586,7 @@ class DuckDBBackend(DatabaseBackend):
             doc_link=props.get(PROP_DOC_LINK, ""),
             domain=props.get(PROP_DOMAIN, ""),
             form_count=form_count,
+            file_count=len(self._stored_file_names(name)),
             properties=props,
         )
 
@@ -571,12 +669,21 @@ class DuckDBBackend(DatabaseBackend):
                 raise ConflictError(
                     f"Function '{function.name}' still has {n} form(s). Delete or migrate them first."
                 )
+            n_files = len(self._stored_file_names(function.name))
+            if n_files:
+                raise ConflictError(
+                    f"Function '{function.name}' still has {n_files} file(s). Delete or migrate them first."
+                )
             cur.execute(f"DROP SCHEMA {quote_ident(function.name)}")
             self._delete_props(cur, function.name)
             cur.execute(
                 f"DELETE FROM {qualified([META_SCHEMA, 'grants'])} WHERE schema_name = ?", [function.name]
             )
+            cur.execute(
+                f"DELETE FROM {qualified([META_SCHEMA, 'files'])} WHERE function_name = ?", [function.name]
+            )
             self._unregister_function(cur, function.name)
+            shutil.rmtree(self.files_dir / function.name, ignore_errors=True)
 
     # -- forms -------------------------------------------------------------------------------
 
@@ -1073,6 +1180,212 @@ class DuckDBBackend(DatabaseBackend):
             records.append(rec)
         columns = [*HISTORY_COLUMNS, "changed_fields", ID_COLUMN, *user_cols]
         return pd.DataFrame.from_records(records, columns=columns)
+
+    # -- files -------------------------------------------------------------------------------
+
+    def _file_path(self, function: str, name: str) -> Path:
+        validate_identifier(function, "function name")
+        validate_file_name(name)
+        return self.files_dir / function / name
+
+    @staticmethod
+    def _reader(path: Path, fmt: str) -> str:
+        target = lit(path.as_posix())
+        return f"read_parquet({target})" if fmt == "parquet" else f"read_csv_auto({target}, header = true)"
+
+    def _file_from(self, function: str, name: str, reg: dict[str, Any] | None) -> FileDef:
+        path = self._file_path(function, name)
+        reg = reg or {}
+        size = path.stat().st_size if path.is_file() else reg.get("size_bytes")
+        return FileDef(
+            function=function,
+            name=name,
+            display_name=reg.get("display_name") or "",
+            description=reg.get("description") or "",
+            owner=reg.get("owner") or "",
+            size_bytes=int(size) if size is not None else None,
+            row_count=int(reg["row_count"]) if reg.get("row_count") is not None else None,
+            path=str(path),
+            registered=bool(reg),
+            created_at=reg.get("created_at"),
+            created_by=reg.get("created_by") or "",
+            updated_at=reg.get("updated_at"),
+            updated_by=reg.get("updated_by") or "",
+        )
+
+    def list_files(self, function: str) -> list[FileDef]:
+        with self._cursor() as cur:
+            if not self._schema_exists(cur, function):
+                raise NotFoundError(f"Function '{function}' does not exist.")
+            registry = self._file_registry(cur, function)
+        names = sorted(set(self._stored_file_names(function)) | set(registry))
+        return [
+            self._file_from(function, n, registry.get(n))
+            for n in names
+            if self._file_path(function, n).is_file()
+        ]
+
+    def get_file(self, function: str, name: str) -> FileDef:
+        path = self._file_path(function, name)
+        if not path.is_file():
+            raise NotFoundError(f"File '{function}/{name}' does not exist.")
+        with self._cursor() as cur:
+            reg = self._file_registry(cur, function).get(name)
+        return self._file_from(function, name, reg)
+
+    def _count_file_rows(self, cur, path: Path, fmt: str) -> int:
+        try:
+            return int(cur.execute(f"SELECT count(*) FROM {self._reader(path, fmt)}").fetchone()[0])
+        except duckdb.Error as exc:
+            raise BackendError(f"The file cannot be read as {fmt.upper()}: {exc}") from exc
+
+    def put_file(self, file: FileDef, data: bytes, actor: User, replace: bool = False) -> FileDef:
+        file.validate()
+        path = self._file_path(file.function, file.name)
+        existed = path.is_file()
+        if existed and not replace:
+            raise ConflictError(f"File '{file.full_name}' already exists. Replace it from its page instead.")
+        if replace and not existed:
+            raise NotFoundError(f"File '{file.full_name}' does not exist.")
+        with self._tx() as cur:
+            if not self._schema_exists(cur, file.function):
+                raise NotFoundError(f"Function '{file.function}' does not exist.")
+            previous = (
+                self._file_from(
+                    file.function, file.name, self._file_registry(cur, file.function).get(file.name)
+                )
+                if existed
+                else None
+            )
+            backup = path.read_bytes() if existed else None
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            try:
+                row_count = self._count_file_rows(cur, path, file.format)
+            except BackendError:
+                if backup is not None:
+                    path.write_bytes(backup)
+                else:
+                    path.unlink(missing_ok=True)
+                raise
+            file.size_bytes = len(data)
+            file.row_count = row_count
+            if previous is not None:
+                file.display_name = file.display_name or previous.display_name
+                file.description = file.description or previous.description
+                file.owner = file.owner or previous.owner
+            file.owner = file.owner or actor.username
+            self._register_file(cur, file, actor)
+            self._log(
+                cur,
+                file,
+                None,
+                "replace" if existed else "upload",
+                actor,
+                uuid.uuid4().hex,
+                {"size_bytes": previous.size_bytes, "row_count": previous.row_count} if previous else None,
+                {"size_bytes": file.size_bytes, "row_count": file.row_count, "format": file.format},
+                utcnow(),
+            )
+        return self.get_file(file.function, file.name)
+
+    def update_file_metadata(self, file: FileDef, actor: User) -> FileDef:
+        file.validate()
+        current = self.get_file(file.function, file.name)
+        current.display_name, current.description, current.owner = (
+            file.display_name,
+            file.description,
+            file.owner,
+        )
+        with self._tx() as cur:
+            self._register_file(cur, current, actor)
+        return self.get_file(file.function, file.name)
+
+    def read_file(self, file: FileDef) -> bytes:
+        path = self._file_path(file.function, file.name)
+        if not path.is_file():
+            raise NotFoundError(f"File '{file.full_name}' does not exist.")
+        return path.read_bytes()
+
+    def preview_file(self, file: FileDef, limit: int = 100) -> pd.DataFrame:
+        path = self._file_path(file.function, file.name)
+        if not path.is_file():
+            raise NotFoundError(f"File '{file.full_name}' does not exist.")
+        with self._cursor() as cur:
+            try:
+                return cur.execute(
+                    f"SELECT * FROM {self._reader(path, file.format)} LIMIT ?", [int(limit)]
+                ).df()
+            except duckdb.Error as exc:
+                raise BackendError(f"The file cannot be read as {file.format.upper()}: {exc}") from exc
+
+    def file_columns(self, file: FileDef) -> list[ColumnDef]:
+        path = self._file_path(file.function, file.name)
+        if not path.is_file():
+            raise NotFoundError(f"File '{file.full_name}' does not exist.")
+        with self._cursor() as cur:
+            try:
+                rows = cur.execute(f"DESCRIBE SELECT * FROM {self._reader(path, file.format)}").fetchall()
+            except duckdb.Error as exc:
+                raise BackendError(f"The file cannot be read as {file.format.upper()}: {exc}") from exc
+        cols = []
+        for i, row in enumerate(rows):
+            cname, dtype = str(row[0]), str(row[1])
+            t, p, s = parse_native_type(dtype)
+            cols.append(
+                ColumnDef(name=cname, data_type=t, precision=p, scale=s, native_type=dtype, position=i)
+            )
+        return cols
+
+    def file_history(self, file: FileDef, limit: int = 200) -> pd.DataFrame:
+        placeholders = ", ".join("?" for _ in FILE_CHANGE_TYPES)
+        with self._cursor() as cur:
+            rows = cur.execute(
+                f"SELECT id, changed_at, changed_by, change_type, before_json, after_json "
+                f"FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ? "
+                f"AND change_type IN ({placeholders}) ORDER BY id DESC LIMIT ?",
+                [file.function, file.name, *FILE_CHANGE_TYPES, int(limit)],
+            ).fetchall()
+        records = []
+        for version, changed_at, changed_by, change_type, before_json, after_json in rows:
+            snapshot = (
+                json.loads(after_json) if after_json else (json.loads(before_json) if before_json else {})
+            )
+            records.append(
+                {
+                    "version": version,
+                    "changed_at": changed_at,
+                    "changed_by": changed_by,
+                    "change_type": change_type,
+                    "size_bytes": snapshot.get("size_bytes"),
+                    "row_count": snapshot.get("row_count"),
+                }
+            )
+        return pd.DataFrame.from_records(
+            records, columns=["version", "changed_at", "changed_by", "change_type", "size_bytes", "row_count"]
+        )
+
+    def drop_file(self, file: FileDef, actor: User) -> None:
+        path = self._file_path(file.function, file.name)
+        if not path.is_file():
+            raise NotFoundError(f"File '{file.full_name}' does not exist.")
+        with self._tx() as cur:
+            current = self._file_from(
+                file.function, file.name, self._file_registry(cur, file.function).get(file.name)
+            )
+            self._unregister_file(cur, file.function, file.name)
+            self._log(
+                cur,
+                file,
+                None,
+                "delete",
+                actor,
+                uuid.uuid4().hex,
+                {"size_bytes": current.size_bytes, "row_count": current.row_count, "format": file.format},
+                None,
+                utcnow(),
+            )
+            path.unlink()
 
     # -- authorisation -------------------------------------------------------------------
 

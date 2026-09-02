@@ -20,6 +20,7 @@ from rdm.models import (
     ColumnDef,
     DataType,
     DomainDef,
+    FileDef,
     FormDef,
     FunctionDef,
     Permissions,
@@ -863,3 +864,49 @@ def test_service_with_explicit_permissions_object(backend, admin):
     form = backend.create_form(FormDef("dom", "frm", columns=[ColumnDef("x")]), admin)
     assert svc.save(form, ChangeSet(inserts=[RowInsert({"x": "1"})])).inserted == 1
     assert backend.read_rows(form)["_created_by"].tolist() == ["anyone"]
+
+
+# --------------------------------------------------------------------------------------
+# Files: guards per role
+# --------------------------------------------------------------------------------------
+
+CSV = b"code,amount\nA,1\nB,2\n"
+
+
+def test_file_guards_per_role(seeded_backend, admin, function_admin, editor, viewer):
+    # viewer on student: preview / download / history, nothing else
+    v = service(seeded_backend, viewer)
+    finance_file = seeded_backend.get_file(FINANCE, "gl_transactions.csv")
+    with pytest.raises(PermissionDenied):
+        v.get_file(FINANCE, "gl_transactions.csv")
+    with pytest.raises(PermissionDenied):
+        v.preview_file(finance_file)
+    # editor has Viewer on finance: can read, cannot replace
+    e = service(seeded_backend, editor)
+    assert e.get_file(FINANCE, "gl_transactions.csv").row_count == 2000
+    assert len(e.preview_file(finance_file, limit=5)) == 5
+    assert e.read_file(finance_file)[:10] == b"posting_id"
+    assert [c.name for c in e.file_columns(finance_file)][:2] == ["posting_id", "posted_on"]
+    assert e.file_history(finance_file)["change_type"].tolist() == ["upload"]
+    assert [f.name for f in e.list_files(FINANCE)] == ["fx_rates.parquet", "gl_transactions.csv"]
+    with pytest.raises(PermissionDenied, match="Editor access to function 'finance__cost_management'"):
+        e.replace_file(finance_file, CSV)
+    with pytest.raises(PermissionDenied):
+        e.add_file(FileDef(STUDENT, "new.csv"), CSV)  # editor on student, not admin
+    # function admin on finance: add, replace, metadata; not delete
+    fa = service(seeded_backend, function_admin)
+    added = fa.add_file(FileDef(FINANCE, "budget.csv", display_name="Budget"), CSV)
+    assert added.row_count == 2 and added.owner == function_admin.username
+    replaced = fa.replace_file(added, CSV + b"C,3\n")
+    assert replaced.row_count == 3 and replaced.display_name == "Budget"
+    replaced.description = "annual budget"
+    assert fa.update_file_metadata(replaced).description == "annual budget"
+    with pytest.raises(PermissionDenied, match="Deleting a file requires global administrator"):
+        fa.drop_file(replaced)
+    with pytest.raises(PermissionDenied):
+        fa.add_file(FileDef(STUDENT, "x.csv"), CSV)  # only viewer there
+    # global admin deletes
+    g = service(seeded_backend, admin)
+    g.drop_file(replaced)
+    assert "budget.csv" not in [f.name for f in seeded_backend.list_files(FINANCE)]
+    assert seeded_backend.file_history(replaced)["change_type"].tolist() == ["delete", "replace", "upload"]

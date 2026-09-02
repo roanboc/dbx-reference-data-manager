@@ -31,6 +31,7 @@ from rdm.models import (
     ColumnDef,
     DataType,
     DomainDef,
+    FileDef,
     FormDef,
     FunctionDef,
     Permissions,
@@ -292,6 +293,54 @@ class FormService:
         self.require_global_admin("Deleting a form")
         log.info("%s dropping form %s", self.user.username, form.full_name)
         self.backend.drop_form(form, self.user)
+
+    # -- files (CSV / Parquet in the function's volume) -------------------------------------
+
+    def list_files(self, function: str) -> list[FileDef]:
+        self.require(function, Role.VIEWER)
+        return self.backend.list_files(function)
+
+    def get_file(self, function: str, name: str) -> FileDef:
+        self.require(function, Role.VIEWER)
+        return self.backend.get_file(function, name)
+
+    def read_file(self, file: FileDef) -> bytes:
+        self.require(file.function, Role.VIEWER)
+        return self.backend.read_file(file)
+
+    def preview_file(self, file: FileDef, limit: int = 100) -> pd.DataFrame:
+        self.require(file.function, Role.VIEWER)
+        return self.backend.preview_file(file, limit=limit)
+
+    def file_columns(self, file: FileDef) -> list[ColumnDef]:
+        self.require(file.function, Role.VIEWER)
+        return self.backend.file_columns(file)
+
+    def file_history(self, file: FileDef, limit: int = 200) -> pd.DataFrame:
+        self.require(file.function, Role.VIEWER)
+        return self.backend.file_history(file, limit=limit)
+
+    def add_file(self, file: FileDef, data: bytes) -> FileDef:
+        """Adding a file to a function is a function-admin act, like creating a form."""
+        self.require(file.function, Role.ADMIN)
+        log.info("%s adding file %s (%d bytes)", self.user.username, file.full_name, len(data))
+        return self.backend.put_file(file, data, self.user, replace=False)
+
+    def replace_file(self, file: FileDef, data: bytes) -> FileDef:
+        """Replacing the content of a file is an editor act, like changing rows."""
+        self.require(file.function, Role.EDITOR)
+        log.info("%s replacing file %s (%d bytes)", self.user.username, file.full_name, len(data))
+        return self.backend.put_file(file, data, self.user, replace=True)
+
+    def update_file_metadata(self, file: FileDef) -> FileDef:
+        self.require(file.function, Role.ADMIN)
+        return self.backend.update_file_metadata(file, self.user)
+
+    def drop_file(self, file: FileDef) -> None:
+        """Deleting a file is reserved to global admins, like deleting a form."""
+        self.require_global_admin("Deleting a file")
+        log.info("%s dropping file %s", self.user.username, file.full_name)
+        self.backend.drop_file(file, self.user)
 
     # -- functions (schemas) ---------------------------------------------------------------
 

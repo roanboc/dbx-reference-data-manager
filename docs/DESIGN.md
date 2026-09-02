@@ -12,9 +12,11 @@ Streamlit implementation is kept in git history).
 
 * One generic web application that manages every "CRUD list" and slowly changing reference
   table of the platform, replacing SharePoint lists.
-* Data lives in Unity Catalog Delta tables (`<catalog>.<function>.<form>`), governance is
-  Unity Catalog grants at schema level, infrastructure is a Databricks Asset Bundle. Functions
-  (schemas) are grouped into *domains*, a business classifier kept in the app's registry.
+* Data lives in Unity Catalog Delta tables (`<catalog>.<function>.<form>`) and, for datasets
+  too large for a grid, in files of the volume `<catalog>.<function>._files`; governance is
+  Unity Catalog grants at schema level, infrastructure is a Databricks Asset Bundle.
+  Functions (schemas) are grouped into *domains*, a business classifier kept in the app's
+  registry.
 * The UI never contains SQL. Every database interaction goes through a `DatabaseBackend`
   interface with a DuckDB implementation for local development and a Databricks SQL
   implementation for production.
@@ -47,6 +49,7 @@ src/rdm/
   services/catalog_service.py   Navigation: visible functions/forms, search, grouping by domain
   services/form_service.py      Role guards, positional change-set builder, validation
   services/draft.py             Row-id keyed draft -> ChangeSet; bulk update and restore helpers
+  services/files.py             Upload checks and local preview for files
   services/excel_import.py      Excel/CSV parsing, type inference, column sanitising
   ui/                       Dash shell, routing, pages, AG Grid configuration
 tests/                      Unit, backend contract and Dash server tests
@@ -56,16 +59,18 @@ tests/                      Unit, backend contract and Dash server tests
 
 | Concept | Local (DuckDB) | Production (Unity Catalog) |
 |---|---|---|
-| Catalog | DuckDB database file | `_forms` (configurable `RDM_CATALOG`, per bundle target) |
+| Catalog | DuckDB database file | `_reference_data` (configurable `RDM_CATALOG`, per bundle target) |
 | Domain (classifier) | `_catalog.domains` | `<catalog>._catalog.domains` (registry table, same shape) |
 | Function | schema | schema, e.g. `student__survey_service_improvement` |
 | Function's domain | `_catalog.object_properties` (`rdm.domain`) | schema `DBPROPERTIES ('rdm.domain')`, schema tag `rdm_domain`, `_catalog.functions.domain_name` |
 | Form | table | Delta table |
+| File | `<db dir>/files/<function>/<name>` on disk, read with `read_csv_auto` / `read_parquet` | file in the managed volume `<catalog>.<function>._files`, moved with the Files API, read with `read_files` |
+| File attributes | `_catalog.files` | `<catalog>._catalog.files` (same shape) |
 | Form description | `COMMENT ON TABLE` | table `COMMENT` |
 | Column description | `COMMENT ON COLUMN` | column `COMMENT` |
 | Display name, owner, column config | `_catalog.object_properties` | `TBLPROPERTIES ('rdm.display_name', 'rdm.owner', 'rdm.column_config')`, mirrored to tags `rdm_display_name` / `rdm_owner` (bulk-readable from `information_schema.table_tags`) |
 | Function description / owner / doc link | `_catalog.object_properties` (DuckDB cannot comment schemas) | `COMMENT ON SCHEMA` + `DBPROPERTIES` + schema tags |
-| Registry | `_catalog.domains` / `functions` / `forms` | same tables in `<catalog>._catalog` |
+| Registry | `_catalog.domains` / `functions` / `forms` / `files` | same tables in `<catalog>._catalog` |
 | Change history | `_catalog.change_log` | `<catalog>._catalog.change_log` (same shape) + Delta Change Data Feed |
 | Permissions | `_catalog.grants` (persona groups) | UC schema/catalog privileges via `information_schema` |
 | Functions and grants | created/granted in the app | app (`CREATE SCHEMA`, `GRANT`) and bundle; the bundle owns the complete grant list |
@@ -111,11 +116,15 @@ create_form(FormDef, actor, rows) / update_form_metadata / add_column / drop_col
 read_rows(form, search, limit, order_by, descending)   normalised frame incl. system columns
 count_rows / apply_changes(form, ChangeSet, actor) -> SaveResult / append_rows
 get_history(form, limit, row_id=None)                 form-level or per-row history
+list_files(function) / get_file / put_file(file, bytes, actor, replace) / update_file_metadata
+read_file / preview_file(file, limit) / file_columns / file_history / drop_file
 get_permissions(user) -> Permissions / list_function_grants / grant_function_role
 ```
 
 `delete_domain` refuses while functions are assigned; `drop_function` refuses while the
-schema holds tables. Both are plain `ConflictError`s the UI shows as they are.
+schema holds tables or files. Both are plain `ConflictError`s the UI shows as they are.
+`put_file` counts the rows with the platform reader and rejects unreadable uploads (a
+replacement that fails leaves the previous content in place).
 
 Design rules:
 
@@ -154,15 +163,17 @@ Design rules:
 
 | Role | Unity Catalog privileges (schema, plus `USE CATALOG`) |
 |---|---|
-| Viewer | `USE SCHEMA`, `SELECT` |
-| Editor | Viewer + `MODIFY` |
-| Function admin | Editor + `CREATE TABLE`, `MANAGE`, `APPLY TAG` (or schema ownership) |
+| Viewer | `USE SCHEMA`, `SELECT`, `READ VOLUME` |
+| Editor | Viewer + `MODIFY`, `WRITE VOLUME` |
+| Function admin | Editor + `CREATE TABLE`, `CREATE VOLUME`, `MANAGE`, `APPLY TAG` (or schema ownership) |
 | Global admin | `CREATE SCHEMA` / `MANAGE` on the catalog, or catalog ownership |
 
-  `MANAGE` on the schema is inherited by every table, so function admins can alter forms
-  whoever created them; the *app* nevertheless reserves `drop_form` and `drop_function` to
-  global admins (`FormService.require_global_admin`), which is a workflow rule on top of the
-  UC privileges. UC `MODIFY` also permits column DDL outside the app; the app is the workflow,
+  `MANAGE` on the schema is inherited by every table and volume, so function admins can
+  alter forms whoever created them; the *app* nevertheless reserves `drop_form`, `drop_file`
+  and `drop_function` to global admins (`FormService.require_global_admin`), which is a
+  workflow rule on top of the UC privileges. File operations go through the Files API with
+  the user's token (user authorization scope `files.files`), so `READ VOLUME` / `WRITE
+  VOLUME` decide who can download and replace. UC `MODIFY` also permits column DDL outside the app; the app is the workflow,
   `DESCRIBE HISTORY` is the audit of such changes.
 * Functions and grants can be created from the app (`CREATE SCHEMA`, `GRANT`/`REVOKE` run as
   the signed-in user) and are also declared in `resources/schemas.yml`. The bundle manages the
@@ -234,6 +245,12 @@ import (append) cover bulk changes instead.
 * **Domains** (global admins): list, create, edit, delete when unassigned. The sidebar and
   the home page group functions under their domain; unassigned functions form a trailing
   group.
+* **Files**: *Add file* on the function page (function admins) uploads a CSV/Parquet file
+  through `dcc.Upload` (limit `RDM_MAX_FILE_MB`), previews the first rows locally
+  (`services/files.preview_bytes`) and stores it with `put_file`; the file page previews the
+  first rows through the backend reader, lists inferred columns and the upload history,
+  downloads (`dcc.send_bytes`), replaces (editors) and deletes (global admins). Files found
+  in the volume without a registry entry are listed as unregistered.
 
 ## 9. Local development and testing strategy
 

@@ -1,17 +1,21 @@
 """Function overview and administration (details, domain, access grants, deletion), plus 'new function'.
 
-A function is one Unity Catalog schema. Function admins edit its details and grant roles;
-only global admins create functions, assign them to a domain and delete them.
+A function is one Unity Catalog schema holding forms (tables) and files (CSV/Parquet in its
+volume). Function admins edit its details, add files and grant roles; only global admins
+create functions, assign them to a domain and delete them.
 """
 
 from __future__ import annotations
 
+import dash_ag_grid as dag
 import dash_mantine_components as dmc
 from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
 
 from rdm.backend.base import BackendError, NotFoundError, PermissionDenied
-from rdm.models import FormDef, FunctionDef, Role, sanitize_identifier
-from rdm.ui import ids
+from rdm.models import FileDef, FormDef, FunctionDef, Role, humanize, sanitize_identifier, split_file_name
+from rdm.services.files import FileError, check_upload, human_size, preview_bytes
+from rdm.ui import grid as g
+from rdm.ui import ids, uploads
 from rdm.ui.components import (
     ROLE_COLORS,
     domain_badge,
@@ -25,7 +29,9 @@ from rdm.ui.components import (
     role_badge,
 )
 from rdm.ui.context import AppContext, get_context, invalidate_metadata
-from rdm.ui.layout import form_href, function_href
+from rdm.ui.layout import file_href, form_href, function_href
+
+GRID_THEME = "ag-theme-quartz"
 
 GRANTABLE = [Role.VIEWER, Role.EDITOR, Role.ADMIN]
 
@@ -50,6 +56,7 @@ def render(ctx_: AppContext, function_name: str) -> dmc.Stack:
     except NotFoundError as exc:
         return dmc.Stack([error_alert(str(exc), "Not found")])
     forms = ctx_.backend.list_forms(function.name)
+    files = ctx_.backend.list_files(function.name)
     right = [role_badge(role)]
     if ctx_.permissions.is_global_admin:
         right.insert(0, dmc.Badge("Global admin", color="orange", variant="light", size="sm"))
@@ -98,12 +105,188 @@ def render(ctx_: AppContext, function_name: str) -> dmc.Stack:
             justify="space-between",
         ),
         html.Div(id=ids.FUNCTION_FORMS, children=form_cards(function.name, forms, None, role)),
+        dmc.Group(
+            [
+                dmc.Title(f"Files ({len(files)})", order=4),
+                dmc.Button(
+                    "Add file",
+                    id=ids.ADD_FILE_OPEN,
+                    variant="light",
+                    size="sm",
+                    leftSection=icon("tabler:file-plus"),
+                    style={} if role.can_admin else {"display": "none"},
+                ),
+            ],
+            justify="space-between",
+            mt="sm",
+        ),
+        dmc.Text(
+            "CSV or Parquet datasets too large for a grid: previewed, downloaded and replaced as a whole, "
+            "with the same access rules and history as forms.",
+            size="xs",
+            c="dimmed",
+        ),
+        html.Div(id=ids.FUNCTION_FILES, children=file_cards(function.name, files, None, role)),
+        _add_file_modal(ctx_, function),
     ]
     if role.can_admin:
         blocks += [dmc.Divider(my="md"), _admin(ctx_, function)]
     if ctx_.permissions.can_delete:
-        blocks.append(_danger_zone(function, len(forms)))
+        blocks.append(_danger_zone(function, len(forms) + len(files)))
     return dmc.Stack(blocks, gap="md")
+
+
+def file_cards(
+    function: str, files: list[FileDef], text: str | None, role: Role
+) -> dmc.SimpleGrid | dmc.Paper:
+    needle = (text or "").strip().lower()
+    shown = [
+        f for f in files if not needle or needle in f"{f.name} {f.title} {f.description} {f.owner}".lower()
+    ]
+    if not shown:
+        if not files:
+            return empty_state(
+                "No files in this function",
+                "Function admins can add a CSV or Parquet file with Add file."
+                if role.can_admin
+                else "Nothing here yet.",
+                "tabler:file-spreadsheet",
+            )
+        return empty_state("No matches", "Try another word.", "tabler:search-off")
+    cards = []
+    for f in shown:
+        meta = " · ".join(
+            x
+            for x in [
+                f.format.upper(),
+                human_size(f.size_bytes),
+                f"{f.row_count:,} rows" if f.row_count is not None else "",
+                f"owner {f.owner}" if f.owner else "",
+            ]
+            if x
+        )
+        cards.append(
+            dmc.Card(
+                dmc.Stack(
+                    [
+                        dmc.Group(
+                            [
+                                icon(
+                                    "tabler:file-spreadsheet"
+                                    if f.format == "csv"
+                                    else "tabler:file-database",
+                                    18,
+                                ),
+                                dmc.Text(f.title, fw=600),
+                                dmc.Badge("not registered", size="xs", color="yellow", variant="light")
+                                if not f.registered
+                                else None,
+                            ],
+                            gap=6,
+                        ),
+                        dmc.Text(f.description or "No description", size="sm", c="dimmed", lineClamp=2),
+                        dmc.Text(meta, size="xs", c="dimmed"),
+                        link_button(
+                            "Open",
+                            file_href(function, f.name),
+                            size="xs",
+                            variant="light",
+                            leftSection=icon("tabler:external-link", 14),
+                        ),
+                    ],
+                    gap="xs",
+                ),
+                withBorder=True,
+                radius="md",
+                padding="md",
+            )
+        )
+    return dmc.SimpleGrid(cards, cols={"base": 1, "md": 2, "xl": 3})
+
+
+def _add_file_modal(ctx_: AppContext, function: FunctionDef) -> dmc.Modal:
+    max_mb = ctx_.settings.max_file_mb
+    return dmc.Modal(
+        id=ids.ADD_FILE_MODAL,
+        title=f"Add a file to {function.title}",
+        size="xl",
+        children=dmc.Stack(
+            [
+                dcc.Store(id=ids.ADD_FILE_TOKEN, data=None),
+                dmc.Text(
+                    f"Upload a CSV or Parquet file (up to {max_mb} MB through the browser; larger files can be "
+                    "landed in the function's volume directly and appear here automatically). The file is stored "
+                    "as a whole; rows are not edited in a grid.",
+                    size="sm",
+                    c="dimmed",
+                ),
+                dcc.Upload(
+                    id=ids.ADD_FILE_UPLOAD,
+                    children=html.Div(
+                        ["Drag and drop or ", html.B("click to choose"), " a CSV or Parquet file"]
+                    ),
+                    className="rdm-dropzone",
+                    multiple=False,
+                    accept=".csv,.parquet",
+                    max_size=max_mb * 1024 * 1024,
+                ),
+                html.Div(id=ids.ADD_FILE_PREVIEW),
+                dmc.SimpleGrid(
+                    [
+                        dmc.TextInput(
+                            id=ids.ADD_FILE_NAME,
+                            label="File name",
+                            description="lower_snake_case plus .csv or .parquet; the name in the volume",
+                            required=True,
+                        ),
+                        dmc.TextInput(id=ids.ADD_FILE_DISPLAY, label="Display name"),
+                        dmc.Textarea(id=ids.ADD_FILE_DESC, label="Description", autosize=True, minRows=2),
+                        dmc.TextInput(
+                            id=ids.ADD_FILE_OWNER, label="Owner", value=ctx_.user.email or ctx_.user.username
+                        ),
+                    ],
+                    cols={"base": 1, "md": 2},
+                ),
+                dmc.Group(
+                    [
+                        dmc.Button(
+                            "Add file",
+                            id=ids.ADD_FILE_SUBMIT,
+                            disabled=True,
+                            leftSection=icon("tabler:file-plus"),
+                        )
+                    ],
+                    justify="flex-end",
+                ),
+            ],
+            gap="sm",
+        ),
+    )
+
+
+def upload_preview(name: str, data: bytes) -> dmc.Stack:
+    """Size, format and the first rows of an uploaded file (parsed locally, before storing)."""
+    fmt = split_file_name(name)[1]
+    frame = preview_bytes(data, fmt)
+    return dmc.Stack(
+        [
+            dmc.Text(
+                f"{name} · {fmt.upper()} · {human_size(len(data))} · {len(frame.columns)} columns "
+                f"(showing the first {len(frame)} rows)",
+                size="sm",
+                fw=500,
+            ),
+            dag.AgGrid(
+                rowData=g.records_from_frame(frame),
+                columnDefs=g.frame_column_defs(frame),
+                defaultColDef={"resizable": True},
+                columnSize="autoSize",
+                className=GRID_THEME,
+                style={"height": "240px"},
+            ),
+        ],
+        gap="xs",
+    )
 
 
 def form_cards(
@@ -465,6 +648,7 @@ def render_new(ctx_: AppContext) -> dmc.Stack:
 def register(app) -> None:
     @app.callback(
         Output(ids.FUNCTION_FORMS, "children"),
+        Output(ids.FUNCTION_FILES, "children"),
         Input(ids.FUNCTION_FORMS_FILTER, "value"),
         State(ids.FUNCTION_KEY, "data"),
         State(ids.PERSONA, "data"),
@@ -472,7 +656,89 @@ def register(app) -> None:
     )
     def filter_forms(text, function, persona):
         c = get_context(persona)
-        return form_cards(function, c.backend.list_forms(function), text, c.role_of(function))
+        role = c.role_of(function)
+        return (
+            form_cards(function, c.backend.list_forms(function), text, role),
+            file_cards(function, c.backend.list_files(function), text, role),
+        )
+
+    @app.callback(
+        Output(ids.ADD_FILE_MODAL, "opened"), Input(ids.ADD_FILE_OPEN, "n_clicks"), prevent_initial_call=True
+    )
+    def open_add_file(n):
+        return bool(n)
+
+    @app.callback(
+        Output(ids.ADD_FILE_PREVIEW, "children"),
+        Output(ids.ADD_FILE_TOKEN, "data"),
+        Output(ids.ADD_FILE_NAME, "value"),
+        Output(ids.ADD_FILE_DISPLAY, "value"),
+        Output(ids.ADD_FILE_SUBMIT, "disabled"),
+        Input(ids.ADD_FILE_UPLOAD, "contents"),
+        State(ids.ADD_FILE_UPLOAD, "filename"),
+        State(ids.PERSONA, "data"),
+        prevent_initial_call=True,
+    )
+    def preview_new_file(contents, filename, persona):
+        if not contents:
+            return no_update, no_update, no_update, no_update, True
+        c = get_context(persona)
+        token = uploads.put_data_url(filename or "upload", contents)
+        _name, data = uploads.get(token)
+        try:
+            name = check_upload(filename or "", data, c.settings.max_file_mb)
+            preview = upload_preview(name, data)
+        except FileError as exc:
+            uploads.drop(token)
+            return error_alert(exc, "Cannot use this file"), None, "", "", True
+        return preview, token, name, humanize(split_file_name(name)[0]), False
+
+    @app.callback(
+        Output(ids.URL, "pathname", allow_duplicate=True),
+        Output(ids.NOTIFY, "sendNotifications", allow_duplicate=True),
+        Output(ids.NAV_VERSION, "data", allow_duplicate=True),
+        Output(ids.ADD_FILE_PREVIEW, "children", allow_duplicate=True),
+        Input(ids.ADD_FILE_SUBMIT, "n_clicks"),
+        State(ids.ADD_FILE_TOKEN, "data"),
+        State(ids.ADD_FILE_NAME, "value"),
+        State(ids.ADD_FILE_DISPLAY, "value"),
+        State(ids.ADD_FILE_DESC, "value"),
+        State(ids.ADD_FILE_OWNER, "value"),
+        State(ids.FUNCTION_KEY, "data"),
+        State(ids.NAV_VERSION, "data"),
+        State(ids.PERSONA, "data"),
+        prevent_initial_call=True,
+    )
+    def add_file(n, token, raw_name, display, desc, owner, function, nav_version, persona):
+        if not n:
+            return no_update, no_update, no_update, no_update
+        stored = uploads.get(token)
+        if stored is None:
+            return no_update, notify("Upload a file first", color="yellow"), no_update, no_update
+        _filename, data = stored
+        c = get_context(persona)
+        try:
+            name = check_upload(raw_name or "", data, c.settings.max_file_mb)
+            created = c.forms.add_file(
+                FileDef(
+                    function,
+                    name,
+                    display_name=(display or "").strip(),
+                    description=(desc or "").strip(),
+                    owner=(owner or "").strip(),
+                ),
+                data,
+            )
+        except (BackendError, PermissionDenied, FileError, ValueError) as exc:
+            return no_update, no_update, no_update, error_alert(exc, "Cannot add the file")
+        uploads.drop(token)
+        invalidate_metadata()
+        return (
+            file_href(created.function, created.name),
+            notify(f"File '{created.title}' added ({created.row_count or 0:,} rows)"),
+            (nav_version or 0) + 1,
+            None,
+        )
 
     @app.callback(
         Output(ids.FUNCTION_RESULT, "children"),

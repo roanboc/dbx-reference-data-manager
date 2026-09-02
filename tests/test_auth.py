@@ -212,7 +212,7 @@ def test_settings_defaults_from_empty_env():
     s = Settings.from_env({})
     assert s == Settings()
     assert s.backend == "duckdb" and s.auth == "mock" and s.persona == "admin"
-    assert s.duckdb_path == "data/rdm.duckdb" and s.catalog == "_forms"
+    assert s.duckdb_path == "data/rdm.duckdb" and s.catalog == "_reference_data"
     assert s.max_rows == 5000 and s.metadata_cache_ttl == 60
     assert not s.is_databricks
     assert s.databricks_host is None and s.warehouse_http_path is None

@@ -7,12 +7,13 @@ Usage: python scripts/seed_demo.py [--reset] [--path data/rdm.duckdb]
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from rdm.backend.duckdb_backend import DuckDBBackend  # noqa: E402
+from rdm.backend.duckdb_backend import FILES_DIRNAME, DuckDBBackend  # noqa: E402
 from rdm.config import Settings  # noqa: E402
 from rdm.demo import seed  # noqa: E402
 
@@ -32,13 +33,16 @@ def main() -> int:
         wal = path.with_suffix(path.suffix + ".wal")
         if wal.exists():
             wal.unlink()
+        shutil.rmtree(path.parent / FILES_DIRNAME, ignore_errors=True)  # the demo files next to the database
     backend = DuckDBBackend(str(path))
     seed(backend)
     domains = backend.list_domains()
     functions = backend.list_functions()
-    print(f"Seeded {path} with {len(domains)} domains and {len(functions)} functions:")
+    print(
+        f"Seeded {path} with {len(domains)} domains and {len(functions)} functions (files in {backend.files_dir}):"
+    )
     for f in functions:
-        print(f"  - {f.domain or '(unassigned)'} > {f.name} ({f.form_count} forms)")
+        print(f"  - {f.domain or '(unassigned)'} > {f.name} ({f.form_count} forms, {f.file_count} files)")
     backend.close()
     return 0
 

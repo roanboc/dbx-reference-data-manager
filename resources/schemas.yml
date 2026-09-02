@@ -1,14 +1,15 @@
 # Function schemas of the reference-data catalog. The app's hierarchy is
-# domain > function > form: one schema per business *function*, named <domain>__<area>
+# domain > function > form | file: one schema per business *function*, named <domain>__<area>
 # (lowercase, matches the app's identifier rule ^[a-z][a-z0-9_]{0,62}$), grouped into
 # business *domains* (a classifier the app keeps in _catalog.domains and records on the
 # schema as the property rdm.domain / tag rdm_domain). These three mirror the demo
-# functions seeded locally by scripts/seed_demo.py (src/rdm/demo.py).
+# functions seeded locally by scripts/seed_demo.py (src/rdm/demo.py). Each function's files
+# live in the managed volume <schema>._files, created by the app on first use (CREATE_VOLUME).
 #
 # Role mapping (docs/DESIGN.md §5) - grants go to account-level groups, never to users:
-#   Viewer          USE_SCHEMA, SELECT                         (+ USE_CATALOG from catalog.yml)
-#   Editor          Viewer + MODIFY
-#   Function admin  Editor + CREATE_TABLE + MANAGE + APPLY_TAG
+#   Viewer          USE_SCHEMA, SELECT, READ_VOLUME            (+ USE_CATALOG from catalog.yml)
+#   Editor          Viewer + MODIFY + WRITE_VOLUME             (replace files)
+#   Function admin  Editor + CREATE_TABLE + CREATE_VOLUME + MANAGE + APPLY_TAG
 #   Global admin    CREATE_SCHEMA + MANAGE on the catalog (resources/catalog.yml); only
 #                   global admins delete functions and forms and maintain the domain list
 #
@@ -42,7 +43,7 @@ resources:
       comment: "Reference Data Manager registry and audit trail (managed by the app)"
       grants:
         - principal: ${var.app_users_group}
-          privileges: [USE_SCHEMA, SELECT, MODIFY]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME]
         - principal: ${var.admin_group}
           privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE]
     student_survey_service_improvement:
@@ -55,11 +56,11 @@ resources:
         rdm.domain: student
       grants:
         - principal: student_readers          # Viewer
-          privileges: [USE_SCHEMA, SELECT]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME]
         - principal: student_stewards         # Editor
-          privileges: [USE_SCHEMA, SELECT, MODIFY]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME]
         - principal: ${var.admin_group}       # Global admin group (Function admin set)
-          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE, APPLY_TAG]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME, CREATE_TABLE, CREATE_VOLUME, MANAGE, APPLY_TAG]
 
     finance_cost_management:
       name: finance__cost_management
@@ -71,13 +72,13 @@ resources:
         rdm.domain: finance
       grants:
         - principal: finance_readers          # Viewer
-          privileges: [USE_SCHEMA, SELECT]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME]
         - principal: finance_stewards         # Editor
-          privileges: [USE_SCHEMA, SELECT, MODIFY]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME]
         - principal: finance_admins           # Function admin (delegated to the owning team)
-          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE, APPLY_TAG]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME, CREATE_TABLE, CREATE_VOLUME, MANAGE, APPLY_TAG]
         - principal: ${var.admin_group}       # Global admin group (Function admin set)
-          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE, APPLY_TAG]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME, CREATE_TABLE, CREATE_VOLUME, MANAGE, APPLY_TAG]
 
     hr_reference:
       name: hr__reference
@@ -89,8 +90,8 @@ resources:
         rdm.domain: people
       grants:
         - principal: hr_readers               # Viewer
-          privileges: [USE_SCHEMA, SELECT]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME]
         - principal: hr_stewards              # Editor
-          privileges: [USE_SCHEMA, SELECT, MODIFY]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME]
         - principal: ${var.admin_group}       # Global admin group (Function admin set)
-          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE, APPLY_TAG]
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME, CREATE_TABLE, CREATE_VOLUME, MANAGE, APPLY_TAG]

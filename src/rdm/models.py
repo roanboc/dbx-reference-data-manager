@@ -2,7 +2,9 @@
 
 Nothing in this module knows about SQL or Dash. The hierarchy is *domain* (a business
 classifier maintained by global admins) > *function* (a Unity Catalog schema) > *form* (a
-Delta table). Backends translate these objects into their own DDL/DML; the UI renders them.
+Delta table) or *file* (a CSV/Parquet file in the function's volume, for lists too large to
+manage in a grid). Backends translate these objects into their own DDL/DML; the UI renders
+them.
 """
 
 from __future__ import annotations
@@ -134,7 +136,7 @@ def validate_identifier(name: str, kind: str = "identifier", allow_leading_under
     """Return ``name`` if it is a safe identifier, else raise ``ValueError``.
 
     Leading underscores are reserved for system objects (``_id``, ``_catalog``, the
-    ``_forms`` catalog); user-created names must start with a letter.
+    ``_reference_data`` catalog); user-created names must start with a letter.
     """
     if not isinstance(name, str) or not IDENTIFIER_RE.match(name):
         raise ValueError(
@@ -164,6 +166,38 @@ def sanitize_identifier(raw: Any, fallback: str = "column") -> str:
     if text in RESERVED_WORDS:
         text = f"{text[: MAX_IDENTIFIER_LENGTH - 1]}_"
     return text
+
+
+#: File formats accepted for files (large reference datasets kept as files, not as forms).
+FILE_FORMATS: tuple[str, ...] = ("csv", "parquet")
+
+
+def split_file_name(name: str) -> tuple[str, str]:
+    """``"gl_transactions.csv"`` -> ``("gl_transactions", "csv")``; no extension -> ``("...", "")``."""
+    stem, _, ext = (name or "").rpartition(".")
+    if not stem:
+        return ext, ""
+    return stem, ext.lower()
+
+
+def sanitize_file_name(raw: Any, fallback: str = "file") -> str:
+    """Turn an uploaded file name into ``<identifier>.<format>`` (``"GL Transactions 2024.CSV"`` -> ``"gl_transactions_2024.csv"``)."""
+    text = "" if raw is None else str(raw)
+    base = text.replace("\\", "/").rsplit("/", 1)[-1]
+    stem, ext = split_file_name(base)
+    stem = sanitize_identifier(stem, fallback=fallback)
+    return f"{stem}.{ext}" if ext else stem
+
+
+def validate_file_name(name: str) -> str:
+    """A file name is ``<identifier>.<format>`` with a supported format."""
+    stem, ext = split_file_name(name)
+    if ext not in FILE_FORMATS:
+        raise ValueError(
+            f"Invalid file name {name!r}: the extension must be one of {', '.join(FILE_FORMATS)}."
+        )
+    validate_identifier(stem, "file name", allow_leading_underscore=False)
+    return name
 
 
 def humanize(name: str) -> str:
@@ -454,6 +488,7 @@ class FunctionDef:
     doc_link: str = ""  # project documentation URL
     domain: str = ""  # name of the domain the function is assigned to
     form_count: int | None = None
+    file_count: int | None = None
     properties: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -576,6 +611,55 @@ class FormDef:
             if isinstance(opts, list):
                 c.options = [str(o) for o in opts]
             c.is_key = bool(entry.get("key", False))
+
+
+@dataclass
+class FileDef:
+    """A file: a CSV or Parquet dataset in a function's volume, for lists too large for a grid.
+
+    Files share the function's access rules and metadata (display name, description, owner,
+    registry entry, history of uploads) but are not edited row by row: they are uploaded,
+    previewed, downloaded and replaced as a whole.
+    """
+
+    function: str
+    name: str  # ``<identifier>.<csv|parquet>``, the file name in the volume
+    display_name: str = ""
+    description: str = ""
+    owner: str = ""
+    size_bytes: int | None = None
+    row_count: int | None = None
+    path: str = ""  # where the backend stores it (volume path or local path), informative
+    registered: bool = True  # False for a file found in storage without a registry entry
+    created_at: datetime | None = None
+    created_by: str = ""
+    updated_at: datetime | None = None
+    updated_by: str = ""
+
+    @property
+    def stem(self) -> str:
+        return split_file_name(self.name)[0]
+
+    @property
+    def format(self) -> str:
+        return split_file_name(self.name)[1]
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.function}/{self.name}"
+
+    @property
+    def title(self) -> str:
+        return self.display_name or humanize(self.stem)
+
+    def validate(self) -> FileDef:
+        validate_identifier(self.function, "function name", allow_leading_underscore=False)
+        validate_file_name(self.name)
+        return self
+
+
+#: Change types recorded for files in the audit trail.
+FILE_CHANGE_TYPES: tuple[str, ...] = ("upload", "replace", "delete")
 
 
 # --------------------------------------------------------------------------------------

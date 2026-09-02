@@ -9,7 +9,7 @@ from rdm.services import NavDomain
 from rdm.ui import ids
 from rdm.ui.components import ROLE_COLORS, empty_state, icon, link_button, page_title
 from rdm.ui.context import AppContext, get_context, grouped_navigation
-from rdm.ui.layout import form_href, function_href
+from rdm.ui.layout import file_href, form_href, function_href
 
 
 def render(ctx_: AppContext) -> dmc.Stack:
@@ -33,15 +33,17 @@ def render(ctx_: AppContext) -> dmc.Stack:
         )
     items = [i for g in groups for i in g.functions]
     n_forms = sum(len(i.forms) for i in items)
-    editable = sum(len(i.forms) for i in items if i.role.can_edit)
+    n_files = sum(len(i.files) for i in items)
+    editable = sum(len(i.forms) + len(i.files) for i in items if i.role.can_edit)
     stats = dmc.SimpleGrid(
         [
             _stat("Domains", len([g for g in groups if not g.is_unassigned]), "tabler:sitemap"),
             _stat("Functions", len(items), "tabler:folders"),
             _stat("Forms", n_forms, "tabler:table"),
+            _stat("Files", n_files, "tabler:file-spreadsheet"),
             _stat("You can edit", editable, "tabler:pencil"),
         ],
-        cols={"base": 2, "sm": 4},
+        cols={"base": 2, "sm": 5},
     )
     return dmc.Stack(
         [
@@ -49,7 +51,7 @@ def render(ctx_: AppContext) -> dmc.Stack:
             stats,
             dmc.TextInput(
                 id=ids.HOME_FILTER,
-                placeholder="Filter domains, functions and forms",
+                placeholder="Filter domains, functions, forms and files",
                 leftSection=icon("tabler:filter"),
                 debounce=250,
                 w=360,
@@ -70,6 +72,7 @@ def cards(groups: list[NavDomain], text: str | None) -> dmc.Stack | dmc.Paper:
         for item in group.functions:
             f = item.function
             forms = item.forms
+            files = item.files
             if (
                 needle
                 and not domain_matches
@@ -78,7 +81,10 @@ def cards(groups: list[NavDomain], text: str | None) -> dmc.Stack | dmc.Paper:
                 forms = [
                     x for x in forms if needle in f"{x.name} {x.title} {x.description} {x.owner}".lower()
                 ]
-                if not forms:
+                files = [
+                    x for x in files if needle in f"{x.name} {x.title} {x.description} {x.owner}".lower()
+                ]
+                if not forms and not files:
                     continue
             links = [
                 dmc.Anchor(
@@ -87,7 +93,23 @@ def cards(groups: list[NavDomain], text: str | None) -> dmc.Stack | dmc.Paper:
                     underline="never",
                 )
                 for x in forms
-            ] or [dmc.Text("No forms yet.", size="sm", c="dimmed")]
+            ] + [
+                dmc.Anchor(
+                    dmc.Group(
+                        [
+                            icon(
+                                "tabler:file-spreadsheet" if x.format == "csv" else "tabler:file-database", 14
+                            ),
+                            dmc.Text(x.title, size="sm"),
+                            dmc.Badge(x.format.upper(), size="xs", variant="outline", color="gray"),
+                        ],
+                        gap=6,
+                    ),
+                    href=file_href(f.name, x.name),
+                    underline="never",
+                )
+                for x in files
+            ] or [dmc.Text("No forms or files yet.", size="sm", c="dimmed")]
             actions = [
                 link_button(
                     "Open function",

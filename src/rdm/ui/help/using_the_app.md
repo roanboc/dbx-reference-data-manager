@@ -1,8 +1,10 @@
-## Finding a form
+## Finding a form or a file
 
 * The sidebar lists every **function** you have access to, grouped under its **domain**, with
-  the forms inside each function. Type in the search box to filter by form name, description
-  or owner; functions stay visible while any of their forms match.
+  the forms and files inside each function. Type in the search box to filter by name,
+  description or owner; functions stay visible while any of their forms or files match.
+* A **form** is a list you edit in a grid. A **file** (CSV or Parquet) is a dataset too large
+  for a grid: you preview its first rows, download it and, as an editor, replace it as a whole.
 * Your role in each function is shown as a badge: **Viewer** (read only), **Editor** (change
   rows) or **Function admin** (also create forms and change their definition).
 * Every form has its own address, so you can bookmark it or paste the link in an email.
@@ -34,6 +36,20 @@ Each row remembers its version. If another person saved a change to a row you al
 your change to that row is **not** applied and the grid tells you which rows were affected;
 the grid refreshes so you can redo the edit on the current values.
 
+## Files
+
+| Action | Who | How |
+|---|---|---|
+| Preview | everyone with access | The **Preview** tab shows the first rows; **Columns** the inferred types. |
+| Download | everyone with access | **Download** on the file page. |
+| Replace | Editors | **Replace file**: upload a new file of the same format; the previous size and row count stay in the **History** tab. |
+| Add | Function admins | **Add file** on the function page: upload, check the preview, give it a name and description. |
+| Delete | Global admins | **Settings** tab of the file. |
+
+Files larger than the upload limit are landed in the function's volume directly (Databricks
+CLI or a pipeline) and appear on the function page automatically, marked *not registered*
+until an admin gives them a description.
+
 ## History and restore
 
 The **History** tab shows every saved change: who, when, added / edited / deleted, and the
@@ -48,10 +64,10 @@ row values. Use the search box above it to find a row.
 
 | Role | Can |
 |---|---|
-| Viewer | Open forms, search, export, open a row, read history |
-| Editor | Viewer + add, change and delete rows, bulk update, import rows, restore versions |
-| Function admin | Editor + create forms in the function, change column descriptions / rules, add and remove columns, manage who has access to the function |
-| Global admin | Everything, in every function, plus create functions, maintain the domain list, delete functions and forms, and read the administration guide |
+| Viewer | Open forms and files, search, export, download, open a row, read history |
+| Editor | Viewer + add, change and delete rows, bulk update, import rows, restore versions, replace files |
+| Function admin | Editor + create forms and add files in the function, change column descriptions / rules, add and remove columns, edit file details, manage who has access to the function |
+| Global admin | Everything, in every function, plus create functions, maintain the domain list, delete functions, forms and files, and read the administration guide |
 
 Access is granted to **groups**, never to individual accounts. Ask the function owner (shown
 at the top of the function page) if you need a different role.

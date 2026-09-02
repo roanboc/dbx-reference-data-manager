@@ -20,15 +20,19 @@ In scope
 
 * Creating, editing and retiring reference lists ("forms") per business function, with the
   functions grouped into the organisation's data domains.
+* Keeping large reference datasets (thousands to millions of rows) as governed **files**
+  (CSV or Parquet) in the same hierarchy, with preview, download, replace and history
+  instead of row-by-row editing.
 * Access by role, granted to groups, enforced by Unity Catalog.
-* Full change history (per form and per row, with restore) and a registry of every domain,
-  function and form for the data catalogue.
+* Full change history (per form and per row, with restore; per file per upload) and a
+  registry of every domain, function, form and file for the data catalogue.
 * Feeding downstream pipelines that build slowly changing dimensions.
 
 Out of scope
 
-* Large transactional or high-volume datasets (the grid is designed for lists of up to a
-  few thousand rows; the row limit is configurable).
+* Editing high-volume datasets row by row (the grid is designed for lists of up to a few
+  thousand rows; the row limit is configurable). Larger datasets are kept as files, which are
+  replaced as a whole.
 * Approval workflows and notifications: a saved change takes effect immediately and is
   attributable through the history. Organisations that need sign-off keep it in their
   business process, outside the app.
@@ -67,21 +71,23 @@ the lists cannot be joined reliably with lakehouse data.
 
 ## 3. Glossary
 
-The hierarchy is **domain > function > form**.
+The hierarchy is **domain > function > form | file**.
 
 | Term | Meaning |
 |---|---|
-| **Catalog** | The Unity Catalog catalog that holds all reference data (`_forms`). |
+| **Catalog** | The Unity Catalog catalog that holds all reference data (`_reference_data`). |
 | **Domain** | A business classifier at the top of the hierarchy, aligned with the organisation's data domains (the classification Databricks calls *domains*), e.g. *Student*, *Finance*, *People*. Groups functions. Maintained by global admins in the registry; not a Unity Catalog securable. |
 | **Function** | A business function or area, e.g. *Finance - Cost Management*. One Unity Catalog schema; belongs to one domain. Roles are held on functions. |
-| **Form** | One reference list, e.g. *Cost Centres*. One Delta table in a function. |
+| **Form** | One reference list, e.g. *Cost Centres*. One Delta table in a function; edited row by row in a grid. |
+| **File** | One reference dataset too large for a grid, e.g. *GL Transactions*. One CSV or Parquet file in the function's volume; previewed, downloaded and replaced as a whole. |
+| **Volume** | The Unity Catalog volume `_files` the app creates in every function schema to hold its files. |
 | **Row** | One entry of a list. Identified technically by `_id`; identified for people by the business key. |
 | **Business key** | The column(s) that identify a row for users (a code). The app refuses duplicates. |
 | **Allowed values** | A fixed list of permitted values for a text column; shown as a dropdown. |
 | **Required** | A column that must always have a value. |
 | **System columns** | Columns the app manages on every form: `_id`, `_version`, `_created_at/by`, `_updated_at/by`. |
-| **Registry** | Tables `_catalog.domains`, `_catalog.functions` and `_catalog.forms` describing every domain, function and form (display name, description, owner, documentation link). |
-| **Audit trail** | Table `_catalog.change_log` with one entry per changed row and save; the source of the History tab, the per-row history and restore. |
+| **Registry** | Tables `_catalog.domains`, `_catalog.functions`, `_catalog.forms` and `_catalog.files` describing every domain, function, form and file (display name, description, owner, documentation link; size and row count for files). |
+| **Audit trail** | Table `_catalog.change_log` with one entry per changed row and save (and per file upload, replacement or deletion); the source of the History tabs, the per-row history and restore. |
 | **Draft** | The unsaved changes of one user on one form (cell edits, added and deleted rows, bulk updates, item-form edits, restored versions). Written in one save. |
 | **Viewer / Editor / Function admin / Global admin** | The four roles, see §4. |
 | **SCD** | Slowly changing dimension. The app maintains the current state (Type 1); pipelines derive Type 2 history from the change feed. |
@@ -93,10 +99,10 @@ Access is always granted to a **group**, never to an individual account.
 
 | Role | Held on | Can |
 |---|---|---|
-| **Viewer** | function | Open the function's forms, search, sort, filter, open a row in the item form, export to CSV/Excel, read history |
-| **Editor** | function | Viewer + add, change and delete rows, bulk-update selected rows, import rows from Excel/CSV, restore earlier versions of rows |
-| **Function admin** | function | Editor + create forms (from Excel or from scratch), change column descriptions and rules, add/remove columns, edit function details, grant roles on the function to groups |
-| **Global admin** | catalog | Everything in every function + create and delete functions, assign functions to domains, maintain the domain list, delete forms, read the administration guide |
+| **Viewer** | function | Open the function's forms and files, search, sort, filter, open a row in the item form, export to CSV/Excel, preview and download files, read history |
+| **Editor** | function | Viewer + add, change and delete rows, bulk-update selected rows, import rows from Excel/CSV, restore earlier versions of rows, replace the content of files |
+| **Function admin** | function | Editor + create forms (from Excel or from scratch), change column descriptions and rules, add/remove columns, add files and edit their details, edit function details, grant roles on the function to groups |
+| **Global admin** | catalog | Everything in every function + create and delete functions, assign functions to domains, maintain the domain list, delete forms and files, read the administration guide |
 
 Typical mapping: `<function>_readers` = Viewer, `<function>_stewards` = Editor,
 `<function>_admins` = Function admin, the data platform group = Global admin.
@@ -105,11 +111,11 @@ Permission matrix
 
 | Capability | Viewer | Editor | Function admin | Global admin |
 |---|---|---|---|---|
-| Browse, search, export, item form, history | yes | yes | yes | yes |
-| Edit / add / delete rows, bulk update, import rows, restore versions | | yes | yes | yes |
-| Create form, edit form definition and details | | | yes | yes |
+| Browse, search, export, item form, history, preview and download files | yes | yes | yes | yes |
+| Edit / add / delete rows, bulk update, import rows, restore versions, replace files | | yes | yes | yes |
+| Create form, edit form definition and details; add files, edit file details | | | yes | yes |
 | Edit function details, grant roles on the function | | | yes | yes |
-| Delete form, delete function | | | | yes |
+| Delete form, delete file, delete function | | | | yes |
 | Create function, assign a function to a domain | | | | yes |
 | Maintain the domain list | | | | yes |
 | Administration guide (technical documentation) | | | | yes |
@@ -148,6 +154,9 @@ Status: **done** = implemented and tested; **planned** = agreed, not built.
 | FR-26 | Global admins maintain the domain list (create, edit, delete when no function is assigned) and assign functions to domains. | done |
 | FR-27 | Only global admins delete functions (when empty) and forms; function admins create and change but never delete. | done |
 | FR-28 | A local persona for the Function admin role, next to Global admin, Editor and Viewer. | done |
+| FR-29 | Files: a function holds CSV/Parquet datasets next to its forms, with display name, description, owner, size and row count in the registry; preview of the first rows, inferred columns, download; editors replace the content, function admins add files, global admins delete them; every upload, replacement and deletion is in the history. | done |
+| FR-30 | Files landed in the function's volume outside the app (pipelines, CLI) are shown automatically, marked unregistered until an admin describes them; the browser upload has a configurable size limit. | done |
+| FR-31 | The catalog is named `_reference_data` (it holds forms and files, not only forms). | done |
 
 Removed requirements (decided in review, see §1 *Out of scope*): FR-20 effective-dating
 columns, FR-21 lookup columns and dependent dropdowns, FR-23 approval step with
@@ -256,7 +265,24 @@ are kept). A function is deleted from its page once it holds no forms; its grant
 registry entry go with it. A domain is deleted from the **Domains** page once no function is
 assigned to it.
 
-### 6.9 Feeding slowly changing dimensions
+### 6.9 Managing a file
+
+```mermaid
+flowchart LR
+    A[Function admin: Add file\nupload CSV/Parquet, preview, name, description] --> B[Stored in the function's volume\nrow count computed, registry entry, history]
+    B --> C[Everyone with access\npreview, columns, download]
+    C --> D[Editor: Replace file\nsame format, previous size and rows kept in history]
+    D --> E[Pipelines read the file\nfrom the volume]
+    F[Pipeline or CLI lands a file\nin the volume] --> C
+```
+
+Files are the answer for reference datasets that are too large for a grid (thousands to
+millions of rows): the same domain > function hierarchy, the same roles, the same registry
+and history, but no row-by-row editing. A file is replaced as a whole. Files that arrive in
+the volume by other means (a pipeline, the Databricks CLI) appear on the function page as
+*not registered* until a function admin gives them a display name and description.
+
+### 6.10 Feeding slowly changing dimensions
 
 The form table is the **current state** (Type 1). Change Data Feed is enabled on every form;
 a Lakeflow / Delta Live Tables pipeline reads the feed (`table_changes`) and applies it as
@@ -272,6 +298,7 @@ erDiagram
     DOMAIN ||--o{ FUNCTION : groups
     CATALOG ||--o{ FUNCTION : contains
     FUNCTION ||--o{ FORM : contains
+    FUNCTION ||--o{ FILE : "holds in its volume"
     FORM ||--o{ ROW : contains
     FUNCTION ||--o{ GRANT : "access for group"
     FORM ||--o{ CHANGE : "audit trail"
@@ -296,6 +323,15 @@ erDiagram
         string description
         string owner
         json column_config "keys, allowed values"
+    }
+    FILE {
+        string function PK
+        string name PK "identifier.csv or .parquet"
+        string display_name
+        string description
+        string owner
+        int size_bytes
+        int row_count
     }
     ROW {
         string _id PK "generated"
@@ -325,6 +361,8 @@ erDiagram
 | Function display name, owner, documentation link | schema `DBPROPERTIES` (`rdm.*`), schema tags, `_catalog.functions` | Properties are canonical; tags are searchable; the registry is one table for reporting |
 | Form description | table `COMMENT` | Same |
 | Form display name, owner, column rules (keys, allowed values) | `TBLPROPERTIES` (`rdm.display_name`, `rdm.owner`, `rdm.column_config`), tags, `_catalog.forms` | Same |
+| File content | Unity Catalog volume `<catalog>.<function>._files` | Files are read by pipelines and tools directly from the volume; the app moves them with the Files API as the signed-in user |
+| File display name, description, owner, size, row count | `_catalog.files` | Volumes carry no properties; the registry is the single description |
 | Column description, required | column `COMMENT`, `NOT NULL` | Native, enforced by the table |
 | Row identity and audit | system columns on every form | Travel with the data into every consumer |
 | Change history | `_catalog.change_log` (+ Delta Change Data Feed) | Queryable audit trail independent of Delta log retention; source of per-row history and restore |
@@ -334,7 +372,8 @@ erDiagram
 
 * Names: `lower_snake_case`, letters, digits and underscores, starting with a letter;
   functions use `<domain>__<area>`; domains are short single words (`student`, `finance`);
-  names starting with `_` are reserved for the app.
+  file names are `<identifier>.csv` or `<identifier>.parquet`; names starting with `_` are
+  reserved for the app (the `_files` volume, the `_catalog` schema).
 * Types: `STRING`, `INTEGER` (BIGINT), `DECIMAL(p,s)` (default 18,4), `DOUBLE`, `BOOLEAN`,
   `DATE`, `TIMESTAMP`. Tables created outside the app with other types are shown read-only.
 * Every form created by the app has the six system columns and a primary key on `_id`.
@@ -351,6 +390,7 @@ erDiagram
 | No silent overwrite of another person's change | `_version` check on every update and delete |
 | Attributable changes | `_updated_by` / `_created_by` set from the signed-in identity; audit entries per row |
 | A function belongs to an existing domain | App validation against the domain list when a function is created or reassigned |
+| A file is readable as CSV or Parquet | The backend counts its rows with the platform reader on upload; unreadable uploads are rejected |
 
 ### 7.5 Data lifecycle
 
@@ -362,8 +402,10 @@ erDiagram
 | Rows changed | One atomic write; audit entries; `_version` incremented |
 | Version restored | Staged as ordinary row changes (or a new row for a deleted one); saved and logged like any edit |
 | Definition changed | Table altered (comments, NOT NULL, columns); registry updated |
+| File added / replaced | File written to the function's volume; size and row count recorded in the registry; audit entry (previous size and rows kept) |
+| File deleted (global admin) | File removed from the volume; registry row removed; audit entries kept |
 | Form deleted (global admin) | Table dropped (Delta keeps it recoverable for the retention period); registry row removed; audit entries kept |
-| Function deleted (global admin) | Refused while forms exist; schema dropped, grants and registry row removed |
+| Function deleted (global admin) | Refused while forms or files exist; empty volume and schema dropped, grants and registry row removed |
 | Domain deleted (global admin) | Refused while functions are assigned; registry row removed |
 
 ## 8. Technology design (high level)
@@ -379,9 +421,9 @@ flowchart LR
         P[Databricks Apps proxy\nsign-in, identity headers,\nuser access token]
         A[Reference Data Manager\nDash app on gunicorn]
         W[SQL warehouse\nserverless]
-        subgraph UC[Unity Catalog: catalog _forms]
-            S1[(function schemas\nform tables)]
-            S2[(_catalog\ndomains, functions, forms, change_log)]
+        subgraph UC[Unity Catalog: catalog _reference_data]
+            S1[(function schemas\nform tables + _files volumes)]
+            S2[(_catalog\ndomains, functions, forms, files, change_log)]
         end
     end
     subgraph Source control
@@ -397,9 +439,13 @@ flowchart LR
 
 Key choices
 
-* **The app runs SQL as the signed-in user** (Databricks Apps user authorization, scope
-  `sql`). Unity Catalog is the enforcement point; the app only decides what to show. Roles
-  are read from the catalog's `information_schema` inside the user's session.
+* **The app runs SQL and file operations as the signed-in user** (Databricks Apps user
+  authorization, scopes `sql` and `files.files`). Unity Catalog is the enforcement point; the
+  app only decides what to show. Roles are read from the catalog's `information_schema`
+  inside the user's session.
+* **Files stay files.** A file is a Unity Catalog volume object read with `read_files`;
+  the app never loads it into a table, so pipelines and notebooks read the same bytes the
+  steward uploaded.
 * **Grants go to groups.** The app validates group names and issues `GRANT`/`REVOKE` on the
   schema; the asset bundle seeds the initial catalog, `_catalog` schema, functions and grants.
 * **Domains are metadata.** The domain list lives in the registry; each function's domain is
@@ -427,7 +473,7 @@ backends implement it:
 
 | Aspect | Design position |
 |---|---|
-| Volume | Lists up to a few thousand rows per form (grid page limit `RDM_MAX_ROWS`, default 5,000); server-side search for the rest |
+| Volume | Lists up to a few thousand rows per form (grid page limit `RDM_MAX_ROWS`, default 5,000); server-side search for the rest. Larger datasets as files: any size in the volume, `RDM_MAX_FILE_MB` (default 200) through the browser |
 | Concurrency | Many users may edit the same list; row-level version checks prevent lost updates; Delta deletion vectors reduce write conflicts |
 | Latency | One or two warehouse statements per action; metadata cached per user for a short time |
 | Security | Identity from the Databricks proxy; SQL parameters everywhere; identifiers validated; no secrets in code |

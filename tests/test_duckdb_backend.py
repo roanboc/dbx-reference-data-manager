@@ -29,6 +29,7 @@ from rdm.models import (
     ColumnDef,
     DataType,
     DomainDef,
+    FileDef,
     FormDef,
     FunctionDef,
     Role,
@@ -1097,6 +1098,15 @@ def test_seeded_backend_contains_demo_content(seeded_backend: DuckDBBackend):
         "hr__reference",
     }
     assert functions["finance__cost_management"].form_count == 2
+    assert functions["finance__cost_management"].file_count == 2
+    files = {f.name: f for f in seeded_backend.list_files("finance__cost_management")}
+    assert files["gl_transactions.csv"].row_count == 2000 and files["gl_transactions.csv"].registered
+    assert files["fx_rates.parquet"].row_count == 366 and files["fx_rates.parquet"].title == "FX Rates"
+    assert seeded_backend.preview_file(files["fx_rates.parquet"], limit=3).columns.tolist() == [
+        "rate_date",
+        "currency",
+        "rate_to_gbp",
+    ]
     assert functions["finance__cost_management"].domain == "finance"
     assert functions["hr__reference"].display_name == "HR Reference"
     assert functions["hr__reference"].domain == "people"
@@ -1249,3 +1259,170 @@ def test_meta_migration_from_pre_function_layout(tmp_path, admin: User):
         assert b.update_function(FunctionDef("finance", domain="fin"), admin).domain == "fin"
     finally:
         b.close()
+
+
+# ======================================================================================
+# Files (CSV / Parquet in the function's files directory)
+# ======================================================================================
+
+CSV = b"code,amount,when\nA,1.5,2024-01-01\nB,2.25,2024-02-01\n"
+
+
+def _parquet(rows: int = 3) -> bytes:
+    import io
+
+    buffer = io.BytesIO()
+    pd.DataFrame({"x": range(rows), "y": ["v"] * rows}).to_parquet(buffer, index=False)
+    return buffer.getvalue()
+
+
+def test_put_file_stores_registers_and_logs(backend: DuckDBBackend, admin: User, monkeypatch):
+    backend.create_function(FunctionDef("finance"), admin)
+    assert backend.list_files("finance") == [] and backend.get_function("finance").file_count == 0
+    _freeze(monkeypatch, T1)
+    f = backend.put_file(FileDef("finance", "gl.csv", display_name="GL", description="d"), CSV, admin)
+    assert (f.name, f.format, f.size_bytes, f.row_count) == ("gl.csv", "csv", len(CSV), 2)
+    assert f.display_name == "GL" and f.owner == admin.username and f.registered
+    assert f.created_by == admin.username and f.created_at == T1 and f.updated_at == T1
+    assert f.path.endswith("finance/gl.csv") and backend.read_file(f) == CSV
+    assert backend.get_function("finance").file_count == 1
+    assert _meta_count(backend, "files", function_name="finance", name="gl.csv") == 1
+    history = backend.file_history(f)
+    assert history["change_type"].tolist() == ["upload"] and history["row_count"].tolist() == [2]
+    assert history["size_bytes"].tolist() == [len(CSV)] and history["changed_by"].tolist() == [admin.username]
+    with pytest.raises(ConflictError, match="already exists"):
+        backend.put_file(FileDef("finance", "gl.csv"), CSV, admin)
+    with pytest.raises(NotFoundError, match="does not exist"):
+        backend.put_file(FileDef("finance", "other.csv"), CSV, admin, replace=True)
+    with pytest.raises(NotFoundError, match="Function 'ghost' does not exist"):
+        backend.put_file(FileDef("ghost", "gl.csv"), CSV, admin)
+    with pytest.raises(ValueError):
+        backend.put_file(FileDef("finance", "bad name.csv"), CSV, admin)
+
+
+def test_preview_columns_and_parquet(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    csv = backend.put_file(FileDef("finance", "gl.csv"), CSV, admin)
+    preview = backend.preview_file(csv, limit=1)
+    assert preview.columns.tolist() == ["code", "amount", "when"] and len(preview) == 1
+    assert [(c.name, c.data_type) for c in backend.file_columns(csv)] == [
+        ("code", DataType.STRING),
+        ("amount", DataType.DOUBLE),
+        ("when", DataType.DATE),
+    ]
+    pq = backend.put_file(FileDef("finance", "rates.parquet"), _parquet(5), admin)
+    assert pq.row_count == 5 and pq.format == "parquet"
+    assert len(backend.preview_file(pq, limit=10)) == 5
+    assert [c.native_type for c in backend.file_columns(pq)] == ["BIGINT", "VARCHAR"]
+    assert [f.name for f in backend.list_files("finance")] == ["gl.csv", "rates.parquet"]
+
+
+def test_replace_file_keeps_metadata_and_history(backend: DuckDBBackend, admin: User, monkeypatch):
+    backend.create_function(FunctionDef("finance"), admin)
+    _freeze(monkeypatch, T1, T2)
+    backend.put_file(
+        FileDef("finance", "gl.csv", display_name="GL", description="d", owner="o@x"), CSV, admin
+    )
+    new = CSV + b"C,3,2024-03-01\n"
+    replaced = backend.put_file(FileDef("finance", "gl.csv"), new, User("bob"), replace=True)
+    assert (replaced.row_count, replaced.size_bytes) == (3, len(new))
+    assert (replaced.display_name, replaced.description, replaced.owner) == ("GL", "d", "o@x")
+    assert replaced.created_by == admin.username and replaced.updated_by == "bob"
+    assert backend.read_file(replaced) == new
+    history = backend.file_history(replaced)
+    assert history["change_type"].tolist() == ["replace", "upload"]
+    assert history["row_count"].tolist() == [3, 2] and history["changed_by"].tolist() == [
+        "bob",
+        admin.username,
+    ]
+    assert len(backend.file_history(replaced, limit=1)) == 1
+
+
+def test_unreadable_upload_is_rejected_and_previous_content_kept(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    with pytest.raises(BackendError, match="cannot be read as PARQUET"):
+        backend.put_file(FileDef("finance", "bad.parquet"), b"garbage", admin)
+    assert backend.list_files("finance") == []
+    assert _meta_count(backend, "files", function_name="finance") == 0
+    backend.put_file(FileDef("finance", "ok.parquet"), _parquet(), admin)
+    with pytest.raises(BackendError, match="cannot be read"):
+        backend.put_file(FileDef("finance", "ok.parquet"), b"garbage", admin, replace=True)
+    assert backend.get_file("finance", "ok.parquet").row_count == 3
+    assert backend.file_history(FileDef("finance", "ok.parquet"))["change_type"].tolist() == ["upload"]
+
+
+def test_update_file_metadata_and_unregistered_files(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    f = backend.put_file(FileDef("finance", "gl.csv"), CSV, admin)
+    f.display_name, f.description, f.owner = "General Ledger", "postings", "fin@x"
+    updated = backend.update_file_metadata(f, User("bob"))
+    assert (updated.display_name, updated.description, updated.owner) == (
+        "General Ledger",
+        "postings",
+        "fin@x",
+    )
+    assert updated.updated_by == "bob" and updated.row_count == 2  # counts untouched
+    # a file landed outside the app (pipeline / CLI) shows up unregistered, other types are ignored
+    folder = backend.files_dir / "finance"
+    (folder / "landed.parquet").write_bytes(_parquet(4))
+    (folder / "notes.txt").write_text("ignored")
+    names = {x.name: x for x in backend.list_files("finance")}
+    assert set(names) == {"gl.csv", "landed.parquet"}
+    landed = names["landed.parquet"]
+    assert not landed.registered and landed.row_count is None and landed.size_bytes == len(_parquet(4))
+    assert backend.get_function("finance").file_count == 2
+    assert len(backend.preview_file(landed)) == 4
+    landed.description = "from the pipeline"
+    assert backend.update_file_metadata(landed, admin).registered
+    with pytest.raises(NotFoundError):
+        backend.get_file("finance", "missing.csv")
+    with pytest.raises(NotFoundError):
+        backend.update_file_metadata(FileDef("finance", "missing.csv"), admin)
+    with pytest.raises(NotFoundError):
+        backend.list_files("ghost")
+
+
+def test_drop_file_and_drop_function_guard(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    f = backend.put_file(FileDef("finance", "gl.csv"), CSV, admin)
+    function = backend.get_function("finance")
+    with pytest.raises(ConflictError, match="still has 1 file"):
+        backend.drop_function(function, admin)
+    backend.drop_file(f, User("del"))
+    assert backend.list_files("finance") == []
+    assert _meta_count(backend, "files", function_name="finance") == 0
+    history = backend.file_history(f)
+    assert history["change_type"].tolist() == ["delete", "upload"]
+    assert history.iloc[0]["changed_by"] == "del" and history.iloc[0]["row_count"] == 2
+    with pytest.raises(NotFoundError):
+        backend.drop_file(f, admin)
+    with pytest.raises(NotFoundError):
+        backend.read_file(f)
+    backend.drop_function(function, admin)
+    assert not (backend.files_dir / "finance").exists()
+
+
+def test_files_persist_next_to_the_database(tmp_path, admin: User):
+    path = tmp_path / "db" / "rdm.duckdb"
+    b = DuckDBBackend(str(path))
+    try:
+        assert b.files_dir == tmp_path / "db" / "files"
+        b.create_function(FunctionDef("fin"), admin)
+        b.put_file(FileDef("fin", "gl.csv", display_name="GL"), CSV, admin)
+    finally:
+        b.close()
+    assert (tmp_path / "db" / "files" / "fin" / "gl.csv").read_bytes() == CSV
+    reopened = DuckDBBackend(str(path))
+    try:
+        [f] = reopened.list_files("fin")
+        assert f.display_name == "GL" and f.row_count == 2 and f.registered
+    finally:
+        reopened.close()
+    custom = DuckDBBackend(files_dir=str(tmp_path / "elsewhere"))
+    try:
+        custom.create_function(FunctionDef("fin"), admin)
+        custom.put_file(FileDef("fin", "gl.csv"), CSV, admin)
+        assert (tmp_path / "elsewhere" / "fin" / "gl.csv").exists()
+    finally:
+        custom.close()
+    assert (tmp_path / "elsewhere" / "fin" / "gl.csv").exists()  # only temp dirs are removed on close

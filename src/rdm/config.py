@@ -25,8 +25,9 @@ class Settings:
     duckdb_path: str = "data/rdm.duckdb"
     auth: str = "mock"  # mock | databricks
     persona: str = "admin"  # default mock persona
-    catalog: str = "_forms"
+    catalog: str = "_reference_data"
     max_rows: int = 5000
+    max_file_mb: int = 200  # largest file accepted through the browser upload
     databricks_host: str | None = None
     databricks_warehouse_id: str | None = None
     databricks_http_path: str | None = None
@@ -57,8 +58,9 @@ class Settings:
             duckdb_path=env.get("RDM_DUCKDB_PATH", "data/rdm.duckdb"),
             auth=auth,
             persona=env.get("RDM_PERSONA", "admin").strip().lower(),
-            catalog=env.get("RDM_CATALOG", "_forms").strip(),
+            catalog=env.get("RDM_CATALOG", "_reference_data").strip(),
             max_rows=int(env.get("RDM_MAX_ROWS", "5000")),
+            max_file_mb=int(env.get("RDM_MAX_FILE_MB", "200")),
             databricks_host=env.get("DATABRICKS_HOST") or None,
             databricks_warehouse_id=env.get("DATABRICKS_WAREHOUSE_ID") or None,
             databricks_http_path=env.get("DATABRICKS_HTTP_PATH") or None,

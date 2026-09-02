@@ -1,11 +1,20 @@
-"""Navigation model: which functions and forms the current user may see, grouped by domain."""
+"""Navigation model: which functions, forms and files the current user may see, grouped by domain."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from rdm.backend.base import DatabaseBackend, PermissionDenied
-from rdm.models import UNASSIGNED_DOMAIN_LABEL, DomainDef, FormDef, FunctionDef, Permissions, Role, User
+from rdm.models import (
+    UNASSIGNED_DOMAIN_LABEL,
+    DomainDef,
+    FileDef,
+    FormDef,
+    FunctionDef,
+    Permissions,
+    Role,
+    User,
+)
 
 
 @dataclass
@@ -13,6 +22,11 @@ class NavFunction:
     function: FunctionDef
     role: Role
     forms: list[FormDef] = field(default_factory=list)
+    files: list[FileDef] = field(default_factory=list)
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.forms and not self.files
 
 
 @dataclass
@@ -49,22 +63,29 @@ class CatalogService:
         return out
 
     def navigation(self, search: str | None = None) -> list[NavFunction]:
-        """Visible functions with their forms, filtered by ``search`` on names and descriptions."""
+        """Visible functions with their forms and files, filtered by ``search`` on names and descriptions."""
         items = self.visible_functions()
         for item in items:
             item.forms = self.backend.list_forms(item.function.name)
+            item.files = self.backend.list_files(item.function.name)
         if not search or not search.strip():
             return items
         filtered = []
         for item in items:
             f = item.function
             forms = [x for x in item.forms if _matches(search, x.name, x.title, x.description, x.owner)]
-            if forms:
-                # Matching forms take precedence: show only them under their function.
-                filtered.append(NavFunction(f, item.role, forms))
+            files = [x for x in item.files if _matches(search, x.name, x.title, x.description, x.owner)]
+            if forms or files:
+                # Matching forms and files take precedence: show only them under their function.
+                filtered.append(NavFunction(f, item.role, forms, files))
             elif _matches(search, f.name, f.title, f.description, f.owner, f.domain):
                 filtered.append(item)
         return filtered
+
+    def get_file(self, function: str, name: str) -> FileDef:
+        if not self.permissions.role_for(function).can_view:
+            raise PermissionDenied(f"You do not have access to function '{function}'.")
+        return self.backend.get_file(function, name)
 
     def grouped(self, items: list[NavFunction]) -> list[NavDomain]:
         """Group navigation items by domain, in domain order; unassigned functions come last."""

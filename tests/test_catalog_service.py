@@ -122,7 +122,10 @@ def test_search_can_hit_several_functions(seeded_backend, admin):
     nav = service(seeded_backend, admin).navigation("reference")
     # "reference" appears in the student and finance descriptions and in the hr function name
     assert set(_nav(nav)) == {STUDENT, FINANCE, HR}
-    assert _nav(nav)[FINANCE][1] == ["cost_centres", "gl_account_mappings"]
+    # in finance the word also matches a file's description, so that file takes precedence over the forms
+    finance = next(i for i in nav if i.function.name == FINANCE)
+    assert finance.forms == [] and [f.name for f in finance.files] == ["gl_transactions.csv"]
+    assert _nav(nav)[STUDENT][1] == ["service_areas", "survey_questions"]
 
 
 def test_search_without_match_is_empty(seeded_backend, admin, viewer):
@@ -171,3 +174,18 @@ def test_navigation_reflects_new_grants_when_permissions_are_refreshed(seeded_ba
     assert set(_nav(stale.navigation())) == {STUDENT}
     fresh = service(seeded_backend, viewer)
     assert _nav(fresh.navigation())[FINANCE][0] is Role.EDITOR
+
+
+def test_navigation_includes_files_and_search_matches_them(seeded_backend, admin, viewer):
+    nav = {i.function.name: i for i in service(seeded_backend, admin).navigation()}
+    assert [f.name for f in nav[FINANCE].files] == ["fx_rates.parquet", "gl_transactions.csv"]
+    assert nav[HR].files == [] and not nav[FINANCE].is_empty
+    hit = service(seeded_backend, admin).navigation("fx rates")
+    assert [i.function.name for i in hit] == [FINANCE]
+    assert [f.name for f in hit[0].files] == ["fx_rates.parquet"] and hit[0].forms == []
+    # the viewer cannot see finance files
+    assert service(seeded_backend, viewer).navigation("fx rates") == []
+    svc = service(seeded_backend, viewer)
+    with pytest.raises(PermissionDenied):
+        svc.get_file(FINANCE, "fx_rates.parquet")
+    assert service(seeded_backend, admin).get_file(FINANCE, "fx_rates.parquet").row_count == 366

@@ -117,6 +117,7 @@ def test_parse_path_routes():
     assert parse_path(None) == ("home", None, None)
     assert parse_path("/f/finance__cost/cost_centres") == ("form", "finance__cost", "cost_centres")
     assert parse_path("/fn/hr__reference") == ("function", "hr__reference", None)
+    assert parse_path("/file/finance__cost/gl.csv") == ("file", "finance__cost", "gl.csv")
     assert parse_path("/new-form") == ("new-form", None, None)
     assert parse_path("/new-function") == ("new-function", None, None)
     assert parse_path("/domains") == ("domains", None, None)

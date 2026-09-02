@@ -75,6 +75,15 @@ def rows_to_records(df: pd.DataFrame, form: FormDef) -> list[dict[str, Any]]:
     return records
 
 
+def records_from_frame(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Serialise an arbitrary frame (a file preview) for a read-only grid."""
+    return [{str(k): to_json_value(v) for k, v in rec.items()} for rec in df.to_dict("records")]
+
+
+def frame_column_defs(df: pd.DataFrame) -> list[dict[str, Any]]:
+    return [{"field": str(c), "headerName": str(c), "minWidth": 120} for c in df.columns]
+
+
 def column_defs(
     form: FormDef, editable: bool, show_audit: bool, invalid_expr: bool = True
 ) -> list[dict[str, Any]]:

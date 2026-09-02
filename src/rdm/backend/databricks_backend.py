@@ -6,6 +6,10 @@ Production mapping (see docs/DESIGN.md):
   business classifier above functions) is a registry entry in ``<catalog>._catalog.domains``;
   the function's domain is recorded as the schema property ``rdm.domain`` and the schema tag
   ``rdm_domain`` so that it is visible and searchable in Catalog Explorer.
+* file = CSV/Parquet file in the managed volume ``<catalog>.<function>._files`` (created on
+  first use). Files are moved with the Files API (SDK, as the user under user authorization
+  with the ``files.files`` scope) and read with ``read_files`` on the warehouse; their
+  descriptive attributes live in ``<catalog>._catalog.files``.
 * Descriptions are ``COMMENT``s; display name / owner / column configuration live in
   ``TBLPROPERTIES ('rdm.*')`` and are mirrored to tags (``rdm_display_name``, ``rdm_owner``)
   so they are searchable in Catalog Explorer and readable in bulk from
@@ -32,6 +36,7 @@ that cannot take parameters (comments, properties, tags) are escaped with Spark 
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import threading
@@ -55,6 +60,8 @@ from rdm.backend.sql_utils import (
 from rdm.models import (
     CREATED_AT_COLUMN,
     CREATED_BY_COLUMN,
+    FILE_CHANGE_TYPES,
+    FILE_FORMATS,
     HISTORY_COLUMNS,
     ID_COLUMN,
     PROP_COLUMN_CONFIG,
@@ -75,6 +82,7 @@ from rdm.models import (
     ColumnDef,
     DataType,
     DomainDef,
+    FileDef,
     FormDef,
     FunctionDef,
     Permissions,
@@ -82,13 +90,17 @@ from rdm.models import (
     SaveResult,
     User,
     new_row_id,
+    split_file_name,
     system_columns,
+    validate_file_name,
 )
 
 log = logging.getLogger(__name__)
 
 META_SCHEMA = "_catalog"
 AUDIT_TABLE = "change_log"
+#: Managed volume created in every function schema for its files.
+FILES_VOLUME = "_files"
 HIDDEN_SCHEMAS = frozenset({"information_schema", "default", META_SCHEMA})
 
 #: Delta features every form is created with. Column mapping makes DROP/RENAME COLUMN
@@ -106,10 +118,21 @@ TS_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
 ADMIN_PRIVILEGES = {"MANAGE", "ALL PRIVILEGES", "ALL_PRIVILEGES", "OWN", "OWNER"}
 GLOBAL_ADMIN_PRIVILEGES = {"CREATE SCHEMA", "CREATE_SCHEMA", "MANAGE", "ALL PRIVILEGES", "ALL_PRIVILEGES"}
 #: Schema privileges the app manages per role (everything else is left untouched).
+#: READ/WRITE VOLUME on the schema are inherited by the ``_files`` volume.
 ROLE_PRIVILEGES = {
-    Role.VIEWER: ["USE SCHEMA", "SELECT"],
-    Role.EDITOR: ["USE SCHEMA", "SELECT", "MODIFY"],
-    Role.ADMIN: ["USE SCHEMA", "SELECT", "MODIFY", "CREATE TABLE", "MANAGE", "APPLY TAG"],
+    Role.VIEWER: ["USE SCHEMA", "SELECT", "READ VOLUME"],
+    Role.EDITOR: ["USE SCHEMA", "SELECT", "READ VOLUME", "MODIFY", "WRITE VOLUME"],
+    Role.ADMIN: [
+        "USE SCHEMA",
+        "SELECT",
+        "READ VOLUME",
+        "MODIFY",
+        "WRITE VOLUME",
+        "CREATE TABLE",
+        "CREATE VOLUME",
+        "MANAGE",
+        "APPLY TAG",
+    ],
 }
 MANAGED_PRIVILEGES = ROLE_PRIVILEGES[Role.ADMIN]
 CREATE_PRIVILEGES = {"CREATE TABLE", "CREATE_TABLE"}
@@ -164,6 +187,7 @@ class DatabricksBackend(DatabaseBackend):
         access_token: str | None = None,
         connection_factory: Callable[[], Any] | None = None,
         meta_schema: str = META_SCHEMA,
+        files_client_factory: Callable[[], Any] | None = None,
     ) -> None:
         validate_identifier(catalog, "catalog name")
         validate_identifier(meta_schema, "schema name")
@@ -173,9 +197,12 @@ class DatabricksBackend(DatabaseBackend):
         self.access_token = access_token
         self.meta_schema = meta_schema
         self._connection_factory = connection_factory or self._connect
+        self._files_client_factory = files_client_factory or self._files_client
         self._conn: Any = None
+        self._files: Any = None
         self._lock = threading.RLock()
         self._audit_ready: bool | None = None
+        self._volumes_ready: set[str] = set()
 
     # -- connection --------------------------------------------------------------------------
 
@@ -201,6 +228,19 @@ class DatabricksBackend(DatabaseBackend):
         if self._conn is None:
             self._conn = self._connection_factory()
         return self._conn
+
+    def _files_client(self) -> Any:
+        """The SDK Files API: as the user under user authorization, else as the app identity."""
+        from databricks.sdk import WorkspaceClient
+
+        if self.access_token:
+            return WorkspaceClient(host=self.host, token=self.access_token, auth_type="pat").files
+        return WorkspaceClient(host=self.host).files if self.host else WorkspaceClient().files
+
+    def _files_api(self) -> Any:
+        if self._files is None:
+            self._files = self._files_client_factory()
+        return self._files
 
     def close(self) -> None:
         with self._lock:
@@ -355,6 +395,7 @@ class DatabricksBackend(DatabaseBackend):
         )
         tags = self._schema_tags()
         registry = self._function_registry()
+        file_counts = self._file_counts()
         functions = []
         for name, comment, owner in rows:
             if name in HIDDEN_SCHEMAS:
@@ -370,6 +411,7 @@ class DatabricksBackend(DatabaseBackend):
                     doc_link=r.get("doc_link") or "",
                     domain=r.get("domain_name") or t.get(TAG_DOMAIN, "") or "",
                     form_count=int(counts.get(name, 0)),
+                    file_count=int(file_counts.get(name, 0)),
                     properties={"schema_owner": owner or "", **t},
                 )
             )
@@ -447,7 +489,7 @@ class DatabricksBackend(DatabaseBackend):
         return self.get_function(function.name)
 
     def drop_function(self, function: FunctionDef, actor: User) -> None:
-        """``DROP SCHEMA`` (without CASCADE): refused while the schema still holds tables."""
+        """``DROP SCHEMA`` (without CASCADE): refused while the schema still holds tables or files."""
         validate_identifier(function.name, "function name")
         rows, _ = self._run(
             f"SELECT count(*) FROM {self._info('tables')} WHERE table_catalog = :catalog AND table_schema = :schema",
@@ -458,6 +500,13 @@ class DatabricksBackend(DatabaseBackend):
             raise ConflictError(
                 f"Function '{function.name}' still has {n} form(s). Delete or migrate them first."
             )
+        n_files = len(self._stored_files(function.name))
+        if n_files:
+            raise ConflictError(
+                f"Function '{function.name}' still has {n_files} file(s). Delete or migrate them first."
+            )
+        self._run(f"DROP VOLUME IF EXISTS {self._s(function.name)}.{_q(FILES_VOLUME)}")
+        self._volumes_ready.discard(function.name)
         self._run(f"DROP SCHEMA {self._s(function.name)}")
         try:
             self._run(f"DELETE FROM {self._reg('functions')} WHERE `name` = :name", {"name": function.name})
@@ -482,6 +531,12 @@ class DatabricksBackend(DatabaseBackend):
             "CREATE TABLE IF NOT EXISTS {t} (function_name STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
             "description STRING, owner STRING, created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, "
             "updated_by STRING) USING DELTA COMMENT 'Registry of forms maintained by the Reference Data Manager'"
+        ),
+        "files": (
+            "CREATE TABLE IF NOT EXISTS {t} (function_name STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
+            "description STRING, owner STRING, size_bytes BIGINT, row_count BIGINT, created_at TIMESTAMP_NTZ, "
+            "created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
+            "USING DELTA COMMENT 'Registry of files (CSV/Parquet in the function volumes) maintained by the Reference Data Manager'"
         ),
     }
 
@@ -565,6 +620,61 @@ class DatabricksBackend(DatabaseBackend):
             )
         except BackendError as exc:
             log.warning("Registry delete for %s failed: %s", form.full_name, exc)
+
+    def _register_file(self, file: FileDef, actor: User) -> None:
+        self._registry_upsert(
+            "files",
+            {"function_name": file.function, "name": file.name},
+            {
+                "display_name": file.display_name,
+                "description": file.description,
+                "owner": file.owner,
+                "size_bytes": file.size_bytes,
+                "row_count": file.row_count,
+            },
+            actor,
+            strict=True,
+        )
+
+    def _unregister_file(self, file: FileDef) -> None:
+        try:
+            self._run(
+                f"DELETE FROM {self._reg('files')} WHERE `function_name` = :function_name AND `name` = :name",
+                {"function_name": file.function, "name": file.name},
+            )
+        except BackendError as exc:
+            log.warning("Registry delete for %s failed: %s", file.full_name, exc)
+
+    def _file_registry(self, function: str) -> dict[str, dict[str, Any]]:
+        cols = [
+            "name",
+            "display_name",
+            "description",
+            "owner",
+            "size_bytes",
+            "row_count",
+            "created_at",
+            "created_by",
+            "updated_at",
+            "updated_by",
+        ]
+        try:
+            rows, _ = self._run(
+                f"SELECT {', '.join(cols)} FROM {self._reg('files')} WHERE `function_name` = :function_name",
+                {"function_name": function},
+            )
+        except BackendError:
+            return {}
+        return {r[0]: dict(zip(cols, r, strict=True)) for r in rows}
+
+    def _file_counts(self) -> dict[str, int]:
+        try:
+            rows, _ = self._run(
+                f"SELECT function_name, count(*) FROM {self._reg('files')} GROUP BY function_name"
+            )
+        except BackendError:
+            return {}
+        return {str(f): int(n) for f, n in rows}
 
     def _set_tags(self, alter_prefix: str, tags: dict[str, str]) -> None:
         """Tags are a best-effort mirror: they need APPLY TAG, which not every admin has."""
@@ -1209,6 +1319,236 @@ class DatabricksBackend(DatabaseBackend):
         for c in user_cols:
             out[c] = df[c]
         return out[columns]
+
+    # -- files (managed volume per function) -----------------------------------------------
+
+    def _volume_path(self, function: str) -> str:
+        validate_identifier(function, "function name")
+        return f"/Volumes/{self.catalog}/{function}/{FILES_VOLUME}"
+
+    def _file_path(self, function: str, name: str) -> str:
+        validate_file_name(name)
+        return f"{self._volume_path(function)}/{name}"
+
+    def _ensure_volume(self, function: str) -> None:
+        if function in self._volumes_ready:
+            return
+        self._run(
+            f"CREATE VOLUME IF NOT EXISTS {self._s(function)}.{_q(FILES_VOLUME)} "
+            "COMMENT 'Files (CSV/Parquet) of this function, managed by the Reference Data Manager'"
+        )
+        self._volumes_ready.add(function)
+
+    def _stored_files(self, function: str) -> dict[str, dict[str, Any]]:
+        """``{name: {size, modified}}`` of the files in the function's volume (empty when absent)."""
+        out: dict[str, dict[str, Any]] = {}
+        try:
+            entries = list(self._files_api().list_directory_contents(self._volume_path(function)))
+        except Exception as exc:  # noqa: BLE001 - no volume yet, or no READ VOLUME
+            log.info("No file listing for %s: %s", function, exc)
+            return out
+        for e in entries:
+            if getattr(e, "is_directory", False):
+                continue
+            name = str(getattr(e, "name", "") or "")
+            if split_file_name(name)[1] not in FILE_FORMATS:
+                continue
+            out[name] = {"size": getattr(e, "file_size", None), "modified": getattr(e, "last_modified", None)}
+        return out
+
+    def _file_from(
+        self, function: str, name: str, stored: dict[str, Any] | None, reg: dict[str, Any] | None
+    ) -> FileDef:
+        reg = reg or {}
+        size = (stored or {}).get("size")
+        if size is None:
+            size = reg.get("size_bytes")
+        return FileDef(
+            function=function,
+            name=name,
+            display_name=reg.get("display_name") or "",
+            description=reg.get("description") or "",
+            owner=reg.get("owner") or "",
+            size_bytes=int(size) if size is not None else None,
+            row_count=int(reg["row_count"]) if reg.get("row_count") is not None else None,
+            path=self._file_path(function, name),
+            registered=bool(reg),
+            created_at=to_db_scalar(reg.get("created_at")),
+            created_by=reg.get("created_by") or "",
+            updated_at=to_db_scalar(reg.get("updated_at")),
+            updated_by=reg.get("updated_by") or "",
+        )
+
+    def _reader(self, file: FileDef) -> str:
+        path = lit(self._file_path(file.function, file.name))
+        if file.format == "parquet":
+            return f"read_files({path}, format => 'parquet')"
+        return f"read_files({path}, format => 'csv', header => true)"
+
+    def list_files(self, function: str) -> list[FileDef]:
+        stored = self._stored_files(function)
+        registry = self._file_registry(function)
+        return [self._file_from(function, n, stored[n], registry.get(n)) for n in sorted(stored)]
+
+    def _metadata(self, function: str, name: str) -> dict[str, Any] | None:
+        try:
+            meta = self._files_api().get_metadata(self._file_path(function, name))
+        except Exception:  # noqa: BLE001 - not found (or not readable)
+            return None
+        return {
+            "size": getattr(meta, "content_length", None),
+            "modified": getattr(meta, "last_modified", None),
+        }
+
+    def get_file(self, function: str, name: str) -> FileDef:
+        stored = self._metadata(function, name)
+        if stored is None:
+            raise NotFoundError(f"File '{function}/{name}' does not exist.")
+        return self._file_from(function, name, stored, self._file_registry(function).get(name))
+
+    def put_file(self, file: FileDef, data: bytes, actor: User, replace: bool = False) -> FileDef:
+        file.validate()
+        existing = self._metadata(file.function, file.name)
+        if existing is not None and not replace:
+            raise ConflictError(f"File '{file.full_name}' already exists. Replace it from its page instead.")
+        if replace and existing is None:
+            raise NotFoundError(f"File '{file.full_name}' does not exist.")
+        previous = (
+            self._file_from(
+                file.function, file.name, existing, self._file_registry(file.function).get(file.name)
+            )
+            if existing is not None
+            else None
+        )
+        self._ensure_volume(file.function)
+        path = self._file_path(file.function, file.name)
+        try:
+            self._files_api().upload(path, io.BytesIO(data), overwrite=True)
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"Upload to {path} failed: {exc}") from exc
+        try:
+            rows, _ = self._run(f"SELECT count(*) FROM {self._reader(file)}")
+        except BackendError as exc:
+            if previous is None:
+                try:
+                    self._files_api().delete(path)
+                except Exception:  # noqa: BLE001
+                    log.warning("Could not remove unreadable upload %s", path)
+            raise BackendError(f"The file cannot be read as {file.format.upper()}: {exc}") from exc
+        file.size_bytes = len(data)
+        file.row_count = int(rows[0][0]) if rows else None
+        if previous is not None:
+            file.display_name = file.display_name or previous.display_name
+            file.description = file.description or previous.description
+            file.owner = file.owner or previous.owner
+        file.owner = file.owner or actor.username
+        self._register_file(file, actor)
+        now = utcnow()
+        self._write_audit(
+            [
+                self._audit_row(
+                    file,
+                    None,
+                    "replace" if previous is not None else "upload",
+                    actor,
+                    uuid.uuid4().hex,
+                    {"size_bytes": previous.size_bytes, "row_count": previous.row_count}
+                    if previous
+                    else None,
+                    {"size_bytes": file.size_bytes, "row_count": file.row_count, "format": file.format},
+                    now,
+                    0,
+                )
+            ]
+        )
+        return self.get_file(file.function, file.name)
+
+    def update_file_metadata(self, file: FileDef, actor: User) -> FileDef:
+        file.validate()
+        current = self.get_file(file.function, file.name)
+        current.display_name, current.description, current.owner = (
+            file.display_name,
+            file.description,
+            file.owner,
+        )
+        self._register_file(current, actor)
+        return self.get_file(file.function, file.name)
+
+    def read_file(self, file: FileDef) -> bytes:
+        try:
+            response = self._files_api().download(self._file_path(file.function, file.name))
+            return response.contents.read()
+        except Exception as exc:  # noqa: BLE001
+            raise NotFoundError(f"File '{file.full_name}' could not be downloaded: {exc}") from exc
+
+    def preview_file(self, file: FileDef, limit: int = 100) -> pd.DataFrame:
+        return self._run_df(f"SELECT * FROM {self._reader(file)} LIMIT {int(limit)}")
+
+    def file_columns(self, file: FileDef) -> list[ColumnDef]:
+        rows, _ = self._run(f"DESCRIBE QUERY SELECT * FROM {self._reader(file)}")
+        cols = []
+        for i, row in enumerate(rows):
+            cname, dtype = str(row[0]), str(row[1])
+            t, p, s = parse_native_type(dtype)
+            cols.append(
+                ColumnDef(
+                    name=cname, data_type=t, precision=p, scale=s, native_type=dtype.upper(), position=i
+                )
+            )
+        return cols
+
+    def file_history(self, file: FileDef, limit: int = 200) -> pd.DataFrame:
+        columns = ["version", "changed_at", "changed_by", "change_type", "size_bytes", "row_count"]
+        kinds = ", ".join(lit(k) for k in FILE_CHANGE_TYPES)
+        try:
+            rows, _ = self._run(
+                f"SELECT changed_at, changed_by, change_type, before_json, after_json FROM {self._audit()} "
+                f"WHERE schema_name = :schema AND table_name = :table AND change_type IN ({kinds}) "
+                "ORDER BY changed_at DESC, seq DESC LIMIT " + str(int(limit)),
+                {"schema": file.function, "table": file.name},
+            )
+        except NotFoundError:
+            return pd.DataFrame(columns=columns)
+        records = []
+        n = len(rows)
+        for i, (changed_at, changed_by, change_type, before_json, after_json) in enumerate(rows):
+            snapshot = (
+                json.loads(after_json) if after_json else (json.loads(before_json) if before_json else {})
+            )
+            records.append(
+                {
+                    "version": n - i,
+                    "changed_at": to_db_scalar(changed_at),
+                    "changed_by": changed_by,
+                    "change_type": change_type,
+                    "size_bytes": snapshot.get("size_bytes"),
+                    "row_count": snapshot.get("row_count"),
+                }
+            )
+        return pd.DataFrame.from_records(records, columns=columns)
+
+    def drop_file(self, file: FileDef, actor: User) -> None:
+        current = self.get_file(file.function, file.name)
+        try:
+            self._files_api().delete(self._file_path(file.function, file.name))
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"Could not delete {file.full_name}: {exc}") from exc
+        self._unregister_file(file)
+        self._write_audit(
+            [
+                self._audit_row(
+                    file,
+                    None,
+                    "delete",
+                    actor,
+                    uuid.uuid4().hex,
+                    {"size_bytes": current.size_bytes, "row_count": current.row_count, "format": file.format},
+                    None,
+                    utcnow(),
+                    0,
+                )
+            ]
+        )
 
     # -- authorisation -------------------------------------------------------------------
 

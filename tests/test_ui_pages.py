@@ -12,7 +12,7 @@ from rdm.models import Role
 from rdm.services import CatalogService, FormService
 from rdm.ui import ids
 from rdm.ui.context import AppContext
-from rdm.ui.pages import domains_page, form_creator, function_page, help_page, home_page
+from rdm.ui.pages import domains_page, file_page, form_creator, function_page, help_page, home_page
 
 
 def make_ctx(backend, persona: str) -> AppContext:
@@ -254,3 +254,59 @@ def test_wizard_columns_step_guidance_and_sample_column(seeded_backend):
     assert samples["hide"] is True  # nothing to sample when starting from scratch
     text = texts_in(tree)
     assert "Allowed values" in text and "Active, Inactive, Retired" in text
+
+
+def test_function_page_lists_files_and_add_file_for_admins(seeded_backend):
+    admin_tree = function_page.render(make_ctx(seeded_backend, "admin"), "finance__cost_management")
+    assert {ids.FUNCTION_FILES, ids.ADD_FILE_OPEN, ids.ADD_FILE_UPLOAD, ids.ADD_FILE_SUBMIT} <= ids_in(
+        admin_tree
+    )
+    text = texts_in(admin_tree)
+    assert "Files (2)" in text and "FX Rates" in text and "GL Transactions (sample)" in text
+    editor_tree = function_page.render(make_ctx(seeded_backend, "editor"), "finance__cost_management")
+    add = next(n for n in walk(editor_tree) if getattr(n, "id", None) == ids.ADD_FILE_OPEN)
+    assert add.style == {"display": "none"}  # viewer on finance
+    files = seeded_backend.list_files("finance__cost_management")
+    assert "No matches" in texts_in(
+        function_page.file_cards("finance__cost_management", files, "zzz", Role.VIEWER)
+    )
+    assert "FX Rates" in texts_in(
+        function_page.file_cards("finance__cost_management", files, "fx", Role.VIEWER)
+    )
+
+
+@pytest.mark.parametrize("persona", ["admin", "function_admin", "editor"])
+def test_file_page_renders_per_role(seeded_backend, persona):
+    ctx = make_ctx(seeded_backend, persona)
+    tree = file_page.render(ctx, "finance__cost_management", "gl_transactions.csv")
+    found = ids_in(tree)
+    assert {ids.FILE_PREVIEW_GRID, ids.FILE_DOWNLOAD, ids.FILE_REPLACE_OPEN, ids.FILE_TABS} <= found
+    text = texts_in(tree)
+    assert "2,000 rows" in text and "GL Transactions (sample)" in text
+    replace = next(n for n in walk(tree) if getattr(n, "id", None) == ids.FILE_REPLACE_OPEN)
+    can_edit = ctx.role_of("finance__cost_management").can_edit
+    assert (replace.style == {}) is can_edit
+    if persona == "admin":
+        assert ids.DROP_FILE_SUBMIT in found and ids.FILE_SETTINGS_SAVE in found
+    elif persona == "function_admin":
+        assert ids.FILE_SETTINGS_SAVE in found and ids.DROP_FILE_SUBMIT not in found
+        assert "reserved to global administrators" in text
+    else:
+        assert ids.FILE_SETTINGS_SAVE not in found
+    file = ctx.forms.get_file("finance__cost_management", "gl_transactions.csv")
+    assert "amount_gbp" in texts_in(file_page.columns_panel(ctx, file))
+    assert "Uploaded" in texts_in(file_page.history_panel(ctx, file))
+
+
+def test_file_page_denies_viewer_without_access(seeded_backend):
+    from rdm.backend.base import PermissionDenied
+
+    with pytest.raises(PermissionDenied):
+        file_page.render(
+            make_ctx(seeded_backend, "viewer"), "finance__cost_management", "gl_transactions.csv"
+        )
+
+
+def test_upload_preview_helper(seeded_backend):
+    tree = function_page.upload_preview("campus.csv", b"a,b\n1,2\n3,4\n")
+    assert "2 columns" in texts_in(tree)

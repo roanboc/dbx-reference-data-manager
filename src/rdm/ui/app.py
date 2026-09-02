@@ -15,7 +15,15 @@ from rdm.config import APP_TITLE
 from rdm.ui import ids, layout
 from rdm.ui.components import error_alert
 from rdm.ui.context import get_context, grouped_navigation
-from rdm.ui.pages import domains_page, form_creator, form_page, function_page, help_page, home_page
+from rdm.ui.pages import (
+    domains_page,
+    file_page,
+    form_creator,
+    form_page,
+    function_page,
+    help_page,
+    home_page,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -24,13 +32,15 @@ ASSETS = Path(__file__).resolve().parents[3] / "assets"
 
 
 def parse_path(pathname: str | None) -> tuple[str, str | None, str | None]:
-    """``/`` -> home, ``/fn/<function>``, ``/f/<function>/<form>``, ``/new-form``, ``/new-function``,
-    ``/domains``, ``/help``."""
+    """``/`` -> home, ``/fn/<function>``, ``/f/<function>/<form>``, ``/file/<function>/<file>``,
+    ``/new-form``, ``/new-function``, ``/domains``, ``/help``."""
     parts = [unquote(p) for p in (pathname or "/").split("/") if p]
     if not parts:
         return "home", None, None
     if parts[0] == "f" and len(parts) >= 3:
         return "form", parts[1], parts[2]
+    if parts[0] == "file" and len(parts) >= 3:
+        return "file", parts[1], parts[2]
     if parts[0] == "fn" and len(parts) >= 2:
         return "function", parts[1], None
     if parts[0] == "new-form":
@@ -56,6 +66,7 @@ def create_app() -> dash.Dash:
     app.layout = layout.shell()
     register_shell_callbacks(app)
     form_page.register(app)
+    file_page.register(app)
     form_creator.register(app)
     function_page.register(app)
     domains_page.register(app)
@@ -106,6 +117,8 @@ def register_shell_callbacks(app: dash.Dash) -> None:
             view, function, form = parse_path(pathname)
             if view == "form":
                 return form_page.render(app_ctx, function, form)
+            if view == "file":
+                return file_page.render(app_ctx, function, form)
             if view == "function":
                 return function_page.render(app_ctx, function)
             if view == "new-form":

@@ -29,6 +29,10 @@ def function_href(function: str) -> str:
     return f"/fn/{quote(function)}"
 
 
+def file_href(function: str, name: str) -> str:
+    return f"/file/{quote(function)}/{quote(name)}"
+
+
 DOMAINS_HREF = "/domains"
 NEW_FUNCTION_HREF = "/new-function"
 NEW_FORM_HREF = "/new-form"
@@ -52,7 +56,7 @@ def shell() -> dmc.MantineProvider:
                             [
                                 dmc.TextInput(
                                     id=ids.NAV_SEARCH,
-                                    placeholder="Search forms by name or description",
+                                    placeholder="Search forms and files",
                                     leftSection=icon("tabler:search"),
                                     debounce=350,
                                     size="sm",
@@ -184,10 +188,26 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
                         variant="light",
                     )
                 )
-            if not item.forms:
+            for x in item.files:
+                links.append(
+                    dmc.NavLink(
+                        label=x.title,
+                        description=(x.description[:80] + "…")
+                        if x.description and len(x.description) > 80
+                        else (x.description or f"{x.format.upper()} file"),
+                        href=file_href(f.name, x.name),
+                        active=pathname == file_href(f.name, x.name),
+                        leftSection=icon(
+                            "tabler:file-spreadsheet" if x.format == "csv" else "tabler:file-database"
+                        ),
+                        variant="light",
+                    )
+                )
+            if item.is_empty:
                 links.append(
                     dmc.Text(
-                        "No forms yet." + (" Use New form to create one." if item.role.can_admin else ""),
+                        "No forms or files yet."
+                        + (" Use New form or Add file to create one." if item.role.can_admin else ""),
                         size="xs",
                         c="dimmed",
                         px="sm",
@@ -290,6 +310,6 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
 
 def _current_function(pathname: str) -> str | None:
     parts = [p for p in (pathname or "").split("/") if p]
-    if len(parts) >= 2 and parts[0] in ("fn", "f"):
+    if len(parts) >= 2 and parts[0] in ("fn", "f", "file"):
         return parts[1]
     return None

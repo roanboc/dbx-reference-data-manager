@@ -15,8 +15,9 @@ resources:
       comment: >-
         Reference Data Manager: reference lists and slowly changing lookup tables managed by
         data stewards through the Reference Data Manager app. One schema per business function
-        (<domain>__<area>, grouped into business domains), one Delta table per form. Governance
-        is Unity Catalog grants on the schemas; the app only decides what to render.
+        (<domain>__<area>, grouped into business domains), one Delta table per form and a
+        _files volume per function for CSV/Parquet datasets. Governance is Unity Catalog grants
+        on the schemas; the app only decides what to render.
       # storage_root: abfss://... / s3://...  # required only if the metastore has no default storage root
 
       grants:
@@ -34,6 +35,9 @@ resources:
             - SELECT
             - MODIFY
             - CREATE_TABLE
+            - CREATE_VOLUME
+            - READ_VOLUME
+            - WRITE_VOLUME
             - MANAGE
             - APPLY_TAG
 
