@@ -4,10 +4,11 @@ DuckDB gives us real DDL/DML, ``COMMENT ON``, ``information_schema`` and transac
 What Unity Catalog has and DuckDB lacks is emulated in a private ``_catalog`` schema, which
 also holds the registry tables the Databricks backend maintains in ``<catalog>._catalog``:
 
-* ``domains`` / ``forms``  - registry of domains and forms with their descriptive attributes
-* ``change_log``           - row-level history (audit trail)
-* ``object_properties``    - table properties / tags / schema comments (local emulation)
-* ``grants``               - schema-level roles for groups (local emulation of UC grants)
+* ``domains``            - the domain list (business classifier above functions)
+* ``functions`` / ``forms`` - registry of functions (schemas) and forms with their attributes
+* ``change_log``         - row-level history (audit trail)
+* ``object_properties``  - table properties / tags / schema comments (local emulation)
+* ``grants``             - schema-level roles for groups (local emulation of UC grants)
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from rdm.models import (
     PROP_COLUMN_CONFIG,
     PROP_DISPLAY_NAME,
     PROP_DOC_LINK,
+    PROP_DOMAIN,
     PROP_FORM,
     PROP_OWNER,
     SYSTEM_COLUMNS,
@@ -55,6 +57,7 @@ from rdm.models import (
     DataType,
     DomainDef,
     FormDef,
+    FunctionDef,
     Permissions,
     Role,
     SaveResult,
@@ -72,6 +75,7 @@ DEFAULT_LOCAL_GROUPS = (
     "everyone",
     "student_stewards",
     "student_readers",
+    "finance_admins",
     "finance_stewards",
     "finance_readers",
     "hr_stewards",
@@ -146,6 +150,7 @@ class DuckDBBackend(DatabaseBackend):
     def _ensure_meta(self) -> None:
         with self._cursor() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(META_SCHEMA)}")
+            self._migrate_meta(cur)
             cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "object_properties"])} (
                         object_type VARCHAR NOT NULL,
@@ -182,6 +187,18 @@ class DuckDBBackend(DatabaseBackend):
                         display_name VARCHAR,
                         description  VARCHAR,
                         owner        VARCHAR,
+                        created_at   TIMESTAMP,
+                        created_by   VARCHAR,
+                        updated_at   TIMESTAMP,
+                        updated_by   VARCHAR)"""
+            )
+            cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "functions"])} (
+                        name         VARCHAR PRIMARY KEY,
+                        domain_name  VARCHAR,
+                        display_name VARCHAR,
+                        description  VARCHAR,
+                        owner        VARCHAR,
                         doc_link     VARCHAR,
                         created_at   TIMESTAMP,
                         created_by   VARCHAR,
@@ -190,35 +207,61 @@ class DuckDBBackend(DatabaseBackend):
             )
             cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "forms"])} (
-                        domain       VARCHAR NOT NULL,
-                        name         VARCHAR NOT NULL,
-                        display_name VARCHAR,
-                        description  VARCHAR,
-                        owner        VARCHAR,
-                        created_at   TIMESTAMP,
-                        created_by   VARCHAR,
-                        updated_at   TIMESTAMP,
-                        updated_by   VARCHAR,
-                        PRIMARY KEY (domain, name))"""
+                        function_name VARCHAR NOT NULL,
+                        name          VARCHAR NOT NULL,
+                        display_name  VARCHAR,
+                        description   VARCHAR,
+                        owner         VARCHAR,
+                        created_at    TIMESTAMP,
+                        created_by    VARCHAR,
+                        updated_at    TIMESTAMP,
+                        updated_by    VARCHAR,
+                        PRIMARY KEY (function_name, name))"""
+            )
+
+    @staticmethod
+    def _migrate_meta(cur) -> None:
+        """Upgrade a local database created before functions and domains were separated.
+
+        The old ``domains`` registry (with a ``doc_link`` column) described what are now
+        *functions*; the old ``forms`` registry keyed forms by ``domain``.
+        """
+        cols = {
+            (t, c)
+            for t, c in cur.execute(
+                "SELECT table_name, column_name FROM duckdb_columns() WHERE schema_name = ?", [META_SCHEMA]
+            ).fetchall()
+        }
+        if ("domains", "doc_link") in cols and not any(t == "functions" for t, _ in cols):
+            cur.execute(
+                f"ALTER TABLE {qualified([META_SCHEMA, 'domains'])} RENAME TO {quote_ident('functions')}"
+            )
+            cur.execute(f"ALTER TABLE {qualified([META_SCHEMA, 'functions'])} ADD COLUMN domain_name VARCHAR")
+        if ("forms", "domain") in cols:
+            cur.execute(
+                f"ALTER TABLE {qualified([META_SCHEMA, 'forms'])} RENAME COLUMN domain TO function_name"
             )
 
     # -- registry (mirrors the Databricks ``_catalog`` tables) -----------------------------
 
-    def _register_domain(self, cur, domain: DomainDef, actor: User) -> None:
+    def _register_function(self, cur, function: FunctionDef, actor: User) -> None:
         now = utcnow()
         existing = cur.execute(
-            f"SELECT created_at, created_by FROM {qualified([META_SCHEMA, 'domains'])} WHERE name = ?",
-            [domain.name],
+            f"SELECT created_at, created_by FROM {qualified([META_SCHEMA, 'functions'])} WHERE name = ?",
+            [function.name],
         ).fetchone()
         created_at, created_by = existing if existing else (now, actor.username)
         cur.execute(
-            f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'domains'])} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'functions'])} "
+            "(name, domain_name, display_name, description, owner, doc_link, created_at, created_by, "
+            "updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                domain.name,
-                domain.display_name,
-                domain.description,
-                domain.owner,
-                domain.doc_link,
+                function.name,
+                function.domain or None,
+                function.display_name,
+                function.description,
+                function.owner,
+                function.doc_link,
                 created_at,
                 created_by,
                 now,
@@ -226,17 +269,23 @@ class DuckDBBackend(DatabaseBackend):
             ],
         )
 
+    def _unregister_function(self, cur, name: str) -> None:
+        cur.execute(f"DELETE FROM {qualified([META_SCHEMA, 'functions'])} WHERE name = ?", [name])
+
     def _register_form(self, cur, form: FormDef, actor: User) -> None:
         now = utcnow()
         existing = cur.execute(
-            f"SELECT created_at, created_by FROM {qualified([META_SCHEMA, 'forms'])} WHERE domain = ? AND name = ?",
-            [form.domain, form.name],
+            f"SELECT created_at, created_by FROM {qualified([META_SCHEMA, 'forms'])} "
+            "WHERE function_name = ? AND name = ?",
+            [form.function, form.name],
         ).fetchone()
         created_at, created_by = existing if existing else (now, actor.username)
         cur.execute(
-            f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'forms'])} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'forms'])} "
+            "(function_name, name, display_name, description, owner, created_at, created_by, updated_at, "
+            "updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                form.domain,
+                form.function,
                 form.name,
                 form.display_name,
                 form.description,
@@ -248,14 +297,15 @@ class DuckDBBackend(DatabaseBackend):
             ],
         )
 
-    def _unregister_form(self, cur, domain: str, name: str) -> None:
+    def _unregister_form(self, cur, function: str, name: str) -> None:
         cur.execute(
-            f"DELETE FROM {qualified([META_SCHEMA, 'forms'])} WHERE domain = ? AND name = ?", [domain, name]
+            f"DELETE FROM {qualified([META_SCHEMA, 'forms'])} WHERE function_name = ? AND name = ?",
+            [function, name],
         )
 
     @staticmethod
     def _t(form: FormDef) -> str:
-        return qualified([form.domain, form.name])
+        return qualified([form.function, form.name])
 
     # -- property store -------------------------------------------------------------------
 
@@ -305,7 +355,106 @@ class DuckDBBackend(DatabaseBackend):
                 [schema, table],
             )
 
-    # -- domains -----------------------------------------------------------------------------
+    # -- domains (classifier) ---------------------------------------------------------------
+
+    def _function_counts_by_domain(self, cur) -> dict[str, int]:
+        rows = cur.execute(
+            f"SELECT value, count(*) FROM {qualified([META_SCHEMA, 'object_properties'])} "
+            "WHERE object_type = 'schema' AND key = ? GROUP BY value",
+            [PROP_DOMAIN],
+        ).fetchall()
+        return {str(d): int(n) for d, n in rows if d}
+
+    @staticmethod
+    def _domain_from_row(row: tuple, count: int | None) -> DomainDef:
+        name, display_name, description, owner = row
+        return DomainDef(
+            name=name,
+            display_name=display_name or "",
+            description=description or "",
+            owner=owner or "",
+            function_count=count,
+        )
+
+    def list_domains(self) -> list[DomainDef]:
+        with self._cursor() as cur:
+            rows = cur.execute(
+                f"SELECT name, display_name, description, owner FROM {qualified([META_SCHEMA, 'domains'])} "
+                "ORDER BY name"
+            ).fetchall()
+            counts = self._function_counts_by_domain(cur)
+        return [self._domain_from_row(r, counts.get(r[0], 0)) for r in rows]
+
+    def get_domain(self, name: str) -> DomainDef:
+        with self._cursor() as cur:
+            row = cur.execute(
+                f"SELECT name, display_name, description, owner FROM {qualified([META_SCHEMA, 'domains'])} "
+                "WHERE name = ?",
+                [name],
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"Domain '{name}' does not exist.")
+            counts = self._function_counts_by_domain(cur)
+        return self._domain_from_row(row, counts.get(name, 0))
+
+    def create_domain(self, domain: DomainDef, actor: User) -> DomainDef:
+        domain.validate()
+        now = utcnow()
+        with self._tx() as cur:
+            exists = cur.execute(
+                f"SELECT 1 FROM {qualified([META_SCHEMA, 'domains'])} WHERE name = ?", [domain.name]
+            ).fetchone()
+            if exists:
+                raise ConflictError(f"Domain '{domain.name}' already exists.")
+            cur.execute(
+                f"INSERT INTO {qualified([META_SCHEMA, 'domains'])} VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    domain.name,
+                    domain.display_name,
+                    domain.description,
+                    domain.owner or actor.username,
+                    now,
+                    actor.username,
+                    now,
+                    actor.username,
+                ],
+            )
+        return self.get_domain(domain.name)
+
+    def update_domain(self, domain: DomainDef, actor: User) -> DomainDef:
+        domain.validate()
+        with self._tx() as cur:
+            n = cur.execute(
+                f"UPDATE {qualified([META_SCHEMA, 'domains'])} SET display_name = ?, description = ?, "
+                "owner = ?, updated_at = ?, updated_by = ? WHERE name = ?",
+                [
+                    domain.display_name,
+                    domain.description,
+                    domain.owner,
+                    utcnow(),
+                    actor.username,
+                    domain.name,
+                ],
+            ).fetchone()[0]
+            if n == 0:
+                raise NotFoundError(f"Domain '{domain.name}' does not exist.")
+        return self.get_domain(domain.name)
+
+    def delete_domain(self, name: str, actor: User) -> None:
+        with self._tx() as cur:
+            exists = cur.execute(
+                f"SELECT 1 FROM {qualified([META_SCHEMA, 'domains'])} WHERE name = ?", [name]
+            ).fetchone()
+            if not exists:
+                raise NotFoundError(f"Domain '{name}' does not exist.")
+            assigned = self._function_counts_by_domain(cur).get(name, 0)
+            if assigned:
+                raise ConflictError(
+                    f"Domain '{name}' still has {assigned} function(s) assigned. Move them to another domain first."
+                )
+            cur.execute(f"DELETE FROM {qualified([META_SCHEMA, 'domains'])} WHERE name = ?", [name])
+
+    # -- functions (schemas) ------------------------------------------------------------------
 
     def _schema_exists(self, cur, name: str) -> bool:
         row = cur.execute(
@@ -313,7 +462,7 @@ class DuckDBBackend(DatabaseBackend):
         ).fetchone()
         return row is not None
 
-    def list_domains(self) -> list[DomainDef]:
+    def list_functions(self) -> list[FunctionDef]:
         with self._cursor() as cur:
             names = [
                 r[0]
@@ -328,91 +477,126 @@ class DuckDBBackend(DatabaseBackend):
                     "GROUP BY schema_name"
                 ).fetchall()
             )
-            return [self._domain_from(cur, n, counts.get(n, 0)) for n in names]
+            return [self._function_from(cur, n, counts.get(n, 0)) for n in names]
 
-    def _domain_from(self, cur, name: str, form_count: int | None) -> DomainDef:
+    def _function_from(self, cur, name: str, form_count: int | None) -> FunctionDef:
         props = self._get_props(cur, "schema", name)
-        return DomainDef(
+        return FunctionDef(
             name=name,
             display_name=props.get(PROP_DISPLAY_NAME, ""),
             description=props.get("comment", ""),
             owner=props.get(PROP_OWNER, ""),
             doc_link=props.get(PROP_DOC_LINK, ""),
+            domain=props.get(PROP_DOMAIN, ""),
             form_count=form_count,
             properties=props,
         )
 
-    def get_domain(self, name: str) -> DomainDef:
+    def get_function(self, name: str) -> FunctionDef:
         with self._cursor() as cur:
             if name in HIDDEN_SCHEMAS or not self._schema_exists(cur, name):
-                raise NotFoundError(f"Domain '{name}' does not exist.")
+                raise NotFoundError(f"Function '{name}' does not exist.")
             count = cur.execute(
                 "SELECT count(*) FROM duckdb_tables() WHERE NOT internal AND NOT temporary AND schema_name = ?",
                 [name],
             ).fetchone()[0]
-            return self._domain_from(cur, name, count)
+            return self._function_from(cur, name, count)
 
-    def create_domain(self, domain: DomainDef, actor: User) -> DomainDef:
-        domain.validate()
-        if domain.name in HIDDEN_SCHEMAS:
-            raise ConflictError(f"'{domain.name}' is a reserved name.")
+    def _check_domain(self, cur, domain: str) -> None:
+        if not domain:
+            return
+        row = cur.execute(
+            f"SELECT 1 FROM {qualified([META_SCHEMA, 'domains'])} WHERE name = ?", [domain]
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Domain '{domain}' does not exist.")
+
+    def create_function(self, function: FunctionDef, actor: User) -> FunctionDef:
+        function.validate()
+        if function.name in HIDDEN_SCHEMAS:
+            raise ConflictError(f"'{function.name}' is a reserved name.")
         with self._tx() as cur:
-            if self._schema_exists(cur, domain.name):
-                raise ConflictError(f"Domain '{domain.name}' already exists.")
-            cur.execute(f"CREATE SCHEMA {quote_ident(domain.name)}")
+            if self._schema_exists(cur, function.name):
+                raise ConflictError(f"Function '{function.name}' already exists.")
+            self._check_domain(cur, function.domain)
+            cur.execute(f"CREATE SCHEMA {quote_ident(function.name)}")
             self._set_props(
                 cur,
                 "schema",
-                domain.name,
+                function.name,
                 "",
                 {
-                    "comment": domain.description,
-                    PROP_DISPLAY_NAME: domain.display_name,
-                    PROP_OWNER: domain.owner or actor.username,
-                    PROP_DOC_LINK: domain.doc_link,
+                    "comment": function.description,
+                    PROP_DISPLAY_NAME: function.display_name,
+                    PROP_OWNER: function.owner or actor.username,
+                    PROP_DOC_LINK: function.doc_link,
+                    PROP_DOMAIN: function.domain,
                     "created_by": actor.username,
                 },
             )
-            self._register_domain(cur, domain, actor)
-        return self.get_domain(domain.name)
+            self._register_function(cur, function, actor)
+        return self.get_function(function.name)
 
-    def update_domain(self, domain: DomainDef, actor: User) -> DomainDef:
-        domain.validate()
+    def update_function(self, function: FunctionDef, actor: User) -> FunctionDef:
+        function.validate()
         with self._tx() as cur:
-            if not self._schema_exists(cur, domain.name):
-                raise NotFoundError(f"Domain '{domain.name}' does not exist.")
+            if not self._schema_exists(cur, function.name):
+                raise NotFoundError(f"Function '{function.name}' does not exist.")
+            self._check_domain(cur, function.domain)
             self._set_props(
                 cur,
                 "schema",
-                domain.name,
+                function.name,
                 "",
                 {
-                    "comment": domain.description,
-                    PROP_DISPLAY_NAME: domain.display_name,
-                    PROP_OWNER: domain.owner,
-                    PROP_DOC_LINK: domain.doc_link,
+                    "comment": function.description,
+                    PROP_DISPLAY_NAME: function.display_name,
+                    PROP_OWNER: function.owner,
+                    PROP_DOC_LINK: function.doc_link,
+                    PROP_DOMAIN: function.domain,
                 },
             )
-            self._register_domain(cur, domain, actor)
-        return self.get_domain(domain.name)
+            self._register_function(cur, function, actor)
+        return self.get_function(function.name)
 
-    def list_forms(self, domain: str) -> list[FormDef]:
+    def drop_function(self, function: FunctionDef, actor: User) -> None:
+        with self._tx() as cur:
+            if not self._schema_exists(cur, function.name):
+                raise NotFoundError(f"Function '{function.name}' does not exist.")
+            n = cur.execute(
+                "SELECT count(*) FROM duckdb_tables() WHERE NOT internal AND NOT temporary AND schema_name = ?",
+                [function.name],
+            ).fetchone()[0]
+            if n:
+                raise ConflictError(
+                    f"Function '{function.name}' still has {n} form(s). Delete or migrate them first."
+                )
+            cur.execute(f"DROP SCHEMA {quote_ident(function.name)}")
+            self._delete_props(cur, function.name)
+            cur.execute(
+                f"DELETE FROM {qualified([META_SCHEMA, 'grants'])} WHERE schema_name = ?", [function.name]
+            )
+            self._unregister_function(cur, function.name)
+
+    # -- forms -------------------------------------------------------------------------------
+
+    def list_forms(self, function: str) -> list[FormDef]:
         with self._cursor() as cur:
-            if not self._schema_exists(cur, domain):
-                raise NotFoundError(f"Domain '{domain}' does not exist.")
+            if not self._schema_exists(cur, function):
+                raise NotFoundError(f"Function '{function}' does not exist.")
             rows = cur.execute(
                 "SELECT table_name, comment, estimated_size FROM duckdb_tables() "
                 "WHERE NOT internal AND NOT temporary AND schema_name = ? ORDER BY table_name",
-                [domain],
+                [function],
             ).fetchall()
-            props = self._get_props_bulk(cur, "table", domain)
-            tags = self._get_props_bulk(cur, "table_tag", domain)
+            props = self._get_props_bulk(cur, "table", function)
+            tags = self._get_props_bulk(cur, "table_tag", function)
             forms = []
             for name, comment, size in rows:
                 p = props.get(name, {})
                 forms.append(
                     FormDef(
-                        domain=domain,
+                        function=function,
                         name=name,
                         display_name=p.get(PROP_DISPLAY_NAME, ""),
                         description=comment or "",
@@ -424,18 +608,18 @@ class DuckDBBackend(DatabaseBackend):
                 )
             return forms
 
-    def _table_exists(self, cur, domain: str, name: str) -> bool:
+    def _table_exists(self, cur, function: str, name: str) -> bool:
         row = cur.execute(
             "SELECT 1 FROM duckdb_tables() WHERE NOT internal AND NOT temporary AND schema_name = ? AND table_name = ?",
-            [domain, name],
+            [function, name],
         ).fetchone()
         return row is not None
 
-    def _load_columns(self, cur, domain: str, name: str) -> list[ColumnDef]:
+    def _load_columns(self, cur, function: str, name: str) -> list[ColumnDef]:
         rows = cur.execute(
             "SELECT column_name, data_type, is_nullable, comment, column_index FROM duckdb_columns() "
             "WHERE NOT internal AND schema_name = ? AND table_name = ? ORDER BY column_index",
-            [domain, name],
+            [function, name],
         ).fetchall()
         cols = []
         for i, (cname, dtype, nullable, comment, _idx) in enumerate(rows):
@@ -454,22 +638,23 @@ class DuckDBBackend(DatabaseBackend):
             )
         return cols
 
-    def get_form(self, domain: str, name: str) -> FormDef:
+    def get_form(self, function: str, name: str) -> FormDef:
         with self._cursor() as cur:
-            if not self._table_exists(cur, domain, name):
-                raise NotFoundError(f"Form '{domain}.{name}' does not exist.")
+            if not self._table_exists(cur, function, name):
+                raise NotFoundError(f"Form '{function}.{name}' does not exist.")
             comment = cur.execute(
-                "SELECT comment FROM duckdb_tables() WHERE schema_name = ? AND table_name = ?", [domain, name]
+                "SELECT comment FROM duckdb_tables() WHERE schema_name = ? AND table_name = ?",
+                [function, name],
             ).fetchone()[0]
-            props = self._get_props(cur, "table", domain, name)
-            tags = self._get_props(cur, "table_tag", domain, name)
+            props = self._get_props(cur, "table", function, name)
+            tags = self._get_props(cur, "table_tag", function, name)
             form = FormDef(
-                domain=domain,
+                function=function,
                 name=name,
                 display_name=props.get(PROP_DISPLAY_NAME, ""),
                 description=comment or "",
                 owner=props.get(PROP_OWNER, ""),
-                columns=self._load_columns(cur, domain, name),
+                columns=self._load_columns(cur, function, name),
                 properties=props,
                 tags=tags,
             )
@@ -483,7 +668,7 @@ class DuckDBBackend(DatabaseBackend):
                 last = cur.execute(
                     f"SELECT changed_at, changed_by FROM {qualified([META_SCHEMA, 'change_log'])} "
                     "WHERE schema_name = ? AND table_name = ? ORDER BY id DESC LIMIT 1",
-                    [domain, name],
+                    [function, name],
                 ).fetchone()
                 if last is not None:
                     form.updated_at, form.updated_by = last[0], last[1] or ""
@@ -507,9 +692,9 @@ class DuckDBBackend(DatabaseBackend):
         form.columns = system_columns() + user_cols
         form.validate()
         with self._tx() as cur:
-            if not self._schema_exists(cur, form.domain):
-                raise NotFoundError(f"Domain '{form.domain}' does not exist.")
-            if self._table_exists(cur, form.domain, form.name):
+            if not self._schema_exists(cur, form.function):
+                raise NotFoundError(f"Function '{form.function}' does not exist.")
+            if self._table_exists(cur, form.function, form.name):
                 raise ConflictError(f"Form '{form.full_name}' already exists.")
             col_ddl = ",\n  ".join(self._column_ddl(c) for c in form.columns)
             cur.execute(
@@ -519,7 +704,7 @@ class DuckDBBackend(DatabaseBackend):
             self._set_props(
                 cur,
                 "table",
-                form.domain,
+                form.function,
                 form.name,
                 {
                     PROP_FORM: "true",
@@ -533,7 +718,7 @@ class DuckDBBackend(DatabaseBackend):
             self._set_props(
                 cur,
                 "table_tag",
-                form.domain,
+                form.function,
                 form.name,
                 {
                     "rdm_form": "true",
@@ -544,7 +729,7 @@ class DuckDBBackend(DatabaseBackend):
             self._register_form(cur, form, actor)
             if rows is not None and len(rows):
                 self._append_rows(cur, form, rows, actor)
-        return self.get_form(form.domain, form.name)
+        return self.get_form(form.function, form.name)
 
     def _write_comments(self, cur, form: FormDef) -> None:
         cur.execute(f"COMMENT ON TABLE {self._t(form)} IS {lit(form.description or '')}")
@@ -556,9 +741,9 @@ class DuckDBBackend(DatabaseBackend):
     def update_form_metadata(self, form: FormDef, actor: User) -> FormDef:
         form.validate()
         with self._tx() as cur:
-            if not self._table_exists(cur, form.domain, form.name):
+            if not self._table_exists(cur, form.function, form.name):
                 raise NotFoundError(f"Form '{form.full_name}' does not exist.")
-            existing = {c.name: c for c in self._load_columns(cur, form.domain, form.name)}
+            existing = {c.name: c for c in self._load_columns(cur, form.function, form.name)}
             for c in form.columns:
                 if c.name not in existing:
                     raise NotFoundError(f"Column '{c.name}' does not exist on '{form.full_name}'.")
@@ -577,7 +762,7 @@ class DuckDBBackend(DatabaseBackend):
             self._set_props(
                 cur,
                 "table",
-                form.domain,
+                form.function,
                 form.name,
                 {
                     PROP_DISPLAY_NAME: form.display_name,
@@ -588,12 +773,12 @@ class DuckDBBackend(DatabaseBackend):
             self._set_props(
                 cur,
                 "table_tag",
-                form.domain,
+                form.function,
                 form.name,
                 {"rdm_display_name": form.display_name, "rdm_owner": form.owner},
             )
             self._register_form(cur, form, actor)
-        return self.get_form(form.domain, form.name)
+        return self.get_form(form.function, form.name)
 
     def add_column(self, form: FormDef, column: ColumnDef, actor: User) -> FormDef:
         column.validate()
@@ -601,7 +786,7 @@ class DuckDBBackend(DatabaseBackend):
             raise BackendError("System columns cannot be added manually.")
         with self._tx() as cur:
             if form.column(column.name) is not None or column.name in {
-                c.name for c in self._load_columns(cur, form.domain, form.name)
+                c.name for c in self._load_columns(cur, form.function, form.name)
             }:
                 raise ConflictError(f"Column '{column.name}' already exists.")
             cur.execute(
@@ -613,34 +798,34 @@ class DuckDBBackend(DatabaseBackend):
             column.nullable = True  # existing rows have no value; NOT NULL can be set later
             form.columns.append(column)
             self._set_props(
-                cur, "table", form.domain, form.name, {PROP_COLUMN_CONFIG: form.column_config_json()}
+                cur, "table", form.function, form.name, {PROP_COLUMN_CONFIG: form.column_config_json()}
             )
-        return self.get_form(form.domain, form.name)
+        return self.get_form(form.function, form.name)
 
     def drop_column(self, form: FormDef, column_name: str, actor: User) -> FormDef:
         if column_name in SYSTEM_COLUMNS:
             raise BackendError("System columns cannot be removed.")
         with self._tx() as cur:
-            names = {c.name for c in self._load_columns(cur, form.domain, form.name)}
+            names = {c.name for c in self._load_columns(cur, form.function, form.name)}
             if column_name not in names:
                 raise NotFoundError(f"Column '{column_name}' does not exist.")
             cur.execute(f"ALTER TABLE {self._t(form)} DROP COLUMN {quote_ident(column_name)}")
             form.columns = [c for c in form.columns if c.name != column_name]
             self._set_props(
-                cur, "table", form.domain, form.name, {PROP_COLUMN_CONFIG: form.column_config_json()}
+                cur, "table", form.function, form.name, {PROP_COLUMN_CONFIG: form.column_config_json()}
             )
-        return self.get_form(form.domain, form.name)
+        return self.get_form(form.function, form.name)
 
     def drop_form(self, form: FormDef, actor: User) -> None:
         with self._tx() as cur:
-            if not self._table_exists(cur, form.domain, form.name):
+            if not self._table_exists(cur, form.function, form.name):
                 raise NotFoundError(f"Form '{form.full_name}' does not exist.")
             cur.execute(f"DROP TABLE {self._t(form)}")
-            self._delete_props(cur, form.domain, form.name)
-            self._unregister_form(cur, form.domain, form.name)
+            self._delete_props(cur, form.function, form.name)
+            self._unregister_form(cur, form.function, form.name)
             cur.execute(
                 f"DELETE FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ?",
-                [form.domain, form.name],
+                [form.function, form.name],
             )
 
     # -- rows --------------------------------------------------------------------------------
@@ -707,7 +892,7 @@ class DuckDBBackend(DatabaseBackend):
             f"INSERT INTO {qualified([META_SCHEMA, 'change_log'])} "
             f"VALUES (nextval('{META_SCHEMA}.change_log_seq'), ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                form.domain,
+                form.function,
                 form.name,
                 row_id,
                 change_type,
@@ -854,17 +1039,23 @@ class DuckDBBackend(DatabaseBackend):
             self._log(cur, form, rec[ID_COLUMN], "insert", actor, batch, None, after, now)
         return len(df)
 
-    def get_history(self, form: FormDef, limit: int = 200) -> pd.DataFrame:
+    def get_history(self, form: FormDef, limit: int = 200, row_id: str | None = None) -> pd.DataFrame:
+        params: list[Any] = [form.function, form.name]
+        row_filter = ""
+        if row_id:
+            row_filter = " AND row_id = ?"
+            params.append(row_id)
+        params.append(int(limit))
         with self._cursor() as cur:
             rows = cur.execute(
                 f"SELECT id, changed_at, changed_by, change_type, row_id, before_json, after_json "
-                f"FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ? "
-                "ORDER BY id DESC LIMIT ?",
-                [form.domain, form.name, int(limit)],
+                f"FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ?"
+                f"{row_filter} ORDER BY id DESC LIMIT ?",
+                params,
             ).fetchall()
         user_cols = [c.name for c in form.user_columns]
         records = []
-        for version, changed_at, changed_by, change_type, row_id, before_json, after_json in rows:
+        for version, changed_at, changed_by, change_type, rid, before_json, after_json in rows:
             before = json.loads(before_json) if before_json else {}
             after = json.loads(after_json) if after_json else {}
             snapshot = after if change_type != "delete" else before
@@ -875,7 +1066,7 @@ class DuckDBBackend(DatabaseBackend):
                 "changed_by": changed_by,
                 "change_type": change_type,
                 "changed_fields": ", ".join(changed),
-                ID_COLUMN: row_id,
+                ID_COLUMN: rid,
             }
             for c in user_cols:
                 rec[c] = snapshot.get(c)
@@ -895,27 +1086,27 @@ class DuckDBBackend(DatabaseBackend):
                 f"SELECT schema_name, role FROM {qualified([META_SCHEMA, 'grants'])} WHERE principal IN ({placeholders})",
                 principals,
             ).fetchall()
-            domains = [
+            functions = [
                 r[0]
                 for r in cur.execute("SELECT schema_name FROM duckdb_schemas() WHERE NOT internal").fetchall()
                 if r[0] not in HIDDEN_SCHEMAS
             ]
         catalog_role = Role.NONE
-        per_domain: dict[str, Role] = {}
+        per_function: dict[str, Role] = {}
         for schema, role_name in rows:
             role = Role[role_name]
             if schema == CATALOG_LEVEL:
                 catalog_role = max(catalog_role, role)
             else:
-                per_domain[schema] = max(per_domain.get(schema, Role.NONE), role)
-        roles = {d: max(per_domain.get(d, Role.NONE), catalog_role) for d in domains}
-        return Permissions(domain_roles=roles, is_global_admin=catalog_role.can_admin)
+                per_function[schema] = max(per_function.get(schema, Role.NONE), role)
+        roles = {f: max(per_function.get(f, Role.NONE), catalog_role) for f in functions}
+        return Permissions(function_roles=roles, is_global_admin=catalog_role.can_admin)
 
-    def list_domain_grants(self, domain: str) -> list[tuple[str, Role]]:
+    def list_function_grants(self, function: str) -> list[tuple[str, Role]]:
         with self._cursor() as cur:
             rows = cur.execute(
                 f"SELECT principal, role FROM {qualified([META_SCHEMA, 'grants'])} WHERE schema_name = ? ORDER BY principal",
-                [domain],
+                [function],
             ).fetchall()
         return [(p, Role[r]) for p, r in rows]
 
@@ -928,21 +1119,21 @@ class DuckDBBackend(DatabaseBackend):
         needle = (query or "").strip().lower()
         return sorted(g for g in groups if needle in g.lower())
 
-    def grant_domain_role(self, domain: str, principal: str, role: Role, actor: User) -> None:
+    def grant_function_role(self, function: str, principal: str, role: Role, actor: User) -> None:
         principal = (principal or "").strip()
         if not principal:
             raise BackendError("A group is required.")
         if "@" in principal:
             raise BackendError("Access is granted to groups only, not to individual users.")
         with self._tx() as cur:
-            if domain != CATALOG_LEVEL and not self._schema_exists(cur, domain):
-                raise NotFoundError(f"Domain '{domain}' does not exist.")
+            if function != CATALOG_LEVEL and not self._schema_exists(cur, function):
+                raise NotFoundError(f"Function '{function}' does not exist.")
             cur.execute(
                 f"DELETE FROM {qualified([META_SCHEMA, 'grants'])} WHERE schema_name = ? AND principal = ?",
-                [domain, principal],
+                [function, principal],
             )
             if role is not Role.NONE:
                 cur.execute(
                     f"INSERT INTO {qualified([META_SCHEMA, 'grants'])} VALUES (?, ?, ?)",
-                    [domain, principal, role.name],
+                    [function, principal, role.name],
                 )

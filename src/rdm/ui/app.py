@@ -14,8 +14,8 @@ from rdm.backend.base import BackendError, PermissionDenied
 from rdm.config import APP_TITLE
 from rdm.ui import ids, layout
 from rdm.ui.components import error_alert
-from rdm.ui.context import get_context, navigation
-from rdm.ui.pages import domain_page, form_creator, form_page, help_page, home_page
+from rdm.ui.context import get_context, grouped_navigation
+from rdm.ui.pages import domains_page, form_creator, form_page, function_page, help_page, home_page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -24,18 +24,21 @@ ASSETS = Path(__file__).resolve().parents[3] / "assets"
 
 
 def parse_path(pathname: str | None) -> tuple[str, str | None, str | None]:
-    """``/`` -> home, ``/d/<domain>``, ``/f/<domain>/<form>``, ``/new-form``, ``/new-domain``."""
+    """``/`` -> home, ``/fn/<function>``, ``/f/<function>/<form>``, ``/new-form``, ``/new-function``,
+    ``/domains``, ``/help``."""
     parts = [unquote(p) for p in (pathname or "/").split("/") if p]
     if not parts:
         return "home", None, None
     if parts[0] == "f" and len(parts) >= 3:
         return "form", parts[1], parts[2]
-    if parts[0] == "d" and len(parts) >= 2:
-        return "domain", parts[1], None
+    if parts[0] == "fn" and len(parts) >= 2:
+        return "function", parts[1], None
     if parts[0] == "new-form":
         return "new-form", None, None
-    if parts[0] == "new-domain":
-        return "new-domain", None, None
+    if parts[0] == "new-function":
+        return "new-function", None, None
+    if parts[0] == "domains":
+        return "domains", None, None
     if parts[0] == "help":
         return "help", None, None
     return "home", None, None
@@ -54,7 +57,8 @@ def create_app() -> dash.Dash:
     register_shell_callbacks(app)
     form_page.register(app)
     form_creator.register(app)
-    domain_page.register(app)
+    function_page.register(app)
+    domains_page.register(app)
     home_page.register(app)
     return app
 
@@ -82,8 +86,8 @@ def register_shell_callbacks(app: dash.Dash) -> None:
     def render_navbar(pathname, persona, search, _version):
         try:
             app_ctx = get_context(persona)
-            items = navigation(app_ctx, search)
-            return layout.navbar(app_ctx, items, pathname or "/", search)
+            groups = grouped_navigation(app_ctx, search)
+            return layout.navbar(app_ctx, groups, pathname or "/", search)
         except Exception as exc:  # noqa: BLE001
             log.exception("navbar failed")
             return error_alert(exc, "Could not load the catalog")
@@ -99,15 +103,17 @@ def register_shell_callbacks(app: dash.Dash) -> None:
             return no_update  # form pages manage their own refresh; keep the grid state
         try:
             app_ctx = get_context(persona)
-            view, domain, form = parse_path(pathname)
+            view, function, form = parse_path(pathname)
             if view == "form":
-                return form_page.render(app_ctx, domain, form)
-            if view == "domain":
-                return domain_page.render(app_ctx, domain)
+                return form_page.render(app_ctx, function, form)
+            if view == "function":
+                return function_page.render(app_ctx, function)
             if view == "new-form":
                 return form_creator.render(app_ctx)
-            if view == "new-domain":
-                return domain_page.render_new(app_ctx)
+            if view == "new-function":
+                return function_page.render_new(app_ctx)
+            if view == "domains":
+                return domains_page.render(app_ctx)
             if view == "help":
                 return help_page.render(app_ctx)
             return home_page.render(app_ctx)

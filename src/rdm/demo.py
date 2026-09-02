@@ -1,4 +1,8 @@
-"""Demo content for local development: three domains with realistic reference lists."""
+"""Demo content for local development: domains, functions and realistic reference lists.
+
+Hierarchy: domain (business classifier) > function (schema) > form (table). The demo domains
+are placeholders for the organisation's own list, which global admins maintain in the app.
+"""
 
 from __future__ import annotations
 
@@ -8,54 +12,82 @@ import pandas as pd
 
 from rdm.backend.base import DatabaseBackend
 from rdm.backend.duckdb_backend import CATALOG_LEVEL
-from rdm.models import ColumnDef, DataType, DomainDef, FormDef, Role, User
+from rdm.models import ColumnDef, DataType, DomainDef, FormDef, FunctionDef, Role, User
 
 SEED_USER = User(username="seed@example.org", display_name="Seed script", groups=("rdm_admins",))
+
+DEMO_DOMAINS: list[DomainDef] = [
+    DomainDef(
+        "student",
+        "Student",
+        "Students, enrolments, surveys and student services.",
+        "student.data@example.org",
+    ),
+    DomainDef(
+        "finance", "Finance", "Financial planning, cost management and reporting.", "finance.data@example.org"
+    ),
+    DomainDef("people", "People", "Workforce, HR and payroll reference data.", "hr.systems@example.org"),
+    DomainDef(
+        "research",
+        "Research",
+        "Research management and grants (no functions yet).",
+        "research.data@example.org",
+    ),
+]
 
 DEMO_GRANTS: dict[str, dict[str, Role]] = {
     CATALOG_LEVEL: {"rdm_admins": Role.ADMIN},
     "student__survey_service_improvement": {"student_stewards": Role.EDITOR, "student_readers": Role.VIEWER},
-    "finance__cost_management": {"finance_stewards": Role.EDITOR, "finance_readers": Role.VIEWER},
+    "finance__cost_management": {
+        "finance_admins": Role.ADMIN,
+        "finance_stewards": Role.EDITOR,
+        "finance_readers": Role.VIEWER,
+    },
     "hr__reference": {"hr_stewards": Role.EDITOR, "hr_readers": Role.VIEWER},
 }
 
 
 def seed(backend: DatabaseBackend) -> None:
-    """Create demo domains, forms, rows and grants. Safe to run on an empty database only."""
+    """Create demo domains, functions, forms, rows and grants. Safe to run on an empty database only."""
     admin = SEED_USER
-    backend.create_domain(
-        DomainDef(
+    for domain in DEMO_DOMAINS:
+        backend.create_domain(domain, admin)
+    backend.create_function(
+        FunctionDef(
             "student__survey_service_improvement",
             display_name="Student Survey & Service Improvement",
             description="Reference lists used by the student survey and service improvement programme.",
             owner="survey.team@example.org",
             doc_link="https://wiki.example.org/student-survey/reference-data",
+            domain="student",
         ),
         admin,
     )
-    backend.create_domain(
-        DomainDef(
+    backend.create_function(
+        FunctionDef(
             "finance__cost_management",
             display_name="Finance - Cost Management",
             description="Cost centres, GL mappings and budget reference data owned by Finance.",
             owner="finance.data@example.org",
             doc_link="https://wiki.example.org/finance/cost-management",
+            domain="finance",
         ),
         admin,
     )
-    backend.create_domain(
-        DomainDef(
+    backend.create_function(
+        FunctionDef(
             "hr__reference",
             display_name="HR Reference",
             description="People and contract reference lists maintained by HR Systems.",
             owner="hr.systems@example.org",
+            domain="people",
         ),
         admin,
     )
 
-    for domain, grants in DEMO_GRANTS.items():
+    for function, grants in DEMO_GRANTS.items():
         for principal, role in grants.items():
-            backend.grant_domain_role(domain, principal, role, admin)
+            backend.grant_function_role(function, principal, role, admin)
 
     backend.create_form(
         FormDef(
@@ -149,7 +181,7 @@ def seed(backend: DatabaseBackend) -> None:
             "finance__cost_management",
             "cost_centres",
             display_name="Cost Centres",
-            description="Cost centre hierarchy with budget holders. Effective-dated: close a row by setting valid_to.",
+            description="Cost centre hierarchy with budget holders. Close a cost centre by setting valid_to.",
             owner="finance.data@example.org",
             columns=[
                 ColumnDef(

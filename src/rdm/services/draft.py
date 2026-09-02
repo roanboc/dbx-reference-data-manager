@@ -15,6 +15,8 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
@@ -91,6 +93,17 @@ class Draft:
             return
         self.updates.pop(row_id, None)
         self.deletes[row_id] = {VERSION_COLUMN: None if version is None else int(version), "label": label}
+
+    def set_many(self, rows: Iterable[Mapping[str, Any]], column: str, value: Any) -> list[str]:
+        """Bulk update: set ``column`` to ``value`` on every row (existing or pending); returns the ids."""
+        touched = []
+        for row in rows:
+            rid = str(row.get(ID_COLUMN) or "")
+            if not rid:
+                continue
+            self.set_cell(rid, column, value, row.get(VERSION_COLUMN))
+            touched.append(rid)
+        return touched
 
     def clear(self) -> None:
         self.updates.clear()
@@ -200,3 +213,85 @@ def invalid_cells(issues: Iterable[ValidationIssue]) -> dict[str, list[str]]:
             if i.column not in cols:
                 cols.append(i.column)
     return out
+
+
+# --------------------------------------------------------------------------------------
+# Bulk update and restore helpers (item form / row history)
+# --------------------------------------------------------------------------------------
+
+
+def json_safe(value: Any) -> Any:
+    """The representation the browser grid uses for a coerced value (what the draft stores)."""
+    if value is None:
+        return None
+    if isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, pd.Timestamp):
+        value = value.to_pydatetime()
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        return value.item()
+    return str(value)
+
+
+def bulk_value(form: FormDef, column: str, raw: Any) -> Any:
+    """Validate one value for a bulk update of ``column``; returns the value to store in the draft.
+
+    Raises :class:`ValueError` with a user-facing message when the value cannot be applied.
+    """
+    col = form.column(column)
+    if col is None or col.is_system:
+        raise ValueError(f"Unknown column '{column}'.")
+    if col.data_type is DataType.OTHER:
+        raise ValueError(f"Column '{column}' is read-only.")
+    try:
+        value = coerce_value(col, raw)
+    except CoercionError as exc:
+        raise ValueError(f"'{column}': {exc}") from exc
+    if value is None and col.required:
+        raise ValueError(f"'{column}' is required and cannot be cleared.")
+    if value is not None and col.options and str(value) not in col.options:
+        raise ValueError(f"'{column}' must be one of: {', '.join(col.options)}")
+    return json_safe(value)
+
+
+def same_value(col: ColumnDef, a: Any, b: Any) -> bool:
+    """Whether two raw representations (grid JSON vs. history JSON) denote the same value."""
+    try:
+        return coerce_value(col, a) == coerce_value(col, b)
+    except CoercionError:
+        return ("" if is_missing(a) else str(a)) == ("" if is_missing(b) else str(b))
+
+
+def restore_row(
+    draft: Draft, form: FormDef, current: Mapping[str, Any] | None, snapshot: Mapping[str, Any]
+) -> tuple[str, int]:
+    """Stage the values of a historical version of a row into the draft.
+
+    ``current`` is the row as shown in the grid (``None`` when the row no longer exists, e.g.
+    restoring a deleted row), ``snapshot`` the values recorded in the history. Returns the id
+    of the row the values were staged on (a temporary id for a re-created row) and the number
+    of columns that changed. Nothing is written until the user saves.
+    """
+    columns = [c for c in form.user_columns if c.data_type is not DataType.OTHER]
+    values: dict[str, Any] = {}
+    for c in columns:
+        raw = snapshot.get(c.name)
+        try:
+            values[c.name] = json_safe(coerce_value(c, raw))
+        except CoercionError:
+            values[c.name] = None if is_missing(raw) else raw
+    if current is None or is_missing(current.get(ID_COLUMN)):
+        return draft.add_row(values), len(values)
+    rid = str(current[ID_COLUMN])
+    changed = 0
+    for c in columns:
+        if not same_value(c, current.get(c.name), values[c.name]):
+            draft.set_cell(rid, c.name, values[c.name], current.get(VERSION_COLUMN))
+            changed += 1
+    return rid, changed

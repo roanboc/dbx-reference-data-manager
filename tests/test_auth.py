@@ -14,8 +14,8 @@ from rdm.models import User
 # --------------------------------------------------------------------------------------
 
 
-def test_personas_are_the_three_local_users():
-    assert list(PERSONAS) == ["admin", "editor", "viewer"]
+def test_personas_are_the_four_local_users():
+    assert list(PERSONAS) == ["admin", "function_admin", "editor", "viewer"]
     for key, persona in PERSONAS.items():
         assert isinstance(persona, Persona) and persona.key == key
         assert isinstance(persona.user, User)
@@ -23,6 +23,7 @@ def test_personas_are_the_three_local_users():
         assert persona.description
         assert "everyone" in persona.user.groups
     assert PERSONAS["admin"].user.groups == ("rdm_admins", "everyone")
+    assert PERSONAS["function_admin"].user.groups == ("finance_admins", "student_readers", "everyone")
     assert PERSONAS["editor"].user.groups == ("student_stewards", "finance_readers", "everyone")
     assert PERSONAS["viewer"].user.groups == ("student_readers", "hr_readers", "everyone")
     assert PERSONAS["viewer"].user.email == "vera.viewer@example.org"

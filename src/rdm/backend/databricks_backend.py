@@ -2,7 +2,10 @@
 
 Production mapping (see docs/DESIGN.md):
 
-* domain = Unity Catalog schema, form = Delta table in ``<catalog>``.
+* function = Unity Catalog schema, form = Delta table in ``<catalog>``. A *domain* (the
+  business classifier above functions) is a registry entry in ``<catalog>._catalog.domains``;
+  the function's domain is recorded as the schema property ``rdm.domain`` and the schema tag
+  ``rdm_domain`` so that it is visible and searchable in Catalog Explorer.
 * Descriptions are ``COMMENT``s; display name / owner / column configuration live in
   ``TBLPROPERTIES ('rdm.*')`` and are mirrored to tags (``rdm_display_name``, ``rdm_owner``)
   so they are searchable in Catalog Explorer and readable in bulk from
@@ -12,16 +15,16 @@ Production mapping (see docs/DESIGN.md):
   (app-generated ``_id``), no 255-parameter-marker limit. Concurrency uses the integer
   ``_version`` column.
 * Row history is written to an explicit audit table ``<catalog>._catalog.change_log``; the
-  same schema holds the ``domains`` and ``forms`` registry tables (descriptive attributes
-  such as owner and documentation link, for reporting and lineage)
+  same schema holds the ``domains``, ``functions`` and ``forms`` registry tables (descriptive
+  attributes such as owner and documentation link, for reporting and lineage)
   (same shape as the DuckDB backend); Delta Change Data Feed is enabled on every form for
   downstream SCD pipelines and used as a fallback when the audit table is unavailable.
 * Roles are derived from Unity Catalog privileges inside the SQL session
   (``current_user()`` / ``is_account_group_member``), so with user authorization enabled
   the app renders exactly what the warehouse will allow.
-* Domains (schemas) can be created by global administrators (``CREATE SCHEMA`` on the
-  catalog) and access is granted to Unity Catalog *groups* only, through ``GRANT``/``REVOKE``
-  on the schema. The asset bundle seeds the initial domains and grants.
+* Functions (schemas) can be created and dropped by global administrators (``CREATE SCHEMA``
+  on the catalog) and access is granted to Unity Catalog *groups* only, through
+  ``GRANT``/``REVOKE`` on the schema. The asset bundle seeds the initial functions and grants.
 
 All values are bound as parameters; identifiers are validated and back-quoted; DDL clauses
 that cannot take parameters (comments, properties, tags) are escaped with Spark rules.
@@ -57,10 +60,12 @@ from rdm.models import (
     PROP_COLUMN_CONFIG,
     PROP_DISPLAY_NAME,
     PROP_DOC_LINK,
+    PROP_DOMAIN,
     PROP_FORM,
     PROP_OWNER,
     SYSTEM_COLUMNS,
     TAG_DISPLAY_NAME,
+    TAG_DOMAIN,
     TAG_FORM,
     TAG_OWNER,
     UPDATED_AT_COLUMN,
@@ -71,6 +76,7 @@ from rdm.models import (
     DataType,
     DomainDef,
     FormDef,
+    FunctionDef,
     Permissions,
     Role,
     SaveResult,
@@ -248,10 +254,10 @@ class DatabricksBackend(DatabaseBackend):
     # -- naming ------------------------------------------------------------------------------
 
     def _t(self, form: FormDef) -> str:
-        return f"{_q(self.catalog)}.{_q(form.domain)}.{_q(form.name)}"
+        return f"{_q(self.catalog)}.{_q(form.function)}.{_q(form.name)}"
 
-    def _s(self, domain: str) -> str:
-        return f"{_q(self.catalog)}.{_q(domain)}"
+    def _s(self, function: str) -> str:
+        return f"{_q(self.catalog)}.{_q(function)}"
 
     def _info(self, view: str) -> str:
         return f"{_q(self.catalog)}.`information_schema`.`{view}`"
@@ -259,7 +265,70 @@ class DatabricksBackend(DatabaseBackend):
     def _audit(self) -> str:
         return f"{_q(self.catalog)}.{_q(self.meta_schema)}.{_q(AUDIT_TABLE)}"
 
-    # -- domains -----------------------------------------------------------------------------
+    # -- domains (classifier, registry only) ----------------------------------------------
+
+    def _domain_rows(self) -> list[tuple]:
+        try:
+            rows, _ = self._run(
+                f"SELECT name, display_name, description, owner FROM {self._reg('domains')} ORDER BY name"
+            )
+        except NotFoundError:
+            return []
+        return rows
+
+    def _function_counts_by_domain(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for f in self.list_functions():
+            if f.domain:
+                counts[f.domain] = counts.get(f.domain, 0) + 1
+        return counts
+
+    def list_domains(self) -> list[DomainDef]:
+        counts = self._function_counts_by_domain()
+        return [
+            DomainDef(
+                name=name,
+                display_name=display or "",
+                description=description or "",
+                owner=owner or "",
+                function_count=counts.get(name, 0),
+            )
+            for name, display, description, owner in self._domain_rows()
+        ]
+
+    def get_domain(self, name: str) -> DomainDef:
+        validate_identifier(name, "domain name")
+        for d in self.list_domains():
+            if d.name == name:
+                return d
+        raise NotFoundError(f"Domain '{name}' does not exist.")
+
+    def create_domain(self, domain: DomainDef, actor: User) -> DomainDef:
+        domain.validate()
+        if any(r[0] == domain.name for r in self._domain_rows()):
+            raise ConflictError(f"Domain '{domain.name}' already exists.")
+        self._register_domain(domain, actor, strict=True)
+        return self.get_domain(domain.name)
+
+    def update_domain(self, domain: DomainDef, actor: User) -> DomainDef:
+        domain.validate()
+        if not any(r[0] == domain.name for r in self._domain_rows()):
+            raise NotFoundError(f"Domain '{domain.name}' does not exist.")
+        self._register_domain(domain, actor, strict=True)
+        return self.get_domain(domain.name)
+
+    def delete_domain(self, name: str, actor: User) -> None:
+        validate_identifier(name, "domain name")
+        if not any(r[0] == name for r in self._domain_rows()):
+            raise NotFoundError(f"Domain '{name}' does not exist.")
+        assigned = self._function_counts_by_domain().get(name, 0)
+        if assigned:
+            raise ConflictError(
+                f"Domain '{name}' still has {assigned} function(s) assigned. Move them to another domain first."
+            )
+        self._run(f"DELETE FROM {self._reg('domains')} WHERE `name` = :name", {"name": name})
+
+    # -- functions (schemas) ------------------------------------------------------------------
 
     def _schema_tags(self) -> dict[str, dict[str, str]]:
         rows, _ = self._run(
@@ -271,7 +340,7 @@ class DatabricksBackend(DatabaseBackend):
             out.setdefault(schema, {})[k] = v
         return out
 
-    def list_domains(self) -> list[DomainDef]:
+    def list_functions(self) -> list[FunctionDef]:
         rows, _ = self._run(
             f"SELECT schema_name, comment, schema_owner FROM {self._info('schemata')} "
             "WHERE catalog_name = :catalog ORDER BY schema_name",
@@ -285,31 +354,32 @@ class DatabricksBackend(DatabaseBackend):
             )[0]
         )
         tags = self._schema_tags()
-        registry = self._domain_registry()
-        domains = []
+        registry = self._function_registry()
+        functions = []
         for name, comment, owner in rows:
             if name in HIDDEN_SCHEMAS:
                 continue
             t = tags.get(name, {})
             r = registry.get(name, {})
-            domains.append(
-                DomainDef(
+            functions.append(
+                FunctionDef(
                     name=name,
                     display_name=r.get("display_name") or t.get(TAG_DISPLAY_NAME, ""),
                     description=comment or r.get("description") or "",
                     owner=r.get("owner") or t.get(TAG_OWNER, "") or (owner or ""),
                     doc_link=r.get("doc_link") or "",
+                    domain=r.get("domain_name") or t.get(TAG_DOMAIN, "") or "",
                     form_count=int(counts.get(name, 0)),
                     properties={"schema_owner": owner or "", **t},
                 )
             )
-        return domains
+        return functions
 
-    def _domain_registry(self) -> dict[str, dict[str, Any]]:
-        """Descriptive attributes from ``_catalog.domains`` (empty when the table is absent)."""
+    def _function_registry(self) -> dict[str, dict[str, Any]]:
+        """Descriptive attributes from ``_catalog.functions`` (empty when the table is absent)."""
         try:
             rows, cols = self._run(
-                f"SELECT name, display_name, description, owner, doc_link FROM {self._reg('domains')}"
+                f"SELECT name, domain_name, display_name, description, owner, doc_link FROM {self._reg('functions')}"
             )
         except BackendError:
             return {}
@@ -318,69 +388,111 @@ class DatabricksBackend(DatabaseBackend):
     def _reg(self, table: str) -> str:
         return f"{_q(self.catalog)}.{_q(self.meta_schema)}.{_q(table)}"
 
-    def get_domain(self, name: str) -> DomainDef:
-        for d in self.list_domains():
-            if d.name == name:
-                return d
-        raise NotFoundError(f"Domain '{name}' does not exist.")
+    def get_function(self, name: str) -> FunctionDef:
+        for f in self.list_functions():
+            if f.name == name:
+                return f
+        raise NotFoundError(f"Function '{name}' does not exist.")
 
-    def create_domain(self, domain: DomainDef, actor: User) -> DomainDef:
+    def _check_domain(self, domain: str) -> None:
+        if domain and not any(r[0] == domain for r in self._domain_rows()):
+            raise NotFoundError(f"Domain '{domain}' does not exist.")
+
+    def create_function(self, function: FunctionDef, actor: User) -> FunctionDef:
         """``CREATE SCHEMA`` in the catalog: requires CREATE SCHEMA on the catalog (global admin)."""
-        domain.validate()
-        if domain.name in HIDDEN_SCHEMAS:
-            raise ConflictError(f"'{domain.name}' is a reserved name.")
+        function.validate()
+        if function.name in HIDDEN_SCHEMAS:
+            raise ConflictError(f"'{function.name}' is a reserved name.")
+        self._check_domain(function.domain)
         props = {
-            PROP_DISPLAY_NAME: domain.display_name,
-            PROP_OWNER: domain.owner or actor.username,
-            PROP_DOC_LINK: domain.doc_link,
+            PROP_DISPLAY_NAME: function.display_name,
+            PROP_OWNER: function.owner or actor.username,
+            PROP_DOC_LINK: function.doc_link,
+            PROP_DOMAIN: function.domain,
             "rdm.created_by": actor.username,
         }
         prop_ddl = ", ".join(f"{lit(k)} = {lit(v)}" for k, v in props.items() if v)
         self._run(
-            f"CREATE SCHEMA {self._s(domain.name)} COMMENT {lit(domain.description or '')}"
+            f"CREATE SCHEMA {self._s(function.name)} COMMENT {lit(function.description or '')}"
             + (f" WITH DBPROPERTIES ({prop_ddl})" if prop_ddl else "")
         )
         self._set_tags(
-            f"ALTER SCHEMA {self._s(domain.name)}",
-            {TAG_DISPLAY_NAME: domain.display_name, TAG_OWNER: domain.owner or actor.username},
+            f"ALTER SCHEMA {self._s(function.name)}",
+            {
+                TAG_DISPLAY_NAME: function.display_name,
+                TAG_OWNER: function.owner or actor.username,
+                TAG_DOMAIN: function.domain,
+            },
         )
-        self._register_domain(domain, actor)
-        return self.get_domain(domain.name)
+        self._register_function(function, actor)
+        return self.get_function(function.name)
 
-    def update_domain(self, domain: DomainDef, actor: User) -> DomainDef:
-        domain.validate()
-        self._run(f"COMMENT ON SCHEMA {self._s(domain.name)} IS {lit(domain.description or '')}")
+    def update_function(self, function: FunctionDef, actor: User) -> FunctionDef:
+        function.validate()
+        self._check_domain(function.domain)
+        self._run(f"COMMENT ON SCHEMA {self._s(function.name)} IS {lit(function.description or '')}")
         props = {
-            PROP_DISPLAY_NAME: domain.display_name,
-            PROP_OWNER: domain.owner,
-            PROP_DOC_LINK: domain.doc_link,
+            PROP_DISPLAY_NAME: function.display_name,
+            PROP_OWNER: function.owner,
+            PROP_DOC_LINK: function.doc_link,
+            PROP_DOMAIN: function.domain,
         }
         prop_ddl = ", ".join(f"{lit(k)} = {lit(v)}" for k, v in props.items())
-        self._run(f"ALTER SCHEMA {self._s(domain.name)} SET DBPROPERTIES ({prop_ddl})")
+        self._run(f"ALTER SCHEMA {self._s(function.name)} SET DBPROPERTIES ({prop_ddl})")
         self._set_tags(
-            f"ALTER SCHEMA {self._s(domain.name)}",
-            {TAG_DISPLAY_NAME: domain.display_name, TAG_OWNER: domain.owner},
+            f"ALTER SCHEMA {self._s(function.name)}",
+            {TAG_DISPLAY_NAME: function.display_name, TAG_OWNER: function.owner, TAG_DOMAIN: function.domain},
         )
-        self._register_domain(domain, actor)
-        return self.get_domain(domain.name)
+        self._register_function(function, actor)
+        return self.get_function(function.name)
+
+    def drop_function(self, function: FunctionDef, actor: User) -> None:
+        """``DROP SCHEMA`` (without CASCADE): refused while the schema still holds tables."""
+        validate_identifier(function.name, "function name")
+        rows, _ = self._run(
+            f"SELECT count(*) FROM {self._info('tables')} WHERE table_catalog = :catalog AND table_schema = :schema",
+            {"catalog": self.catalog, "schema": function.name},
+        )
+        n = int(rows[0][0]) if rows else 0
+        if n:
+            raise ConflictError(
+                f"Function '{function.name}' still has {n} form(s). Delete or migrate them first."
+            )
+        self._run(f"DROP SCHEMA {self._s(function.name)}")
+        try:
+            self._run(f"DELETE FROM {self._reg('functions')} WHERE `name` = :name", {"name": function.name})
+        except BackendError as exc:
+            log.warning("Registry delete for %s failed: %s", function.name, exc)
 
     # -- registry tables ---------------------------------------------------------------------
 
     REGISTRY_DDL = {
         "domains": (
             "CREATE TABLE IF NOT EXISTS {t} (name STRING NOT NULL, display_name STRING, description STRING, owner STRING, "
-            "doc_link STRING, created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
-            "USING DELTA COMMENT 'Registry of reference-data domains maintained by the Reference Data Manager'"
+            "created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
+            "USING DELTA COMMENT 'Domains (business classifier above functions) maintained by the Reference Data Manager'"
+        ),
+        "functions": (
+            "CREATE TABLE IF NOT EXISTS {t} (name STRING NOT NULL, domain_name STRING, display_name STRING, "
+            "description STRING, owner STRING, doc_link STRING, created_at TIMESTAMP_NTZ, created_by STRING, "
+            "updated_at TIMESTAMP_NTZ, updated_by STRING) "
+            "USING DELTA COMMENT 'Registry of functions (schemas) maintained by the Reference Data Manager'"
         ),
         "forms": (
-            "CREATE TABLE IF NOT EXISTS {t} (domain STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
+            "CREATE TABLE IF NOT EXISTS {t} (function_name STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
             "description STRING, owner STRING, created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, "
             "updated_by STRING) USING DELTA COMMENT 'Registry of forms maintained by the Reference Data Manager'"
         ),
     }
 
-    def _registry_upsert(self, table: str, key: dict[str, Any], values: dict[str, Any], actor: User) -> None:
-        """Idempotent MERGE into a registry table; creates the table on first use. Best effort."""
+    def _registry_upsert(
+        self, table: str, key: dict[str, Any], values: dict[str, Any], actor: User, strict: bool = False
+    ) -> None:
+        """Idempotent MERGE into a registry table; creates the table on first use.
+
+        Best effort for the function/form registries (they mirror catalog objects); ``strict``
+        for the domain list, which lives only in the registry.
+        """
         now = utcnow()
         params = {**key, **values, "now": now, "actor": actor.username}
         on = " AND ".join(f"t.{_q(k)} = :{k}" for k in key)
@@ -402,19 +514,37 @@ class DatabricksBackend(DatabaseBackend):
                 self._run(self.REGISTRY_DDL[table].format(t=self._reg(table)))
                 self._run(statement, params)
             except BackendError as exc:
+                if strict:
+                    raise
                 log.warning("Registry table %s unavailable: %s", table, exc)
         except BackendError as exc:
+            if strict:
+                raise
             log.warning("Registry update for %s failed: %s", table, exc)
 
-    def _register_domain(self, domain: DomainDef, actor: User) -> None:
+    def _register_domain(self, domain: DomainDef, actor: User, strict: bool = False) -> None:
         self._registry_upsert(
             "domains",
             {"name": domain.name},
             {
                 "display_name": domain.display_name,
                 "description": domain.description,
-                "owner": domain.owner,
-                "doc_link": domain.doc_link,
+                "owner": domain.owner or actor.username,
+            },
+            actor,
+            strict=strict,
+        )
+
+    def _register_function(self, function: FunctionDef, actor: User) -> None:
+        self._registry_upsert(
+            "functions",
+            {"name": function.name},
+            {
+                "domain_name": function.domain,
+                "display_name": function.display_name,
+                "description": function.description,
+                "owner": function.owner,
+                "doc_link": function.doc_link,
             },
             actor,
         )
@@ -422,7 +552,7 @@ class DatabricksBackend(DatabaseBackend):
     def _register_form(self, form: FormDef, actor: User) -> None:
         self._registry_upsert(
             "forms",
-            {"domain": form.domain, "name": form.name},
+            {"function_name": form.function, "name": form.name},
             {"display_name": form.display_name, "description": form.description, "owner": form.owner},
             actor,
         )
@@ -430,8 +560,8 @@ class DatabricksBackend(DatabaseBackend):
     def _unregister_form(self, form: FormDef) -> None:
         try:
             self._run(
-                f"DELETE FROM {self._reg('forms')} WHERE `domain` = :domain AND `name` = :name",
-                {"domain": form.domain, "name": form.name},
+                f"DELETE FROM {self._reg('forms')} WHERE `function_name` = :function_name AND `name` = :name",
+                {"function_name": form.function, "name": form.name},
             )
         except BackendError as exc:
             log.warning("Registry delete for %s failed: %s", form.full_name, exc)
@@ -450,32 +580,32 @@ class DatabricksBackend(DatabaseBackend):
 
     # -- forms -------------------------------------------------------------------------------
 
-    def _table_tags(self, domain: str) -> dict[str, dict[str, str]]:
+    def _table_tags(self, function: str) -> dict[str, dict[str, str]]:
         rows, _ = self._run(
             f"SELECT table_name, tag_name, tag_value FROM {self._info('table_tags')} "
             "WHERE catalog_name = :catalog AND schema_name = :schema",
-            {"catalog": self.catalog, "schema": domain},
+            {"catalog": self.catalog, "schema": function},
         )
         out: dict[str, dict[str, str]] = {}
         for table, k, v in rows:
             out.setdefault(table, {})[k] = v
         return out
 
-    def list_forms(self, domain: str) -> list[FormDef]:
-        validate_identifier(domain, "domain name")
+    def list_forms(self, function: str) -> list[FormDef]:
+        validate_identifier(function, "function name")
         rows, _ = self._run(
             f"SELECT table_name, comment, table_owner, created, last_altered, last_altered_by FROM {self._info('tables')} "
             "WHERE table_catalog = :catalog AND table_schema = :schema AND table_type IN ('MANAGED', 'EXTERNAL') "
             "ORDER BY table_name",
-            {"catalog": self.catalog, "schema": domain},
+            {"catalog": self.catalog, "schema": function},
         )
-        tags = self._table_tags(domain)
+        tags = self._table_tags(function)
         forms = []
         for name, comment, owner, created, altered, altered_by in rows:
             t = tags.get(name, {})
             forms.append(
                 FormDef(
-                    domain=domain,
+                    function=function,
                     name=name,
                     display_name=t.get(TAG_DISPLAY_NAME, ""),
                     description=comment or "",
@@ -488,11 +618,11 @@ class DatabricksBackend(DatabaseBackend):
             )
         return forms
 
-    def _load_columns(self, domain: str, name: str) -> list[ColumnDef]:
+    def _load_columns(self, function: str, name: str) -> list[ColumnDef]:
         rows, _ = self._run(
             f"SELECT column_name, full_data_type, is_nullable, comment, ordinal_position FROM {self._info('columns')} "
             "WHERE table_catalog = :catalog AND table_schema = :schema AND table_name = :table ORDER BY ordinal_position",
-            {"catalog": self.catalog, "schema": domain, "table": name},
+            {"catalog": self.catalog, "schema": function, "table": name},
         )
         cols = []
         for i, (cname, dtype, nullable, comment, _pos) in enumerate(rows):
@@ -518,22 +648,25 @@ class DatabricksBackend(DatabaseBackend):
             return {}
         return {str(r[0]): ("" if r[1] is None else str(r[1])) for r in rows}
 
-    def get_form(self, domain: str, name: str) -> FormDef:
-        validate_identifier(domain, "domain name")
+    def get_form(self, function: str, name: str) -> FormDef:
+        validate_identifier(function, "function name")
         validate_identifier(name, "form name")
         rows, _ = self._run(
             f"SELECT comment, table_owner, created, last_altered, last_altered_by FROM {self._info('tables')} "
             "WHERE table_catalog = :catalog AND table_schema = :schema AND table_name = :table",
-            {"catalog": self.catalog, "schema": domain, "table": name},
+            {"catalog": self.catalog, "schema": function, "table": name},
         )
         if not rows:
-            raise NotFoundError(f"Form '{domain}.{name}' does not exist.")
+            raise NotFoundError(f"Form '{function}.{name}' does not exist.")
         comment, owner, created, altered, altered_by = rows[0]
         form = FormDef(
-            domain=domain, name=name, description=comment or "", columns=self._load_columns(domain, name)
+            function=function,
+            name=name,
+            description=comment or "",
+            columns=self._load_columns(function, name),
         )
         form.properties = self._properties(form)
-        form.tags = self._table_tags(domain).get(name, {})
+        form.tags = self._table_tags(function).get(name, {})
         form.display_name = form.properties.get(PROP_DISPLAY_NAME) or form.tags.get(TAG_DISPLAY_NAME, "")
         form.owner = form.properties.get(PROP_OWNER) or form.tags.get(TAG_OWNER, "") or (owner or "")
         form.apply_column_config(form.properties.get(PROP_COLUMN_CONFIG))
@@ -580,11 +713,11 @@ class DatabricksBackend(DatabaseBackend):
         self._register_form(form, actor)
         if rows is not None and len(rows):
             self._append_rows(form, rows, actor)
-        return self.get_form(form.domain, form.name)
+        return self.get_form(form.function, form.name)
 
     def update_form_metadata(self, form: FormDef, actor: User) -> FormDef:
         form.validate()
-        current = {c.name: c for c in self._load_columns(form.domain, form.name)}
+        current = {c.name: c for c in self._load_columns(form.function, form.name)}
         for c in form.columns:
             if c.name not in current:
                 raise NotFoundError(f"Column '{c.name}' does not exist on '{form.full_name}'.")
@@ -610,13 +743,13 @@ class DatabricksBackend(DatabaseBackend):
             f"ALTER TABLE {self._t(form)}", {TAG_DISPLAY_NAME: form.display_name, TAG_OWNER: form.owner}
         )
         self._register_form(form, actor)
-        return self.get_form(form.domain, form.name)
+        return self.get_form(form.function, form.name)
 
     def add_column(self, form: FormDef, column: ColumnDef, actor: User) -> FormDef:
         column.validate()
         if column.is_system:
             raise BackendError("System columns cannot be added manually.")
-        if column.name in {c.name for c in self._load_columns(form.domain, form.name)}:
+        if column.name in {c.name for c in self._load_columns(form.function, form.name)}:
             raise ConflictError(f"Column '{column.name}' already exists.")
         column.nullable = True
         comment = f" COMMENT {lit(column.description)}" if column.description else ""
@@ -627,19 +760,19 @@ class DatabricksBackend(DatabaseBackend):
         self._run(
             f"ALTER TABLE {self._t(form)} SET TBLPROPERTIES ({lit(PROP_COLUMN_CONFIG)} = {lit(form.column_config_json())})"
         )
-        return self.get_form(form.domain, form.name)
+        return self.get_form(form.function, form.name)
 
     def drop_column(self, form: FormDef, column_name: str, actor: User) -> FormDef:
         if column_name in SYSTEM_COLUMNS:
             raise BackendError("System columns cannot be removed.")
-        if column_name not in {c.name for c in self._load_columns(form.domain, form.name)}:
+        if column_name not in {c.name for c in self._load_columns(form.function, form.name)}:
             raise NotFoundError(f"Column '{column_name}' does not exist.")
         self._run(f"ALTER TABLE {self._t(form)} DROP COLUMN {_q(column_name)}")
         form.columns = [c for c in form.columns if c.name != column_name]
         self._run(
             f"ALTER TABLE {self._t(form)} SET TBLPROPERTIES ({lit(PROP_COLUMN_CONFIG)} = {lit(form.column_config_json())})"
         )
-        return self.get_form(form.domain, form.name)
+        return self.get_form(form.function, form.name)
 
     def drop_form(self, form: FormDef, actor: User) -> None:
         self._run(f"DROP TABLE {self._t(form)}")
@@ -941,7 +1074,7 @@ class DatabricksBackend(DatabaseBackend):
         return {
             "id": uuid.uuid4().hex,
             "seq": seq,
-            "schema_name": form.domain,
+            "schema_name": form.function,
             "table_name": form.name,
             "row_id": row_id,
             "change_type": change_type,
@@ -994,23 +1127,26 @@ class DatabricksBackend(DatabaseBackend):
                 log.warning("Audit log write failed: %s", exc)
                 return
 
-    def get_history(self, form: FormDef, limit: int = 200) -> pd.DataFrame:
+    def get_history(self, form: FormDef, limit: int = 200, row_id: str | None = None) -> pd.DataFrame:
         user_cols = [c.name for c in form.user_columns]
         columns = [*HISTORY_COLUMNS, "changed_fields", ID_COLUMN, *user_cols]
         if self._audit_ready is not False:
             try:
+                params: dict[str, Any] = {"schema": form.function, "table": form.name}
+                row_filter = ""
+                if row_id:
+                    row_filter = " AND row_id = :row_id"
+                    params["row_id"] = row_id
                 rows, _ = self._run(
                     f"SELECT changed_at, changed_by, change_type, row_id, before_json, after_json FROM {self._audit()} "
-                    "WHERE schema_name = :schema AND table_name = :table ORDER BY changed_at DESC, seq DESC LIMIT "
-                    + str(int(limit)),
-                    {"schema": form.domain, "table": form.name},
+                    f"WHERE schema_name = :schema AND table_name = :table{row_filter} "
+                    "ORDER BY changed_at DESC, seq DESC LIMIT " + str(int(limit)),
+                    params,
                 )
                 self._audit_ready = True
                 records = []
                 n = len(rows)
-                for i, (changed_at, changed_by, change_type, row_id, before_json, after_json) in enumerate(
-                    rows
-                ):
+                for i, (changed_at, changed_by, change_type, rid, before_json, after_json) in enumerate(rows):
                     before = json.loads(before_json) if before_json else {}
                     after = json.loads(after_json) if after_json else {}
                     snapshot = after if change_type != "delete" else before
@@ -1023,7 +1159,7 @@ class DatabricksBackend(DatabaseBackend):
                         "changed_by": changed_by,
                         "change_type": change_type,
                         "changed_fields": ", ".join(changed),
-                        ID_COLUMN: row_id,
+                        ID_COLUMN: rid,
                     }
                     for c in user_cols:
                         rec[c] = snapshot.get(c)
@@ -1031,21 +1167,28 @@ class DatabricksBackend(DatabaseBackend):
                 return pd.DataFrame.from_records(records, columns=columns)
             except NotFoundError:
                 self._audit_ready = False
-        return self._history_from_cdf(form, limit, columns)
+        return self._history_from_cdf(form, limit, columns, row_id)
 
-    def _history_from_cdf(self, form: FormDef, limit: int, columns: list[str]) -> pd.DataFrame:
+    def _history_from_cdf(
+        self, form: FormDef, limit: int, columns: list[str], row_id: str | None = None
+    ) -> pd.DataFrame:
         """Fallback: Delta Change Data Feed (bounded by the table's retention settings)."""
+        user_cols = [c.name for c in form.user_columns]
+        params: dict[str, Any] = {}
+        row_filter = ""
+        if row_id:
+            row_filter = f" AND {_q(ID_COLUMN)} = :row_id"
+            params["row_id"] = row_id
         try:
             hist, _ = self._run(f"DESCRIBE HISTORY {self._t(form)}")
             versions = [int(r[0]) for r in hist] if hist else [0]
             start = max(0, min(versions))
             df = self._run_df(
                 f"SELECT _change_type, _commit_version, _commit_timestamp, {', '.join(_q(c) for c in [ID_COLUMN, UPDATED_BY_COLUMN, *user_cols])} "
-                f"FROM table_changes({lit(f'{self.catalog}.{form.domain}.{form.name}')}, {start}) "
-                "WHERE _change_type <> 'update_preimage' ORDER BY _commit_version DESC LIMIT "
-                + str(int(limit))
-                if (user_cols := [c.name for c in form.user_columns]) is not None
-                else ""
+                f"FROM table_changes({lit(f'{self.catalog}.{form.function}.{form.name}')}, {start}) "
+                f"WHERE _change_type <> 'update_preimage'{row_filter} ORDER BY _commit_version DESC LIMIT "
+                + str(int(limit)),
+                params or None,
             )
         except BackendError as exc:
             log.warning("Change Data Feed history unavailable: %s", exc)
@@ -1130,7 +1273,7 @@ class DatabricksBackend(DatabaseBackend):
             if s in owned:
                 p = p | {"MANAGE"}
             roles[s] = self._role_from_privileges(p)
-        return Permissions(domain_roles=roles, is_global_admin=is_global_admin)
+        return Permissions(function_roles=roles, is_global_admin=is_global_admin)
 
     def _is_principal(self, user: User, names: set[str]) -> bool:
         """Whether the user is (a member of) one of ``names``; uses the SQL session under OBO."""
@@ -1158,12 +1301,12 @@ class DatabricksBackend(DatabaseBackend):
             return Role.VIEWER
         return Role.NONE
 
-    def list_domain_grants(self, domain: str) -> list[tuple[str, Role]]:
-        validate_identifier(domain, "domain name")
+    def list_function_grants(self, function: str) -> list[tuple[str, Role]]:
+        validate_identifier(function, "function name")
         rows, _ = self._run(
             f"SELECT grantee, privilege_type FROM {self._info('schema_privileges')} "
             "WHERE catalog_name = :catalog AND schema_name = :schema",
-            {"catalog": self.catalog, "schema": domain},
+            {"catalog": self.catalog, "schema": function},
         )
         by_grantee: dict[str, set[str]] = {}
         for grantee, priv in rows:
@@ -1188,13 +1331,13 @@ class DatabricksBackend(DatabaseBackend):
             log.warning("Group lookup failed: %s", exc)
             return []
 
-    def grant_domain_role(self, domain: str, principal: str, role: Role, actor: User) -> None:
+    def grant_function_role(self, function: str, principal: str, role: Role, actor: User) -> None:
         """Replace the app-managed schema privileges of a *group* with the set for ``role``.
 
-        Requires MANAGE on the schema (domain admin). ``USE CATALOG`` is also granted so the
+        Requires MANAGE on the schema (function admin). ``USE CATALOG`` is also granted so the
         group can reach the schema; that part needs catalog rights and is best effort.
         """
-        validate_identifier(domain, "domain name")
+        validate_identifier(function, "function name")
         principal = (principal or "").strip()
         if not principal:
             raise BackendError("A group is required.")
@@ -1204,7 +1347,7 @@ class DatabricksBackend(DatabaseBackend):
         if known and principal not in known:
             raise BackendError(f"'{principal}' is not a Databricks group.")
         grantee = "`" + principal.replace("`", "``") + "`"
-        schema = self._s(domain)
+        schema = self._s(function)
         self._run(f"REVOKE {', '.join(MANAGED_PRIVILEGES)} ON SCHEMA {schema} FROM {grantee}")
         if role is Role.NONE:
             return

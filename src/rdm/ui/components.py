@@ -45,6 +45,13 @@ def role_badge(role: Role, size: str = "sm") -> dmc.Badge:
     )
 
 
+def domain_badge(title: str, size: str = "sm") -> dmc.Badge:
+    """The domain a function belongs to (the top of the domain > function > form hierarchy)."""
+    return dmc.Badge(
+        title, color="indigo", variant="outline", size=size, leftSection=icon("tabler:sitemap", 12)
+    )
+
+
 def global_admin_badge(size: str = "sm") -> dmc.Badge:
     return dmc.Badge(
         GLOBAL_ADMIN_LABEL,

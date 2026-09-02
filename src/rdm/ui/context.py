@@ -22,14 +22,14 @@ from rdm.backend.base import DatabaseBackend
 from rdm.backend.factory import create_auth_provider, create_backend
 from rdm.config import Settings
 from rdm.models import Permissions, User
-from rdm.services import CatalogService, FormService, NavDomain
+from rdm.services import CatalogService, FormService, NavDomain, NavFunction
 
 log = logging.getLogger(__name__)
 
 _lock = threading.RLock()
 _backends: dict[str, tuple[float, DatabaseBackend]] = {}
 _permissions: dict[tuple, tuple[float, Permissions]] = {}
-_navigation: dict[tuple, tuple[float, list[NavDomain]]] = {}
+_navigation: dict[tuple, tuple[float, list[NavFunction]]] = {}
 TOKEN_BACKEND_TTL = 900.0
 
 
@@ -116,7 +116,8 @@ def _permissions_for(settings: Settings, backend: DatabaseBackend, user: User) -
     return perms
 
 
-def navigation(ctx: AppContext, search: str | None) -> list[NavDomain]:
+def navigation(ctx: AppContext, search: str | None) -> list[NavFunction]:
+    """Visible functions (with their forms) for the sidebar and the home page, cached briefly."""
     ttl = ctx.settings.metadata_cache_ttl
     key = (ctx.user.username, tuple(ctx.user.groups), (search or "").strip().lower(), id(ctx.backend))
     now = time.monotonic()
@@ -130,6 +131,11 @@ def navigation(ctx: AppContext, search: str | None) -> list[NavDomain]:
         with _lock:
             _navigation[key] = (now + ttl, items)
     return items
+
+
+def grouped_navigation(ctx: AppContext, search: str | None) -> list[NavDomain]:
+    """Navigation items grouped by domain (domain > function > form)."""
+    return ctx.catalog.grouped(navigation(ctx, search))
 
 
 def invalidate_metadata() -> None:

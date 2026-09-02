@@ -31,7 +31,7 @@ variables:
 
   admin_group:
     description: >-
-      Account-level group of catalog administrators: may create domains (CREATE_SCHEMA),
+      Account-level group of global administrators: may create functions (CREATE_SCHEMA),
       manage grants (MANAGE) and manage the app (CAN_MANAGE).
     default: rdm_admins
 

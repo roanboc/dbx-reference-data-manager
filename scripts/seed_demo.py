@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Create (or recreate with --reset) the local DuckDB database with demo domains and forms.
+"""Create (or recreate with --reset) the local DuckDB database with demo domains, functions and forms.
 
 Usage: python scripts/seed_demo.py [--reset] [--path data/rdm.duckdb]
 """
@@ -35,9 +35,10 @@ def main() -> int:
     backend = DuckDBBackend(str(path))
     seed(backend)
     domains = backend.list_domains()
-    print(f"Seeded {path} with {len(domains)} domains:")
-    for d in domains:
-        print(f"  - {d.name} ({d.form_count} forms)")
+    functions = backend.list_functions()
+    print(f"Seeded {path} with {len(domains)} domains and {len(functions)} functions:")
+    for f in functions:
+        print(f"  - {f.domain or '(unassigned)'} > {f.name} ({f.form_count} forms)")
     backend.close()
     return 0
 

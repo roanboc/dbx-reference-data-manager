@@ -62,6 +62,48 @@ IMPORT_PREVIEW = "import-preview"
 IMPORT_SUBMIT = "import-submit"
 IMPORT_TOKEN = "import-token"
 
+# form page: bulk update of selected rows (FR-22)
+BULK_OPEN = "bulk-open"
+BULK_MODAL = "bulk-modal"
+BULK_INFO = "bulk-info"
+BULK_COLUMN = "bulk-column"
+BULK_VALUE_WRAP = "bulk-value-wrap"
+BULK_VALUE = "bulk-value"
+BULK_CLEAR = "bulk-clear"
+BULK_SUBMIT = "bulk-submit"
+
+# form page: item form for one row, with per-row history and restore (FR-24)
+ITEM_OPEN = "item-open"
+ITEM_MODAL = "item-modal"
+ITEM_BODY = "item-body"
+ITEM_ROW = "item-row"  # store: the row the item form was opened on
+ITEM_HISTORY = "item-history"  # store: history records of that row (for restore)
+ITEM_SAVE = "item-save"
+ITEM_RESULT = "item-result"
+
+
+def item_field_id(column: str) -> dict:
+    return {"type": "item-field", "column": column}
+
+
+def restore_id(version: int) -> dict:
+    """Restore button of one history entry in the item form."""
+    return {"type": "restore", "version": int(version)}
+
+
+def history_grid_id(form: str) -> dict:
+    return {"type": "history-grid", "form": form}
+
+
+def history_filter_id(form: str) -> dict:
+    return {"type": "history-filter", "form": form}
+
+
+def history_restore_id(form: str) -> dict:
+    """Restore button of the History tab (restores the selected entry, deleted rows included)."""
+    return {"type": "history-restore", "form": form}
+
+
 # form creator
 WIZ_STORE = "wizard-store"
 WIZ_STEPPER = "wizard-stepper"
@@ -76,13 +118,12 @@ WIZ_BACK = "wiz-back"
 WIZ_CANCEL = "wiz-cancel"
 WIZ_COLUMNS_GRID = "wiz-columns-grid"
 WIZ_ADD_COLUMN = "wiz-add-column"
-WIZ_DOMAIN = "wiz-domain"
+WIZ_FUNCTION = "wiz-function"
 WIZ_NAME = "wiz-name"
 WIZ_DISPLAY = "wiz-display"
 WIZ_DESC = "wiz-desc"
 WIZ_OWNER = "wiz-owner"
 WIZ_LOAD_ROWS = "wiz-load-rows"
-WIZ_EFFECTIVE = "wiz-effective"
 WIZ_CREATE = "wiz-create"
 WIZ_ERRORS = "wiz-errors"
 
@@ -90,31 +131,53 @@ WIZ_ERRORS = "wiz-errors"
 HOME_FILTER = "home-filter"
 HOME_CARDS = "home-cards"
 HELP_TABS = "help-tabs"
-HISTORY_FILTER = "history-filter"
-HISTORY_GRID = "history-grid"
 
-# domain pages
-DOMAIN_KEY = "domain-key"
-DOMAIN_DOC_LINK = "domain-doc-link"
-DOMAIN_FORMS_FILTER = "domain-forms-filter"
-DOMAIN_FORMS = "domain-forms"
+# function pages (a function is a Unity Catalog schema)
+FUNCTION_KEY = "function-key"
+FUNCTION_DOC_LINK = "function-doc-link"
+FUNCTION_FORMS_FILTER = "function-forms-filter"
+FUNCTION_FORMS = "function-forms"
+FUNCTION_DISPLAY = "function-display-name"
+FUNCTION_DESC = "function-description"
+FUNCTION_OWNER = "function-owner"
+FUNCTION_DOMAIN = "function-domain"
+FUNCTION_SAVE = "function-save"
+FUNCTION_RESULT = "function-result"
+DROP_FUNCTION_CONFIRM = "drop-function-confirm"
+DROP_FUNCTION_SUBMIT = "drop-function-submit"
 GRANTS_FILTER = "grants-filter"
-NEW_DOMAIN_DOC_LINK = "new-domain-doc-link"
-DOMAIN_DISPLAY = "domain-display-name"
-DOMAIN_DESC = "domain-description"
-DOMAIN_OWNER = "domain-owner"
-DOMAIN_SAVE = "domain-save"
-DOMAIN_RESULT = "domain-result"
 GRANT_PRINCIPAL = "grant-principal"
 GRANT_ROLE = "grant-role"
 GRANT_SUBMIT = "grant-submit"
 GRANTS_TABLE = "grants-table"
-NEW_DOMAIN_NAME = "new-domain-name"
-NEW_DOMAIN_DISPLAY = "new-domain-display"
-NEW_DOMAIN_DESC = "new-domain-desc"
-NEW_DOMAIN_OWNER = "new-domain-owner"
-NEW_DOMAIN_SUBMIT = "new-domain-submit"
-NEW_DOMAIN_RESULT = "new-domain-result"
+NEW_FUNCTION_NAME = "new-function-name"
+NEW_FUNCTION_DISPLAY = "new-function-display"
+NEW_FUNCTION_DESC = "new-function-desc"
+NEW_FUNCTION_OWNER = "new-function-owner"
+NEW_FUNCTION_DOC_LINK = "new-function-doc-link"
+NEW_FUNCTION_DOMAIN = "new-function-domain"
+NEW_FUNCTION_SUBMIT = "new-function-submit"
+NEW_FUNCTION_RESULT = "new-function-result"
+
+# domains page (global admins administer the domain list)
+DOMAIN_EDITING = "domain-editing"  # store: name of the domain being edited, or None
+DOMAIN_FORM_TITLE = "domain-form-title"
+DOMAIN_NAME = "domain-name"
+DOMAIN_DISPLAY = "domain-display"
+DOMAIN_DESC = "domain-desc"
+DOMAIN_OWNER = "domain-owner"
+DOMAIN_SUBMIT = "domain-submit"
+DOMAIN_CANCEL = "domain-cancel"
+DOMAIN_RESULT = "domain-result"
+DOMAIN_DELETE_ZONE = "domain-delete-zone"
+DOMAIN_DELETE_CONFIRM = "domain-delete-confirm"
+DOMAIN_DELETE_SUBMIT = "domain-delete-submit"
+DOMAINS_FILTER = "domains-filter"
+DOMAINS_TABLE = "domains-table"
+
+
+def domain_edit_id(name: str) -> dict:
+    return {"type": "domain-edit", "name": name}
 
 
 def revoke_id(principal: str) -> dict:

@@ -1,4 +1,10 @@
-"""A form: header, then Data (AG Grid editor) / History / Schema / Settings tabs."""
+"""A form: header, then Data (AG Grid editor) / History / Schema / Settings tabs.
+
+Editing model: every change lands in a browser-side :class:`~rdm.services.draft.Draft`
+(cell edits, added and deleted rows, bulk updates, item-form edits, restored versions) and
+is written in one atomic save. The Data tab stays mounted while other tabs are open so
+pending changes, selection and scroll position survive a tab round trip.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +15,12 @@ from typing import Any
 import dash_ag_grid as dag
 import dash_mantine_components as dmc
 import pandas as pd
-from dash import Input, Output, State, ctx, dcc, html, no_update
+from dash import ALL, MATCH, Input, Output, State, ctx, dcc, html, no_update
 
 from rdm.backend.base import BackendError, PermissionDenied
+from rdm.coercion import CoercionError, coerce_value
 from rdm.models import (
+    AUDIT_COLUMNS,
     ID_COLUMN,
     VERSION_COLUMN,
     ChangeSet,
@@ -25,7 +33,7 @@ from rdm.models import (
     sanitize_identifier,
 )
 from rdm.services import Draft, build_changeset_from_draft, describe_row
-from rdm.services.draft import invalid_cells
+from rdm.services.draft import bulk_value, invalid_cells, is_temp_id, json_safe, restore_row, same_value
 from rdm.services.excel_import import ImportError_, coerce_frame, list_sheets, map_frame_to_form, read_table
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
@@ -41,11 +49,13 @@ from rdm.ui.components import (
     role_badge,
 )
 from rdm.ui.context import AppContext, get_context, invalidate_metadata
-from rdm.ui.layout import domain_href
+from rdm.ui.layout import function_href
 
 log = logging.getLogger(__name__)
 TYPE_OPTIONS = [{"value": t.value, "label": f"{t.label} ({t.value})"} for t in DataType.editable_types()]
 GRID_THEME = "ag-theme-quartz"
+CHANGE_LABELS = {"insert": "Added", "update": "Edited", "delete": "Deleted"}
+BOOL_OPTIONS = [{"value": "true", "label": "Yes"}, {"value": "false", "label": "No"}]
 
 
 # --------------------------------------------------------------------------------------
@@ -53,18 +63,18 @@ GRID_THEME = "ag-theme-quartz"
 # --------------------------------------------------------------------------------------
 
 
-def render(ctx_: AppContext, domain: str, name: str) -> dmc.Stack:
-    form = ctx_.forms.get_form(domain, name)
-    role = ctx_.role_of(domain)
+def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
+    form = ctx_.forms.get_form(function, name)
+    role = ctx_.role_of(function)
     editable = role.can_edit and form.is_editable
     try:
-        domain_title = ctx_.backend.get_domain(domain).title
+        function_title = ctx_.backend.get_function(function).title
     except BackendError:
-        domain_title = domain
+        function_title = function
     header = page_title(
         form.title,
         form.description or None,
-        crumbs=[dmc.Anchor(domain_title, href=domain_href(domain)), dmc.Text(form.name)],
+        crumbs=[dmc.Anchor(function_title, href=function_href(function)), dmc.Text(form.name)],
         right=dmc.Stack(
             [
                 dmc.Group([role_badge(role)], justify="flex-end"),
@@ -87,16 +97,24 @@ def render(ctx_: AppContext, domain: str, name: str) -> dmc.Stack:
     ]
     if role.can_admin:
         tabs.append(dmc.TabsTab("Settings", value="settings", leftSection=icon("tabler:settings")))
-        panels.append(dmc.TabsPanel(_settings_tab(form), value="settings", pt="sm"))
+        panels.append(
+            dmc.TabsPanel(_settings_tab(form, ctx_.permissions.can_delete), value="settings", pt="sm")
+        )
     return dmc.Stack(
         [
-            dcc.Store(id=ids.FORM_KEY, data={"domain": domain, "form": name}),
+            dcc.Store(id=ids.FORM_KEY, data={"function": function, "form": name}),
             dcc.Store(id=ids.DRAFT, data=Draft().to_dict()),
             dcc.Store(id=ids.GRID_VERSION, data=0),
             dcc.Store(id=ids.IMPORT_TOKEN, data=None),
+            dcc.Store(id=ids.ITEM_ROW, data=None),
+            dcc.Store(id=ids.ITEM_HISTORY, data=[]),
             header,
-            dmc.Tabs([dmc.TabsList(tabs), *panels], value="data", id=ids.FORM_TABS, keepMounted=False),
+            # keepMounted keeps the grid, its draft overlay and the Save state alive while the
+            # user looks at History / Schema / Settings (the panels are hidden, not destroyed).
+            dmc.Tabs([dmc.TabsList(tabs), *panels], value="data", id=ids.FORM_TABS, keepMounted=True),
             _import_modal(form),
+            _bulk_modal(form, editable),
+            _item_modal(),
             _schema_modals(form),
         ],
         gap="xs",
@@ -118,7 +136,7 @@ def _data_tab(ctx_: AppContext, form: FormDef, role: Role, editable: bool) -> dm
             )
         )
     elif not role.can_edit:
-        notes.append(dmc.Text("Read-only: you have Viewer access to this domain.", size="sm", c="dimmed"))
+        notes.append(dmc.Text("Read-only: you have Viewer access to this function.", size="sm", c="dimmed"))
     toolbar_left = [
         dmc.TextInput(
             id=ids.GRID_SEARCH,
@@ -131,6 +149,14 @@ def _data_tab(ctx_: AppContext, form: FormDef, role: Role, editable: bool) -> dm
         dmc.Switch(id=ids.GRID_AUDIT, label="Audit columns", size="sm", checked=False),
         dmc.Button(
             "Refresh", id=ids.GRID_REFRESH, variant="default", size="sm", leftSection=icon("tabler:refresh")
+        ),
+        dmc.Button(
+            "Open row",
+            id=ids.ITEM_OPEN,
+            variant="default",
+            size="sm",
+            leftSection=icon("tabler:forms"),
+            disabled=not form.is_editable,
         ),
         dmc.Menu(
             [
@@ -167,6 +193,13 @@ def _data_tab(ctx_: AppContext, form: FormDef, role: Role, editable: bool) -> dm
             variant="light",
             size="sm",
             leftSection=icon("tabler:row-insert-top"),
+        ),
+        dmc.Button(
+            "Bulk update",
+            id=ids.BULK_OPEN,
+            variant="light",
+            size="sm",
+            leftSection=icon("tabler:replace"),
         ),
         dmc.Button(
             "Delete selected",
@@ -326,90 +359,93 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
-def _settings_tab(form: FormDef) -> dmc.Stack:
-    return dmc.Stack(
-        [
-            dmc.Paper(
-                dmc.Stack(
-                    [
-                        dmc.Title("Form details", order=4),
-                        dmc.TextInput(
-                            id=ids.SETTINGS_DISPLAY,
-                            label="Display name",
-                            value=form.display_name or form.title,
-                        ),
-                        dmc.Textarea(
-                            id=ids.SETTINGS_DESC,
-                            label="Description",
-                            value=form.description,
-                            description="Stored as the table comment",
-                            autosize=True,
-                            minRows=2,
-                        ),
-                        dmc.TextInput(
-                            id=ids.SETTINGS_OWNER,
-                            label="Owner",
-                            value=form.owner,
-                            description="Stored as a table property and tag",
-                        ),
-                        dmc.Group(
-                            [
-                                dmc.Button(
-                                    "Save details",
-                                    id=ids.SETTINGS_SAVE,
-                                    leftSection=icon("tabler:device-floppy"),
-                                )
-                            ]
-                        ),
-                        html.Div(id=ids.SETTINGS_RESULT),
-                    ],
-                    gap="sm",
-                ),
-                withBorder=True,
-                p="md",
-                radius="md",
+def _settings_tab(form: FormDef, can_delete: bool) -> dmc.Stack:
+    blocks: list[Any] = [
+        dmc.Paper(
+            dmc.Stack(
+                [
+                    dmc.Title("Form details", order=4),
+                    dmc.TextInput(
+                        id=ids.SETTINGS_DISPLAY,
+                        label="Display name",
+                        value=form.display_name or form.title,
+                    ),
+                    dmc.Textarea(
+                        id=ids.SETTINGS_DESC,
+                        label="Description",
+                        value=form.description,
+                        description="Stored as the table comment",
+                        autosize=True,
+                        minRows=2,
+                    ),
+                    dmc.TextInput(
+                        id=ids.SETTINGS_OWNER,
+                        label="Owner",
+                        value=form.owner,
+                        description="Stored as a table property and tag",
+                    ),
+                    dmc.Group(
+                        [
+                            dmc.Button(
+                                "Save details",
+                                id=ids.SETTINGS_SAVE,
+                                leftSection=icon("tabler:device-floppy"),
+                            )
+                        ]
+                    ),
+                    html.Div(id=ids.SETTINGS_RESULT),
+                ],
+                gap="sm",
             ),
-            dmc.Paper(
-                dmc.Stack(
-                    [
-                        dmc.Title("Properties and tags", order=4),
-                        dmc.Text(
-                            "Table properties (TBLPROPERTIES) and tags as stored in the catalog.",
-                            size="sm",
-                            c="dimmed",
-                        ),
-                        dmc.SimpleGrid(
-                            [
-                                dmc.Stack(
-                                    [
-                                        dmc.Text("Properties", fw=600, size="sm"),
-                                        dmc.Code(_kv(form.properties), block=True),
-                                    ],
-                                    gap=4,
-                                ),
-                                dmc.Stack(
-                                    [
-                                        dmc.Text("Tags", fw=600, size="sm"),
-                                        dmc.Code(_kv(form.tags), block=True),
-                                    ],
-                                    gap=4,
-                                ),
-                            ],
-                            cols={"base": 1, "md": 2},
-                        ),
-                    ],
-                    gap="sm",
-                ),
-                withBorder=True,
-                p="md",
-                radius="md",
+            withBorder=True,
+            p="md",
+            radius="md",
+        ),
+        dmc.Paper(
+            dmc.Stack(
+                [
+                    dmc.Title("Properties and tags", order=4),
+                    dmc.Text(
+                        "Table properties (TBLPROPERTIES) and tags as stored in the catalog.",
+                        size="sm",
+                        c="dimmed",
+                    ),
+                    dmc.SimpleGrid(
+                        [
+                            dmc.Stack(
+                                [
+                                    dmc.Text("Properties", fw=600, size="sm"),
+                                    dmc.Code(_kv(form.properties), block=True),
+                                ],
+                                gap=4,
+                            ),
+                            dmc.Stack(
+                                [
+                                    dmc.Text("Tags", fw=600, size="sm"),
+                                    dmc.Code(_kv(form.tags), block=True),
+                                ],
+                                gap=4,
+                            ),
+                        ],
+                        cols={"base": 1, "md": 2},
+                    ),
+                ],
+                gap="sm",
             ),
+            withBorder=True,
+            p="md",
+            radius="md",
+        ),
+    ]
+    if can_delete:
+        blocks.append(
             dmc.Paper(
                 dmc.Stack(
                     [
                         dmc.Title("Danger zone", order=4, c="red"),
                         dmc.Text(
-                            f"Delete '{form.title}' and all of its {form.row_count or 0:,} rows. This cannot be undone.",
+                            f"Delete '{form.title}' and all of its {form.row_count or 0:,} rows. This cannot be undone. "
+                            "Only global administrators can delete forms.",
                             size="sm",
                         ),
                         dmc.Group(
@@ -435,10 +471,17 @@ def _settings_tab(form: FormDef) -> dmc.Stack:
                 p="md",
                 radius="md",
                 style={"borderColor": "#fa5252"},
-            ),
-        ],
-        gap="md",
-    )
+            )
+        )
+    else:
+        blocks.append(
+            dmc.Text(
+                "Deleting a form is reserved to global administrators; ask the data platform team.",
+                size="sm",
+                c="dimmed",
+            )
+        )
+    return dmc.Stack(blocks, gap="md")
 
 
 def _kv(d: dict[str, str]) -> str:
@@ -490,6 +533,216 @@ def _import_modal(form: FormDef) -> dmc.Modal:
             gap="sm",
         ),
     )
+
+
+# -- bulk update (FR-22) -----------------------------------------------------------------
+
+
+def _bulk_columns(form: FormDef) -> list[ColumnDef]:
+    return [c for c in form.user_columns if c.data_type is not DataType.OTHER]
+
+
+def _bulk_modal(form: FormDef, editable: bool) -> dmc.Modal:
+    columns = _bulk_columns(form)
+    return dmc.Modal(
+        id=ids.BULK_MODAL,
+        title="Bulk update selected rows",
+        size="lg",
+        children=dmc.Stack(
+            [
+                dmc.Text(
+                    "Set one column to the same value on every selected row. The change joins your unsaved "
+                    "changes; nothing is written until you press Save.",
+                    size="sm",
+                    c="dimmed",
+                ),
+                dmc.Text(id=ids.BULK_INFO, size="sm", fw=600),
+                dmc.Select(
+                    id=ids.BULK_COLUMN,
+                    label="Column",
+                    data=[
+                        {"value": c.name, "label": f"{humanize(c.name)} ({c.type_label})"} for c in columns
+                    ],
+                    value=columns[0].name if columns else None,
+                    searchable=True,
+                    allowDeselect=False,
+                ),
+                html.Div(
+                    id=ids.BULK_VALUE_WRAP,
+                    children=_value_control(columns[0], None, ids.BULK_VALUE, True) if columns else None,
+                ),
+                dmc.Checkbox(
+                    id=ids.BULK_CLEAR,
+                    label="Clear the value (set to empty) instead",
+                    checked=False,
+                ),
+                dmc.Group(
+                    [
+                        dmc.Button(
+                            "Apply to selected rows",
+                            id=ids.BULK_SUBMIT,
+                            leftSection=icon("tabler:replace"),
+                            disabled=not editable or not columns,
+                        )
+                    ],
+                    justify="flex-end",
+                ),
+            ],
+            gap="sm",
+        ),
+    )
+
+
+def _value_control(col: ColumnDef, value: Any, control_id: Any, editable: bool) -> Any:
+    """A typed input for one column value (shared by the bulk-update and item forms)."""
+    label = humanize(col.name)
+    common: dict[str, Any] = {
+        "id": control_id,
+        "label": label,
+        "description": col.description or None,
+        "required": col.required,
+        "disabled": not editable,
+    }
+    t = col.data_type
+    if t is DataType.STRING and col.options:
+        return dmc.Select(
+            data=[{"value": o, "label": o} for o in col.options],
+            value=value if value in col.options else None,
+            searchable=True,
+            clearable=True,
+            placeholder="Choose a value",
+            **common,
+        )
+    if t is DataType.BOOLEAN:
+        if isinstance(value, str):
+            value = value.strip().lower()
+        elif value is not None:
+            value = "true" if bool(value) else "false"
+        return dmc.Select(
+            data=BOOL_OPTIONS, value=value if value in ("true", "false") else None, clearable=True, **common
+        )
+    if t in (DataType.INTEGER, DataType.DECIMAL, DataType.DOUBLE):
+        params: dict[str, Any] = {"hideControls": True}
+        if t is DataType.INTEGER:
+            params["allowDecimal"] = False
+        elif t is DataType.DECIMAL:
+            params["decimalScale"] = col.decimal_params[1]
+        return dmc.NumberInput(value="" if value is None else value, **params, **common)
+    if t is DataType.DATE:
+        return dmc.DateInput(value=value or None, valueFormat="YYYY-MM-DD", clearable=True, **common)
+    if t is DataType.TIMESTAMP:
+        return dmc.TextInput(
+            value="" if value is None else str(value), placeholder="YYYY-MM-DD HH:MM:SS", **common
+        )
+    if t is DataType.OTHER:
+        return dmc.TextInput(value="" if value is None else str(value), **{**common, "disabled": True})
+    return dmc.TextInput(value="" if value is None else str(value), **common)
+
+
+# -- item form (FR-24) ---------------------------------------------------------------------
+
+
+def _item_modal() -> dmc.Modal:
+    return dmc.Modal(
+        id=ids.ITEM_MODAL,
+        title="Row",
+        size="xl",
+        children=dmc.Stack(
+            [
+                html.Div(id=ids.ITEM_BODY),
+                html.Div(id=ids.ITEM_RESULT),
+                dmc.Group(
+                    [dmc.Button("Apply to grid", id=ids.ITEM_SAVE, leftSection=icon("tabler:check"))],
+                    justify="flex-end",
+                ),
+            ],
+            gap="sm",
+        ),
+    )
+
+
+def _history_records(df: pd.DataFrame, form: FormDef) -> list[dict[str, Any]]:
+    """History rows as JSON-safe dicts (stored in the browser for restore)."""
+    return g.rows_to_records(df, form)
+
+
+def item_body(form: FormDef, row: dict[str, Any], history: list[dict[str, Any]], editable: bool) -> dmc.Stack:
+    """The item form: one input per column, the system columns, and the history of the row."""
+    fields = [
+        _value_control(c, row.get(c.name), ids.item_field_id(c.name), editable) for c in form.user_columns
+    ]
+    audit = [
+        dmc.Text(
+            f"{g.AUDIT_LABELS.get(c, humanize(c.lstrip('_')))}: {_fmt(row.get(c)) or '-'}",
+            size="xs",
+            c="dimmed",
+        )
+        for c in AUDIT_COLUMNS
+        if c in row
+    ]
+    is_new = is_temp_id(row.get(ID_COLUMN))
+    blocks: list[Any] = [
+        dmc.Group(
+            [
+                dmc.Text(describe_row(form, row, fallback="New row" if is_new else "Row"), fw=600),
+                dmc.Badge("unsaved new row", color="teal", variant="light", size="sm") if is_new else None,
+            ],
+            gap="sm",
+        ),
+        dmc.SimpleGrid(fields, cols={"base": 1, "md": 2}, spacing="sm"),
+        dmc.Group(audit, gap="md") if audit and not is_new else None,
+    ]
+    if not editable:
+        blocks.insert(1, dmc.Text("Read-only view.", size="xs", c="dimmed"))
+    if not is_new:
+        blocks.append(dmc.Divider(label="History of this row", labelPosition="left"))
+        if not history:
+            blocks.append(dmc.Text("No recorded changes for this row.", size="sm", c="dimmed"))
+        else:
+            head = dmc.TableThead(
+                dmc.TableTr([dmc.TableTh(h) for h in ("#", "When", "By", "Change", "Fields changed", "")])
+            )
+            body = []
+            for rec in history:
+                restore = (
+                    dmc.Button(
+                        "Restore",
+                        id=ids.restore_id(rec["version"]),
+                        size="xs",
+                        variant="subtle",
+                        leftSection=icon("tabler:restore", 14),
+                    )
+                    if editable and rec.get("change_type") in ("insert", "update")
+                    else None
+                )
+                body.append(
+                    dmc.TableTr(
+                        [
+                            dmc.TableTd(str(rec.get("version", ""))),
+                            dmc.TableTd(_fmt(rec.get("changed_at"))),
+                            dmc.TableTd(_fmt(rec.get("changed_by"))),
+                            dmc.TableTd(CHANGE_LABELS.get(rec.get("change_type"), rec.get("change_type"))),
+                            dmc.TableTd(_fmt(rec.get("changed_fields"))),
+                            dmc.TableTd(restore),
+                        ]
+                    )
+                )
+            blocks.append(
+                dmc.ScrollArea(
+                    dmc.Table([head, dmc.TableTbody(body)], striped=True, withTableBorder=True, fz="xs"),
+                    h=220,
+                    type="auto",
+                )
+            )
+            if editable:
+                blocks.append(
+                    dmc.Text(
+                        "Restore stages that version's values on this row; press Save on the grid to persist.",
+                        size="xs",
+                        c="dimmed",
+                    )
+                )
+    return dmc.Stack([b for b in blocks if b is not None], gap="sm")
 
 
 def _schema_modals(form: FormDef) -> html.Div:
@@ -587,7 +840,7 @@ def _schema_modals(form: FormDef) -> html.Div:
 # --------------------------------------------------------------------------------------
 
 
-def history_panel(ctx_: AppContext, form: FormDef) -> Any:
+def history_panel(ctx_: AppContext, form: FormDef, editable: bool) -> Any:
     try:
         df = ctx_.forms.history(form, limit=500)
     except BackendError as exc:
@@ -596,28 +849,46 @@ def history_panel(ctx_: AppContext, form: FormDef) -> Any:
         return empty_state(
             "No changes yet", "Every save is recorded here with who changed what and when.", "tabler:history"
         )
-    labels = {"insert": "Added", "update": "Edited", "delete": "Deleted"}
-    df = df.assign(change_type=df["change_type"].map(labels).fillna(df["change_type"]))
+    df = df.assign(change_type=df["change_type"].map(CHANGE_LABELS).fillna(df["change_type"]))
     rows = g.rows_to_records(df, form)
     note = (
         "Backed by the audit table in the catalog (Change Data Feed as fallback)."
         if ctx_.settings.is_databricks
         else "Locally this is the _catalog.change_log table; in Databricks it is the audit table."
     )
+    toolbar = [
+        dmc.TextInput(
+            id=ids.history_filter_id(form.name),
+            placeholder="Search the history",
+            leftSection=icon("tabler:search"),
+            debounce=250,
+            w=300,
+            size="sm",
+        ),
+    ]
+    if editable:
+        toolbar.append(
+            dmc.Button(
+                "Restore selected version",
+                id=ids.history_restore_id(form.name),
+                variant="light",
+                size="sm",
+                leftSection=icon("tabler:restore"),
+            )
+        )
     return dmc.Stack(
         [
             dmc.Group(
                 [
-                    dmc.TextInput(
-                        id=ids.HISTORY_FILTER,
-                        placeholder="Search the history",
-                        leftSection=icon("tabler:search"),
-                        debounce=250,
-                        w=300,
-                        size="sm",
-                    ),
+                    *toolbar,
                     dmc.Text(
-                        "Edits show the row after the change; deletions show the row as it was. " + note,
+                        "Edits show the row after the change; deletions show the row as it was. "
+                        + note
+                        + (
+                            " Tick an entry and Restore to stage its values on the Data tab (a deleted row comes back as a new row)."
+                            if editable
+                            else ""
+                        ),
                         size="xs",
                         c="dimmed",
                     ),
@@ -625,11 +896,16 @@ def history_panel(ctx_: AppContext, form: FormDef) -> Any:
                 gap="md",
             ),
             dag.AgGrid(
-                id=ids.HISTORY_GRID,
+                id=ids.history_grid_id(form.name),
                 rowData=rows,
-                columnDefs=g.history_column_defs(form),
+                columnDefs=g.history_column_defs(form, selectable=editable),
                 defaultColDef={"sortable": True, "filter": True, "resizable": True},
-                dashGridOptions={"rowHeight": 32, "enableCellTextSelection": True},
+                dashGridOptions={
+                    "rowHeight": 32,
+                    "enableCellTextSelection": True,
+                    "rowSelection": "single",
+                    "suppressRowClickSelection": True,
+                },
                 columnSize="autoSize",
                 className=GRID_THEME,
                 style={"height": "58vh"},
@@ -772,9 +1048,39 @@ def schema_panel(ctx_: AppContext, form: FormDef, role: Role) -> Any:
 
 
 def _load(ctx_: AppContext, key: dict[str, str]) -> tuple[FormDef, Role, bool]:
-    form = ctx_.forms.get_form(key["domain"], key["form"])
-    role = ctx_.role_of(key["domain"])
+    form = ctx_.forms.get_form(key["function"], key["form"])
+    role = ctx_.role_of(key["function"])
     return form, role, role.can_edit and form.is_editable
+
+
+def _pattern_states(type_name: str) -> list[tuple[dict, Any]]:
+    """(id, value) pairs of the pattern-matching State entries of the given ``type``."""
+    out = []
+    for entry in ctx.states_list:
+        if isinstance(entry, list):
+            for item in entry:
+                if isinstance(item.get("id"), dict) and item["id"].get("type") == type_name:
+                    out.append((item["id"], item.get("value")))
+    return out
+
+
+def _grid_row(form: FormDef, row: dict[str, Any], invalid: dict[str, list[str]]) -> dict[str, Any]:
+    """A row for a ``rowTransaction`` update: values plus the invalid-cell flags."""
+    out = {k: v for k, v in row.items() if not k.startswith(g.INVALID_PREFIX)}
+    g.flag_invalid(out, invalid.get(str(out.get(ID_COLUMN))))
+    return out
+
+
+def _current_row(rows_by_id: dict[str, dict[str, Any]], draft: Draft, rid: str) -> dict[str, Any] | None:
+    """The row as the user currently sees it: loaded values with the pending draft edits on top."""
+    if is_temp_id(rid):
+        values = draft.inserts.get(rid)
+        return None if values is None else {ID_COLUMN: rid, VERSION_COLUMN: None, **values}
+    base = rows_by_id.get(rid)
+    if base is None:
+        return None
+    edits = {k: v for k, v in draft.updates.get(rid, {}).items() if k != VERSION_COLUMN}
+    return {**base, **edits}
 
 
 def register(app) -> None:
@@ -820,6 +1126,31 @@ def register(app) -> None:
                 " · double-click a cell to edit, Enter to move down, Ctrl+Z to undo" if editable else ""
             )
         return rows, g.column_defs(form, editable, bool(audit)), caption, pending, save_disabled
+
+    @app.callback(
+        Output(ids.PENDING, "children", allow_duplicate=True),
+        Output(ids.GRID_SAVE, "disabled", allow_duplicate=True),
+        Input(ids.FORM_TABS, "value"),
+        State(ids.DRAFT, "data"),
+        State(ids.GRID, "rowData"),
+        State(ids.FORM_KEY, "data"),
+        State(ids.PERSONA, "data"),
+        prevent_initial_call=True,
+    )
+    def sync_save_state(tab, draft_raw, rows, key, persona):
+        """Coming back to the Data tab: recompute the pending bar and Save from the draft."""
+        if tab != "data" or not key:
+            return no_update, no_update
+        draft = Draft.from_dict(draft_raw)
+        if draft.is_empty:
+            return None, True
+        c = get_context(persona)
+        try:
+            form, _role, editable = _load(c, key)
+        except (BackendError, PermissionDenied):
+            return no_update, no_update
+        pending, save_disabled, _ = _pending_bar(form, rows or [], draft)
+        return pending, save_disabled or not editable
 
     @app.callback(
         Output(ids.DRAFT, "data"),
@@ -882,11 +1213,7 @@ def register(app) -> None:
                 draft.set_cell(rid, col, e.get("value"), data.get(VERSION_COLUMN))
                 touched[rid] = data
             pending, save_disabled, invalid = _pending_bar(form, rows, draft)
-            updates = []
-            for rid, data in touched.items():
-                row = {k: v for k, v in data.items() if not k.startswith(g.INVALID_PREFIX)}
-                g.flag_invalid(row, invalid.get(rid))
-                updates.append(row)
+            updates = [_grid_row(form, data, invalid) for data in touched.values()]
             transaction = {"update": updates} if updates else no_update
             return (
                 draft.to_dict(),
@@ -1011,6 +1338,301 @@ def register(app) -> None:
             )
         return (no_update,) * 8
 
+    # -- bulk update, item form and restore: all land in the draft ------------------------
+
+    @app.callback(
+        Output(ids.BULK_MODAL, "opened"),
+        Output(ids.BULK_INFO, "children"),
+        Output(ids.NOTIFY, "sendNotifications", allow_duplicate=True),
+        Input(ids.BULK_OPEN, "n_clicks"),
+        State(ids.GRID, "selectedRows"),
+        prevent_initial_call=True,
+    )
+    def open_bulk(n, selected):
+        if not n:
+            return no_update, no_update, no_update
+        if not selected:
+            return (
+                no_update,
+                no_update,
+                notify("Select rows first (tick the boxes in the first column).", color="yellow"),
+            )
+        return True, f"{len(selected):,} selected row(s) will receive the value.", no_update
+
+    @app.callback(
+        Output(ids.BULK_VALUE_WRAP, "children"),
+        Input(ids.BULK_COLUMN, "value"),
+        State(ids.FORM_KEY, "data"),
+        State(ids.PERSONA, "data"),
+        prevent_initial_call=True,
+    )
+    def bulk_value_control(column, key, persona):
+        if not column or not key:
+            return no_update
+        c = get_context(persona)
+        try:
+            form, _r, editable = _load(c, key)
+        except (BackendError, PermissionDenied):
+            return no_update
+        col = form.column(column)
+        if col is None:
+            return no_update
+        return _value_control(col, None, ids.BULK_VALUE, editable)
+
+    @app.callback(
+        Output(ids.ITEM_MODAL, "opened"),
+        Output(ids.ITEM_MODAL, "title"),
+        Output(ids.ITEM_BODY, "children"),
+        Output(ids.ITEM_ROW, "data"),
+        Output(ids.ITEM_HISTORY, "data"),
+        Output(ids.ITEM_RESULT, "children"),
+        Output(ids.ITEM_SAVE, "style"),
+        Output(ids.NOTIFY, "sendNotifications", allow_duplicate=True),
+        Input(ids.ITEM_OPEN, "n_clicks"),
+        State(ids.GRID, "selectedRows"),
+        State(ids.FORM_KEY, "data"),
+        State(ids.PERSONA, "data"),
+        prevent_initial_call=True,
+    )
+    def open_item(n, selected, key, persona):
+        if not n:
+            return (no_update,) * 8
+        if not selected or len(selected) != 1:
+            return (no_update,) * 7 + (
+                notify("Select exactly one row (tick its box in the first column).", color="yellow"),
+            )
+        c = get_context(persona)
+        try:
+            form, _r, editable = _load(c, key)
+        except (BackendError, PermissionDenied) as exc:
+            return (no_update,) * 7 + (notify(str(exc), color="red"),)
+        row = {k: v for k, v in selected[0].items() if not k.startswith(g.INVALID_PREFIX)}
+        rid = str(row.get(ID_COLUMN) or "")
+        history: list[dict[str, Any]] = []
+        if rid and not is_temp_id(rid):
+            try:
+                history = _history_records(c.forms.history(form, limit=200, row_id=rid), form)
+            except BackendError as exc:
+                log.warning("Row history unavailable: %s", exc)
+        return (
+            True,
+            f"{form.title}: {describe_row(form, row, fallback='row')}",
+            item_body(form, row, history, editable),
+            row,
+            history,
+            None,
+            {} if editable else {"display": "none"},
+            no_update,
+        )
+
+    @app.callback(
+        Output(ids.DRAFT, "data", allow_duplicate=True),
+        Output(ids.PENDING, "children", allow_duplicate=True),
+        Output(ids.GRID, "rowTransaction", allow_duplicate=True),
+        Output(ids.GRID_SAVE, "disabled", allow_duplicate=True),
+        Output(ids.NOTIFY, "sendNotifications", allow_duplicate=True),
+        Output(ids.BULK_MODAL, "opened", allow_duplicate=True),
+        Output(ids.ITEM_MODAL, "opened", allow_duplicate=True),
+        Output(ids.ITEM_BODY, "children", allow_duplicate=True),
+        Output(ids.ITEM_ROW, "data", allow_duplicate=True),
+        Output(ids.ITEM_RESULT, "children", allow_duplicate=True),
+        Output(ids.GRID, "deselectAll", allow_duplicate=True),
+        Input(ids.BULK_SUBMIT, "n_clicks"),
+        Input(ids.ITEM_SAVE, "n_clicks"),
+        Input({"type": "restore", "version": ALL}, "n_clicks"),
+        Input({"type": "history-restore", "form": ALL}, "n_clicks"),
+        State(ids.DRAFT, "data"),
+        State(ids.GRID, "rowData"),
+        State(ids.GRID, "selectedRows"),
+        State(ids.BULK_COLUMN, "value"),
+        State(ids.BULK_VALUE, "value"),
+        State(ids.BULK_CLEAR, "checked"),
+        State({"type": "item-field", "column": ALL}, "value"),
+        State(ids.ITEM_ROW, "data"),
+        State(ids.ITEM_HISTORY, "data"),
+        State({"type": "history-grid", "form": ALL}, "selectedRows"),
+        State(ids.FORM_KEY, "data"),
+        State(ids.PERSONA, "data"),
+        prevent_initial_call=True,
+    )
+    def draft_actions(
+        n_bulk,
+        n_item,
+        _n_restore,
+        _n_history_restore,
+        draft_raw,
+        rows,
+        selected,
+        bulk_column,
+        bulk_raw,
+        bulk_clear,
+        _item_values,
+        item_row,
+        item_history,
+        history_selected,
+        key,
+        persona,
+    ):
+        trigger = ctx.triggered_id
+        triggered_value = ctx.triggered[0]["value"] if ctx.triggered else None
+        if trigger is None or not triggered_value:
+            return (no_update,) * 11  # mounted, not clicked
+        c = get_context(persona)
+        try:
+            form, _role, editable = _load(c, key)
+        except (BackendError, PermissionDenied) as exc:
+            return (no_update,) * 4 + (notify(str(exc), color="red"),) + (no_update,) * 6
+        if not editable:
+            return (no_update,) * 4 + (notify("You cannot edit this form.", color="red"),) + (no_update,) * 6
+        draft = Draft.from_dict(draft_raw)
+        rows_by_id = {str(r.get(ID_COLUMN)): r for r in (rows or [])}
+        out: dict[str, Any] = {}
+
+        def finish(transaction: Any, message: str | None = None, color: str = "teal") -> tuple:
+            pending, save_disabled, invalid = _pending_bar(form, rows or [], draft)
+            if isinstance(transaction, dict):
+                for kind in ("update", "add"):
+                    if kind in transaction:
+                        transaction[kind] = [_grid_row(form, r, invalid) for r in transaction[kind]]
+            return (
+                draft.to_dict(),
+                pending,
+                transaction,
+                save_disabled,
+                notify(message)
+                if message and color == "teal"
+                else (notify(message, color=color) if message else no_update),
+                out.get("bulk_opened", no_update),
+                out.get("item_opened", no_update),
+                out.get("item_body", no_update),
+                out.get("item_row", no_update),
+                out.get("item_result", no_update),
+                out.get("deselect", no_update),
+            )
+
+        # -- bulk update of the selected rows --------------------------------------------
+        if trigger == ids.BULK_SUBMIT:
+            if not selected:
+                return (
+                    (no_update,) * 4 + (notify("No rows are selected.", color="yellow"),) + (no_update,) * 6
+                )
+            if not bulk_column:
+                return (no_update,) * 4 + (notify("Choose a column.", color="yellow"),) + (no_update,) * 6
+            try:
+                value = bulk_value(form, bulk_column, None if bulk_clear else bulk_raw)
+            except ValueError as exc:
+                return (
+                    (no_update,) * 4
+                    + (notify(str(exc), title="Not applied", color="red"),)
+                    + (no_update,) * 6
+                )
+            touched = draft.set_many(selected, bulk_column, value)
+            updates = [{**r, bulk_column: value} for r in selected if str(r.get(ID_COLUMN)) in touched]
+            out["bulk_opened"] = False
+            out["deselect"] = True
+            return finish(
+                {"update": updates}, f"{len(touched):,} row(s) updated in the draft; press Save to persist."
+            )
+
+        # -- item form: apply the field values to the row --------------------------------
+        if trigger == ids.ITEM_SAVE:
+            if not item_row:
+                return (no_update,) * 4 + (notify("Open a row first.", color="yellow"),) + (no_update,) * 6
+            rid = str(item_row.get(ID_COLUMN))
+            merged = dict(item_row)
+            changed = 0
+            for field_id, raw in _pattern_states("item-field"):
+                col = form.column(field_id["column"])
+                if col is None or col.data_type is DataType.OTHER:
+                    continue
+                if isinstance(raw, str) and raw.strip() == "":
+                    raw = None
+                try:
+                    value = json_safe(coerce_value(col, raw))
+                except CoercionError:
+                    value = raw  # invalid: keep it so the validation highlights the problem
+                if not same_value(col, item_row.get(col.name), value):
+                    draft.set_cell(rid, col.name, value, item_row.get(VERSION_COLUMN))
+                    merged[col.name] = value
+                    changed += 1
+            out["item_opened"] = False
+            if not changed:
+                return finish(no_update, "No field changed.", "gray")
+            return finish(
+                {"update": [merged]}, f"{changed} field(s) updated in the draft; press Save to persist."
+            )
+
+        # -- restore a version from the item form ----------------------------------------
+        if isinstance(trigger, dict) and trigger.get("type") == "restore":
+            record = next(
+                (r for r in (item_history or []) if int(r.get("version", -1)) == int(trigger["version"])),
+                None,
+            )
+            if not item_row or record is None:
+                return (
+                    (no_update,) * 4
+                    + (notify("That version is no longer available.", color="yellow"),)
+                    + (no_update,) * 6
+                )
+            rid, changed = restore_row(draft, form, item_row, record)
+            merged = {
+                **item_row,
+                **{k: v for k, v in draft.updates.get(rid, {}).items() if k != VERSION_COLUMN},
+            }
+            if is_temp_id(rid):
+                merged = {**item_row, **draft.inserts.get(rid, {})}
+            out["item_row"] = merged
+            out["item_body"] = item_body(form, merged, item_history or [], editable)
+            out["item_result"] = info_alert(
+                f"Version {trigger['version']} restored into the draft ({changed} field(s) changed). "
+                "Close this dialog and press Save to persist.",
+                color="teal",
+            )
+            return finish({"update": [merged]} if changed else no_update)
+
+        # -- restore the entry selected on the History tab -------------------------------
+        if isinstance(trigger, dict) and trigger.get("type") == "history-restore":
+            picked = next((s[0] for s in (history_selected or []) if s), None)
+            if not picked:
+                return (
+                    (no_update,) * 4
+                    + (notify("Tick a history entry first.", color="yellow"),)
+                    + (no_update,) * 6
+                )
+            rid = str(picked.get(ID_COLUMN) or "")
+            current = _current_row(rows_by_id, draft, rid) if rid else None
+            if rid in draft.deletes:  # undo a pending delete, then apply the version's values
+                draft.deletes.pop(rid, None)
+                base = rows_by_id.get(rid, {})
+                new_id, changed = restore_row(draft, form, base, picked)
+                merged = {
+                    **base,
+                    **{k: v for k, v in draft.updates.get(rid, {}).items() if k != VERSION_COLUMN},
+                }
+                return finish(
+                    {"add": [merged], "addIndex": 0}, "Row restored into the draft; press Save to persist."
+                )
+            new_id, changed = restore_row(draft, form, current, picked)
+            if is_temp_id(new_id):
+                row = {c_.name: None for c_ in form.columns}
+                row.update(draft.inserts.get(new_id, {}))
+                row[ID_COLUMN] = new_id
+                row[VERSION_COLUMN] = None
+                row[g.NEW_FLAG] = True
+                return finish(
+                    {"add": [row], "addIndex": 0},
+                    "The deleted row is staged as a new row on the Data tab; press Save to persist.",
+                )
+            merged = {
+                **(current or {}),
+                **{k: v for k, v in draft.updates.get(new_id, {}).items() if k != VERSION_COLUMN},
+            }
+            return finish(
+                {"update": [merged]} if changed else no_update,
+                f"Version restored into the draft ({changed} field(s) changed); press Save on the Data tab.",
+            )
+        return (no_update,) * 11
+
     @app.callback(
         Output(ids.GRID, "exportDataAsCsv"), Input(ids.GRID_CSV, "n_clicks"), prevent_initial_call=True
     )
@@ -1051,11 +1673,11 @@ def register(app) -> None:
             return no_update, no_update
         c = get_context(persona)
         try:
-            form, role, _e = _load(c, key)
+            form, role, editable = _load(c, key)
         except (BackendError, PermissionDenied) as exc:
             return error_alert(exc), error_alert(exc)
         if tab == "history":
-            return history_panel(c, form), no_update
+            return history_panel(c, form, editable), no_update
         return no_update, schema_panel(c, form, role)
 
     # -- schema editing ----------------------------------------------------------------------
@@ -1232,7 +1854,7 @@ def register(app) -> None:
             return no_update, notify(str(exc), title="Not deleted", color="red"), no_update
         invalidate_metadata()
         return (
-            domain_href(key["domain"]),
+            function_href(key["function"]),
             notify(f"Form '{form.title}' deleted", color="gray"),
             (nav_version or 0) + 1,
         )
@@ -1373,9 +1995,15 @@ def register(app) -> None:
         return False, (version or 0) + 1, notify(f"Imported {count:,} rows"), (nav_version or 0) + 1
 
     @app.callback(
-        Output(ids.HISTORY_GRID, "dashGridOptions"),
-        Input(ids.HISTORY_FILTER, "value"),
+        Output({"type": "history-grid", "form": MATCH}, "dashGridOptions"),
+        Input({"type": "history-filter", "form": MATCH}, "value"),
         prevent_initial_call=True,
     )
     def filter_history(text):
-        return {"rowHeight": 32, "enableCellTextSelection": True, "quickFilterText": text or ""}
+        return {
+            "rowHeight": 32,
+            "enableCellTextSelection": True,
+            "rowSelection": "single",
+            "suppressRowClickSelection": True,
+            "quickFilterText": text or "",
+        }

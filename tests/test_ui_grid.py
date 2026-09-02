@@ -31,6 +31,12 @@ def form() -> FormDef:
     )
 
 
+def test_history_column_defs_selectable():
+    defs = grid.history_column_defs(form(), selectable=True)
+    assert defs[0]["field"] == "version" and defs[0]["checkboxSelection"] is True
+    assert not grid.history_column_defs(form())[0]["checkboxSelection"]
+
+
 def test_column_defs_types_editors_and_hidden_columns():
     defs = grid.column_defs(form(), editable=True, show_audit=False)
     fields = [d["field"] for d in defs]
@@ -61,7 +67,10 @@ def test_column_defs_types_editors_and_hidden_columns():
 def test_column_defs_read_only_and_audit_visible():
     defs = grid.column_defs(form(), editable=False, show_audit=True)
     assert all(not d["editable"] for d in defs)
-    assert not any(d.get("checkboxSelection") for d in defs)
+    by = {d["field"]: d for d in defs}
+    # viewers can still tick one row to open it in the item form, but not select all
+    assert by["code"]["checkboxSelection"] and not by["code"]["headerCheckboxSelection"]
+    assert sum(1 for d in defs if d.get("checkboxSelection")) == 1
     assert not any(d.get("hide") for d in defs if d["field"].startswith("_"))
 
 
@@ -107,10 +116,12 @@ def test_parse_path_routes():
     assert parse_path("/") == ("home", None, None)
     assert parse_path(None) == ("home", None, None)
     assert parse_path("/f/finance__cost/cost_centres") == ("form", "finance__cost", "cost_centres")
-    assert parse_path("/d/hr__reference") == ("domain", "hr__reference", None)
+    assert parse_path("/fn/hr__reference") == ("function", "hr__reference", None)
     assert parse_path("/new-form") == ("new-form", None, None)
-    assert parse_path("/new-domain") == ("new-domain", None, None)
-    assert parse_path("/f/only-domain") == ("home", None, None)
+    assert parse_path("/new-function") == ("new-function", None, None)
+    assert parse_path("/domains") == ("domains", None, None)
+    assert parse_path("/d/hr__reference") == ("home", None, None)  # old address, no longer routed
+    assert parse_path("/f/only-function") == ("home", None, None)
     assert parse_path("/f/a%20b/c") == ("form", "a b", "c")
 
 

@@ -452,7 +452,7 @@ def test_map_frame_to_form_prefers_exact_header_over_sanitised():
 
 def test_end_to_end_upload_round_trip(backend, admin):
     """parse_file -> coerce_frame -> create_form(rows) -> read_rows."""
-    from rdm.models import DomainDef
+    from rdm.models import FunctionDef
 
     parsed = parse_file(xlsx_bytes(("Catalogue", _catalogue_frame())), "products.xlsx", sheet="Catalogue")
     for c in parsed.columns:
@@ -463,7 +463,7 @@ def test_end_to_end_upload_round_trip(backend, admin):
             c.nullable = False
     rows, issues = coerce_frame(parsed.raw, parsed.columns, parsed.source_names)
     assert issues == []
-    backend.create_domain(DomainDef("dom"), admin)
+    backend.create_function(FunctionDef("dom"), admin)
     form = backend.create_form(FormDef("dom", "catalogue", columns=parsed.columns), admin, rows)
     assert form.row_count == 10
     assert form.column("category").options == ["Hardware", "Service", "Software"]

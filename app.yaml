@@ -39,10 +39,6 @@ env:
   - name: RDM_CATALOG
     value: "_forms"
 
-  # Streamlit telemetry off. The Apps runtime already sets this to "false"; it is repeated
-  # (with the same value) so that `databricks apps run-local` and a plain `python app.py`
-  # behave identically. Never set it to anything else.
-
   # Optional tuning - defaults live in rdm.config.Settings:
   # - name: RDM_MAX_ROWS            # rows loaded into the grid per form (default 5000)
   #   value: "5000"

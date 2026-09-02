@@ -108,9 +108,11 @@ def column_defs(
         if c.is_key:
             d["pinned"] = "left"
             d["headerClass"] = "rdm-key-header"
-        if first_user_column and editable:
+        if first_user_column:
+            # Row selection drives "Delete selected", "Bulk update" and the item form; viewers
+            # can select a single row (to open it), editors many.
             d["checkboxSelection"] = True
-            d["headerCheckboxSelection"] = True
+            d["headerCheckboxSelection"] = editable
             first_user_column = False
         t = c.data_type
         if t is DataType.STRING and c.options:
@@ -195,9 +197,15 @@ def row_class_rules() -> dict[str, str]:
     return {NEW_ROW_CLASS: f"params.data.{NEW_FLAG}"}
 
 
-def history_column_defs(form: FormDef) -> list[dict[str, Any]]:
+def history_column_defs(form: FormDef, selectable: bool = False) -> list[dict[str, Any]]:
     defs = [
-        {"field": "version", "headerName": "#", "maxWidth": 80, "type": "numericColumn"},
+        {
+            "field": "version",
+            "headerName": "#",
+            "maxWidth": 90,
+            "type": "numericColumn",
+            "checkboxSelection": selectable,
+        },
         {"field": "changed_at", "headerName": "When", "minWidth": 160},
         {"field": "changed_by", "headerName": "By", "minWidth": 160},
         {"field": "change_type", "headerName": "Change", "maxWidth": 110},

@@ -1,7 +1,8 @@
 """Domain model shared by the UI, the services and every backend.
 
-Nothing in this module knows about SQL or Streamlit. Backends translate these objects
-into their own DDL/DML; the UI renders them.
+Nothing in this module knows about SQL or Dash. The hierarchy is *domain* (a business
+classifier maintained by global admins) > *function* (a Unity Catalog schema) > *form* (a
+Delta table). Backends translate these objects into their own DDL/DML; the UI renders them.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from typing import Any
 # Naming rules
 # --------------------------------------------------------------------------------------
 
-#: Identifiers (domains, forms, columns) are lower_snake_case, max 63 chars. This is the
+#: Identifiers (domains, functions, forms, columns) are lower_snake_case, max 63 chars. This is the
 #: intersection of what Unity Catalog and DuckDB accept without quoting surprises.
 IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 MAX_IDENTIFIER_LENGTH = 63
@@ -153,7 +154,7 @@ def sanitize_identifier(raw: Any, fallback: str = "column") -> str:
     text = "" if raw is None else str(raw)
     text = text.strip().lower()
     text = re.sub(r"[^a-z0-9_]+", "_", text)
-    # keep deliberate double underscores (domain convention <function>__<area>), fold longer runs
+    # keep deliberate double underscores (function convention <domain>__<area>), fold longer runs
     text = re.sub(r"_{3,}", "__", text).strip("_")
     if not text:
         text = fallback
@@ -225,7 +226,7 @@ DEFAULT_DECIMAL_SCALE = 4
 
 
 class Role(enum.IntEnum):
-    """Access tier for a domain. Ordered so that ``role >= Role.EDITOR`` reads naturally."""
+    """Access tier for a function (schema). Ordered so that ``role >= Role.EDITOR`` reads naturally."""
 
     NONE = 0
     VIEWER = 1
@@ -238,7 +239,7 @@ class Role(enum.IntEnum):
             Role.NONE: "No access",
             Role.VIEWER: "Viewer",
             Role.EDITOR: "Editor",
-            Role.ADMIN: "Domain admin",
+            Role.ADMIN: "Function admin",
         }[self]
 
     @property
@@ -283,47 +284,58 @@ GLOBAL_ADMIN_LABEL = "Global admin"
 class Permissions:
     """Effective access of one user, as resolved by the backend.
 
-    * ``domain_roles`` - role per domain (schema). ``Role.ADMIN`` is a *domain admin*: creates
-      and administers forms inside that domain.
-    * ``is_global_admin`` - catalog-level rights (create domains, grant access, see the
-      technical documentation). In Unity Catalog this is CREATE SCHEMA / MANAGE on the catalog.
+    * ``function_roles`` - role per function (schema). ``Role.ADMIN`` is a *function admin*:
+      creates and administers forms inside that function and grants roles on it.
+    * ``is_global_admin`` - catalog-level rights: create and delete functions, delete forms,
+      administer the domain list, see the technical documentation. In Unity Catalog this is
+      CREATE SCHEMA / MANAGE on the catalog (or catalog ownership).
     """
 
-    domain_roles: dict[str, Role] = field(default_factory=dict)
+    function_roles: dict[str, Role] = field(default_factory=dict)
     is_global_admin: bool = False
 
     @property
-    def can_create_domain(self) -> bool:
+    def can_create_function(self) -> bool:
         return self.is_global_admin
 
-    def role_for(self, domain: str) -> Role:
-        return self.domain_roles.get(domain, Role.NONE)
+    @property
+    def can_manage_domains(self) -> bool:
+        """Only global admins maintain the list of domains (the classifier above functions)."""
+        return self.is_global_admin
 
     @property
-    def visible_domains(self) -> list[str]:
-        return sorted(d for d, r in self.domain_roles.items() if r.can_view)
+    def can_delete(self) -> bool:
+        """Deleting functions (schemas) and forms (tables) is reserved to global admins."""
+        return self.is_global_admin
+
+    def role_for(self, function: str) -> Role:
+        return self.function_roles.get(function, Role.NONE)
 
     @property
-    def admin_domains(self) -> list[str]:
-        return sorted(d for d, r in self.domain_roles.items() if r.can_admin)
+    def visible_functions(self) -> list[str]:
+        return sorted(f for f, r in self.function_roles.items() if r.can_view)
+
+    @property
+    def admin_functions(self) -> list[str]:
+        return sorted(f for f, r in self.function_roles.items() if r.can_admin)
 
     @property
     def is_admin_anywhere(self) -> bool:
-        return self.is_global_admin or any(r.can_admin for r in self.domain_roles.values())
+        return self.is_global_admin or any(r.can_admin for r in self.function_roles.values())
 
     @property
     def summary(self) -> str:
-        """Short human description, e.g. 'Global admin' or 'Domain admin of 2, editor of 1'."""
+        """Short human description, e.g. 'Global admin' or 'Function admin of 2, editor of 1'."""
         if self.is_global_admin:
             return GLOBAL_ADMIN_LABEL
         counts = {}
-        for r in self.domain_roles.values():
+        for r in self.function_roles.values():
             if r.can_view:
                 counts[r] = counts.get(r, 0) + 1
         if not counts:
             return "No access yet"
         parts = [
-            f"{r.label.lower()} of {n} domain{'s' if n != 1 else ''}"
+            f"{r.label.lower()} of {n} function{'s' if n != 1 else ''}"
             for r, n in sorted(counts.items(), key=lambda x: -x[0])
         ]
         return ", ".join(parts).capitalize()
@@ -400,15 +412,23 @@ def system_columns() -> list[ColumnDef]:
     ]
 
 
+#: Functions that have not been assigned to a domain are grouped under this label.
+UNASSIGNED_DOMAIN_LABEL = "Unassigned"
+
+
 @dataclass
 class DomainDef:
+    """A domain: the top of the hierarchy, a business classifier that groups functions.
+
+    Domains mirror the organisation's data domains (the Databricks domain classification);
+    they are a registry entry maintained by global admins, not a Unity Catalog securable.
+    """
+
     name: str
     display_name: str = ""
     description: str = ""
     owner: str = ""
-    doc_link: str = ""  # project documentation URL
-    form_count: int | None = None
-    properties: dict[str, str] = field(default_factory=dict)
+    function_count: int | None = None
 
     @property
     def title(self) -> str:
@@ -416,6 +436,34 @@ class DomainDef:
 
     def validate(self) -> DomainDef:
         validate_identifier(self.name, "domain name", allow_leading_underscore=False)
+        return self
+
+
+@dataclass
+class FunctionDef:
+    """A function: one Unity Catalog schema holding the forms of a business function.
+
+    Every function belongs to at most one domain (``domain`` is the domain name, empty when
+    the function has not been assigned yet).
+    """
+
+    name: str
+    display_name: str = ""
+    description: str = ""
+    owner: str = ""
+    doc_link: str = ""  # project documentation URL
+    domain: str = ""  # name of the domain the function is assigned to
+    form_count: int | None = None
+    properties: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def title(self) -> str:
+        return self.display_name or humanize(self.name)
+
+    def validate(self) -> FunctionDef:
+        validate_identifier(self.name, "function name", allow_leading_underscore=False)
+        if self.domain:
+            validate_identifier(self.domain, "domain name", allow_leading_underscore=False)
         if self.doc_link and not self.doc_link.lower().startswith(("http://", "https://")):
             raise ValueError("The documentation link must start with http:// or https://")
         return self
@@ -427,14 +475,16 @@ PROP_DISPLAY_NAME = "rdm.display_name"
 PROP_OWNER = "rdm.owner"
 PROP_COLUMN_CONFIG = "rdm.column_config"
 PROP_DOC_LINK = "rdm.doc_link"
+PROP_DOMAIN = "rdm.domain"
 TAG_DISPLAY_NAME = "rdm_display_name"
 TAG_OWNER = "rdm_owner"
 TAG_FORM = "rdm_form"
+TAG_DOMAIN = "rdm_domain"
 
 
 @dataclass
 class FormDef:
-    domain: str
+    function: str  # the function (schema) the form lives in
     name: str
     display_name: str = ""
     description: str = ""
@@ -449,7 +499,7 @@ class FormDef:
 
     @property
     def full_name(self) -> str:
-        return f"{self.domain}.{self.name}"
+        return f"{self.function}.{self.name}"
 
     @property
     def title(self) -> str:
@@ -480,7 +530,7 @@ class FormDef:
         return None
 
     def validate(self) -> FormDef:
-        validate_identifier(self.domain, "domain name", allow_leading_underscore=False)
+        validate_identifier(self.function, "function name", allow_leading_underscore=False)
         validate_identifier(self.name, "form name", allow_leading_underscore=False)
         seen: set[str] = set()
         for c in self.columns:

@@ -1,13 +1,13 @@
 """Authentication providers.
 
-* :class:`MockAuthProvider` - three local personas (Administrator, Editor, Viewer) selected in
-  the sidebar or through ``RDM_PERSONA``.
+* :class:`MockAuthProvider` - four local personas (Global admin, Function admin, Editor,
+  Viewer) selected in the header or through ``RDM_PERSONA``.
 * :class:`DatabricksAuthProvider` - reads the identity headers Databricks Apps injects
   (``X-Forwarded-Email``, ``X-Forwarded-Preferred-Username``, ``X-Forwarded-User``) and,
   when user authorization is enabled, the user's access token
   (``X-Forwarded-Access-Token``) so that SQL runs on behalf of the user.
 
-Authorisation (which role a user has on a domain) is *not* decided here: the backend
+Authorisation (which role a user has on a function) is *not* decided here: the backend
 resolves it from grants (``DatabaseBackend.get_permissions``).
 """
 
@@ -50,7 +50,17 @@ PERSONAS: dict[str, Persona] = {
             email="alice.admin@example.org",
             groups=("rdm_admins", "everyone"),
         ),
-        "Global admin - creates domains, grants access, creates and edits forms and data everywhere",
+        "Global admin - administers domains and functions, deletes forms, grants access, edits everywhere",
+    ),
+    "function_admin": Persona(
+        "function_admin",
+        User(
+            username="fiona.functionadmin@example.org",
+            display_name="Fiona Function-admin",
+            email="fiona.functionadmin@example.org",
+            groups=("finance_admins", "student_readers", "everyone"),
+        ),
+        "Function admin - creates forms and grants access in Finance (cannot delete), reads Student",
     ),
     "editor": Persona(
         "editor",
@@ -60,7 +70,7 @@ PERSONAS: dict[str, Persona] = {
             email="eddie.editor@example.org",
             groups=("student_stewards", "finance_readers", "everyone"),
         ),
-        "Editor - edits rows in the Student domain, reads Finance, no HR access",
+        "Editor - edits rows in the Student function, reads Finance, no HR access",
     ),
     "viewer": Persona(
         "viewer",
@@ -76,7 +86,7 @@ PERSONAS: dict[str, Persona] = {
 
 
 class AuthProvider(ABC):
-    """Resolves the signed-in user for the current Streamlit session."""
+    """Resolves the signed-in user for the current request."""
 
     name: str = "abstract"
 
@@ -117,7 +127,7 @@ class MockAuthProvider(AuthProvider):
 class DatabricksAuthProvider(AuthProvider):
     """Identity from the Databricks Apps reverse proxy headers.
 
-    ``headers`` is injected for testability; in the app it is ``st.context.headers``.
+    ``headers_getter`` is injected for testability; in the app it reads ``flask.request.headers``.
     Group membership is fetched with the Databricks SDK using the user's token when user
     authorization is enabled (default scope ``iam.current-user:read``), otherwise with the
     app service principal (needs permission to read users). Results are cached briefly.
@@ -133,7 +143,7 @@ class DatabricksAuthProvider(AuthProvider):
     def _headers(self) -> Mapping[str, str]:
         try:
             headers = self._headers_getter()
-        except Exception:  # pragma: no cover - only outside a Streamlit session
+        except Exception:  # pragma: no cover - only outside a request context
             log.exception("Could not read request headers")
             return {}
         return headers or {}

@@ -22,6 +22,7 @@ from rdm.models import (
     DataType,
     DomainDef,
     FormDef,
+    FunctionDef,
     Permissions,
     Role,
     RowDelete,
@@ -118,8 +119,8 @@ def test_validate_identifier_leading_underscore_is_reserved_for_system_names():
 
 
 def test_validate_identifier_error_mentions_kind():
-    with pytest.raises(ValueError, match="Invalid domain name 'Bad'"):
-        validate_identifier("Bad", "domain name")
+    with pytest.raises(ValueError, match="Invalid function name 'Bad'"):
+        validate_identifier("Bad", "function name")
 
 
 @pytest.mark.parametrize(
@@ -196,7 +197,7 @@ def test_role_ordering_and_capabilities():
     assert (Role.VIEWER.can_view, Role.VIEWER.can_edit, Role.VIEWER.can_admin) == (True, False, False)
     assert (Role.EDITOR.can_view, Role.EDITOR.can_edit, Role.EDITOR.can_admin) == (True, True, False)
     assert (Role.ADMIN.can_view, Role.ADMIN.can_edit, Role.ADMIN.can_admin) == (True, True, True)
-    assert [r.label for r in Role] == ["No access", "Viewer", "Editor", "Domain admin"]
+    assert [r.label for r in Role] == ["No access", "Viewer", "Editor", "Function admin"]
     assert Role["EDITOR"] is Role.EDITOR
 
 
@@ -218,24 +219,32 @@ def test_permissions_helpers():
     p = Permissions({"b": Role.VIEWER, "a": Role.ADMIN, "c": Role.NONE, "d": Role.EDITOR})
     assert p.role_for("a") is Role.ADMIN
     assert p.role_for("missing") is Role.NONE
-    assert p.visible_domains == ["a", "b", "d"]
-    assert p.admin_domains == ["a"]
+    assert p.visible_functions == ["a", "b", "d"]
+    assert p.admin_functions == ["a"]
     assert p.is_admin_anywhere
 
 
 def test_permissions_defaults_and_catalog_admin():
-    assert Permissions().visible_domains == []
+    assert Permissions().visible_functions == []
     assert not Permissions().is_admin_anywhere
     assert not Permissions({"a": Role.EDITOR}).is_admin_anywhere
     assert Permissions(is_global_admin=True).is_admin_anywhere
     assert (
-        Permissions(is_global_admin=True).can_create_domain
+        Permissions(is_global_admin=True).can_create_function
         and Permissions(is_global_admin=True).summary == "Global admin"
     )
     assert (
-        Permissions({"a": Role.EDITOR, "b": Role.VIEWER, "c": Role.EDITOR}).summary
-        == "Editor of 2 domains, viewer of 1 domain"
+        Permissions(is_global_admin=True).can_manage_domains and Permissions(is_global_admin=True).can_delete
     )
+    assert (
+        not Permissions({"a": Role.ADMIN}).can_delete
+        and not Permissions({"a": Role.ADMIN}).can_manage_domains
+    )
+    assert (
+        Permissions({"a": Role.EDITOR, "b": Role.VIEWER, "c": Role.EDITOR}).summary
+        == "Editor of 2 functions, viewer of 1 function"
+    )
+    assert Permissions({"a": Role.ADMIN}).summary == "Function admin of 1 function"
     assert Permissions().summary == "No access yet"
 
 
@@ -317,18 +326,34 @@ def test_system_columns_definition():
 # --------------------------------------------------------------------------------------
 
 
-def test_domain_title_and_validate():
-    assert DomainDef("hr__reference").title == "Hr / Reference"
-    assert DomainDef("hr__reference", display_name="HR Reference").title == "HR Reference"
-    assert DomainDef("finance").validate().name == "finance"
+def test_function_title_and_validate():
+    assert FunctionDef("hr__reference").title == "Hr / Reference"
+    assert FunctionDef("hr__reference", display_name="HR Reference").title == "HR Reference"
+    assert FunctionDef("finance").validate().name == "finance"
+    assert FunctionDef("finance", domain="people").validate().domain == "people"
     with pytest.raises(ValueError, match="reserved for system use"):
-        DomainDef("_rdm_meta").validate()
+        FunctionDef("_rdm_meta").validate()
+    with pytest.raises(ValueError, match="Invalid function name"):
+        FunctionDef("Finance Dept").validate()
     with pytest.raises(ValueError, match="Invalid domain name"):
-        DomainDef("Finance Dept").validate()
+        FunctionDef("finance", domain="Bad Domain").validate()
+    with pytest.raises(ValueError, match="http"):
+        FunctionDef("finance", doc_link="wiki/x").validate()
 
 
-def _form(*columns: ColumnDef, domain: str = "dom", name: str = "frm", **kw) -> FormDef:
-    return FormDef(domain, name, columns=list(columns), **kw)
+def test_domain_title_and_validate():
+    assert DomainDef("student").title == "Student"
+    assert DomainDef("student", display_name="Student Experience").title == "Student Experience"
+    assert DomainDef("people", "People", "HR data", "hr@example.org").validate().owner == "hr@example.org"
+    assert DomainDef("x").function_count is None
+    with pytest.raises(ValueError, match="Invalid domain name"):
+        DomainDef("Student Domain").validate()
+    with pytest.raises(ValueError, match="reserved for system use"):
+        DomainDef("_catalog").validate()
+
+
+def _form(*columns: ColumnDef, function: str = "dom", name: str = "frm", **kw) -> FormDef:
+    return FormDef(function, name, columns=list(columns), **kw)
 
 
 def test_form_properties():
@@ -368,17 +393,17 @@ def test_form_validate_requires_a_user_column():
 
 
 @pytest.mark.parametrize(
-    ("domain", "name", "message"),
+    ("function", "name", "message"),
     [
-        ("_meta", "frm", "Invalid domain name '_meta'"),
-        ("Dom", "frm", "Invalid domain name 'Dom'"),
+        ("_meta", "frm", "Invalid function name '_meta'"),
+        ("Dom", "frm", "Invalid function name 'Dom'"),
         ("dom", "_frm", "Invalid form name '_frm'"),
         ("dom", "my form", "Invalid form name 'my form'"),
     ],
 )
-def test_form_validate_reserved_or_bad_names(domain, name, message):
+def test_form_validate_reserved_or_bad_names(function, name, message):
     with pytest.raises(ValueError, match=message):
-        _form(ColumnDef("code"), domain=domain, name=name).validate()
+        _form(ColumnDef("code"), function=function, name=name).validate()
 
 
 def test_form_validate_propagates_column_errors():

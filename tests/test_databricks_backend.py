@@ -19,6 +19,7 @@ from rdm.models import (
     DataType,
     DomainDef,
     FormDef,
+    FunctionDef,
     Role,
     RowDelete,
     RowInsert,
@@ -163,7 +164,15 @@ def test_create_form_emits_single_create_table_with_features_and_escaped_comment
     assert statements(conn, r"SET TAGS")  # tags are set (best effort)
 
 
-def test_create_domain_issues_create_schema_and_registers_it():
+FUNCTION_REGISTRY_COLS = ["name", "domain_name", "display_name", "description", "owner", "doc_link"]
+DOMAIN_REGISTRY = (
+    r"SELECT name, display_name, description, owner FROM `_forms`.`_catalog`.`domains`",
+    ["name", "display_name", "description", "owner"],
+    [("research", "Research", "Research data", "r@example.org")],
+)
+
+
+def test_create_function_issues_create_schema_with_domain_and_registers_it():
     responses = [
         (
             r"schemata.*WHERE catalog_name = :catalog ORDER BY",
@@ -171,34 +180,133 @@ def test_create_domain_issues_create_schema_and_registers_it():
             [("research__rimu", "RIMU lists", "alice")],
         ),
         (
-            r"SELECT name, display_name, description, owner, doc_link FROM",
-            ["name", "display_name", "description", "owner", "doc_link"],
-            [("research__rimu", "Research - RIMU", "RIMU lists", "r@example.org", "https://wiki/rimu")],
+            r"SELECT name, domain_name, display_name, description, owner, doc_link FROM",
+            FUNCTION_REGISTRY_COLS,
+            [
+                (
+                    "research__rimu",
+                    "research",
+                    "Research - RIMU",
+                    "RIMU lists",
+                    "r@example.org",
+                    "https://wiki/rimu",
+                )
+            ],
         ),
+        DOMAIN_REGISTRY,
     ]
     b, conn = make_backend(responses)
-    domain = b.create_domain(
-        DomainDef(
+    function = b.create_function(
+        FunctionDef(
             "research__rimu",
             display_name="Research - RIMU",
             description="RIMU lists",
             owner="r@example.org",
             doc_link="https://wiki/rimu",
+            domain="research",
         ),
         ADMIN,
     )
     [(ddl, _)] = statements(conn, r"^CREATE SCHEMA")
     assert ddl.startswith("CREATE SCHEMA `_forms`.`research__rimu` COMMENT 'RIMU lists' WITH DBPROPERTIES (")
     assert "'rdm.doc_link' = 'https://wiki/rimu'" in ddl and "'rdm.display_name' = 'Research - RIMU'" in ddl
-    assert statements(conn, r"ALTER SCHEMA .* SET TAGS")
-    [(merge, params)] = statements(conn, r"^MERGE INTO `_forms`.`_catalog`.`domains`")
+    assert "'rdm.domain' = 'research'" in ddl
+    [(tags, _)] = statements(conn, r"ALTER SCHEMA .* SET TAGS")
+    assert "'rdm_domain' = 'research'" in tags
+    [(merge, params)] = statements(conn, r"^MERGE INTO `_forms`.`_catalog`.`functions`")
     assert params["doc_link"] == "https://wiki/rimu" and params["name"] == "research__rimu"
-    assert domain.doc_link == "https://wiki/rimu" and domain.display_name == "Research - RIMU"
+    assert params["domain_name"] == "research"
+    assert function.doc_link == "https://wiki/rimu" and function.display_name == "Research - RIMU"
+    assert function.domain == "research"
+    # an unknown domain is refused before any DDL runs
+    conn.calls.clear()
+    with pytest.raises(NotFoundError, match="Domain 'ghost' does not exist"):
+        b.create_function(FunctionDef("x", domain="ghost"), ADMIN)
+    assert not statements(conn, r"^CREATE SCHEMA")
+
+
+def test_function_domain_falls_back_to_the_schema_tag():
+    responses = [
+        (
+            r"schemata.*WHERE catalog_name = :catalog ORDER BY",
+            ["schema_name", "comment", "schema_owner"],
+            [("hr__reference", "", "alice"), ("information_schema", "", "sys")],
+        ),
+        (
+            r"schema_tags",
+            ["schema_name", "tag_name", "tag_value"],
+            [("hr__reference", "rdm_domain", "people"), ("hr__reference", "rdm_display_name", "HR")],
+        ),
+    ]
+    b, _ = make_backend(responses)
+    [f] = b.list_functions()
+    assert f.name == "hr__reference" and f.domain == "people" and f.display_name == "HR"
+
+
+def test_domain_registry_crud_and_delete_guard():
+    responses = [
+        DOMAIN_REGISTRY,
+        (
+            r"schemata.*WHERE catalog_name = :catalog ORDER BY",
+            ["schema_name", "comment", "schema_owner"],
+            [("research__rimu", "", "alice")],
+        ),
+        (
+            r"SELECT name, domain_name, display_name, description, owner, doc_link FROM",
+            FUNCTION_REGISTRY_COLS,
+            [("research__rimu", "research", "", "", "", "")],
+        ),
+    ]
+    b, conn = make_backend(responses)
+    [d] = b.list_domains()
+    assert d.name == "research" and d.title == "Research" and d.function_count == 1
+    assert b.get_domain("research").owner == "r@example.org"
+    with pytest.raises(NotFoundError):
+        b.get_domain("ghost")
+    with pytest.raises(BackendError, match="already exists"):
+        b.create_domain(DomainDef("research"), ADMIN)
+    with pytest.raises(BackendError, match="still has 1 function"):
+        b.delete_domain("research", ADMIN)
+    with pytest.raises(NotFoundError):
+        b.delete_domain("ghost", ADMIN)
+    with pytest.raises(NotFoundError):
+        b.update_domain(DomainDef("ghost"), ADMIN)
+    b.update_domain(DomainDef("research", "Research & Innovation", "d", "o@example.org"), ADMIN)
+    [(merge, params)] = statements(conn, r"^MERGE INTO `_forms`.`_catalog`.`domains`")
+    assert params["display_name"] == "Research & Innovation" and params["owner"] == "o@example.org"
+    assert "doc_link" not in params
+    conn.calls.clear()
+    # creating a new domain writes the registry, strictly (a failure surfaces)
+    b, conn = make_backend(
+        [DOMAIN_REGISTRY, (r"^MERGE INTO", None, lambda s, p: (_ for _ in ()).throw(RuntimeError("boom")))]
+    )
+    with pytest.raises(BackendError, match="boom"):
+        b.create_domain(DomainDef("student", "Student"), ADMIN)
+
+
+def test_delete_domain_deletes_from_the_registry():
+    responses = [DOMAIN_REGISTRY, (r"schemata.*ORDER BY", ["schema_name", "comment", "schema_owner"], [])]
+    b, conn = make_backend(responses)
+    b.delete_domain("research", ADMIN)
+    [(sql, params)] = statements(conn, r"^DELETE FROM `_forms`.`_catalog`.`domains`")
+    assert params == {"name": "research"}
+
+
+def test_drop_function_refuses_non_empty_schema_then_drops_and_unregisters():
+    b, conn = make_backend([(r"SELECT count\(\*\) FROM .*information_schema.*tables", ["c"], [(2,)])])
+    with pytest.raises(BackendError, match="still has 2 form"):
+        b.drop_function(FunctionDef("finance__cost"), ADMIN)
+    assert not statements(conn, r"^DROP SCHEMA")
+    b, conn = make_backend([(r"SELECT count\(\*\) FROM .*information_schema.*tables", ["c"], [(0,)])])
+    b.drop_function(FunctionDef("finance__cost"), ADMIN)
+    assert statements(conn, r"^DROP SCHEMA `_forms`.`finance__cost`$")
+    [(sql, params)] = statements(conn, r"^DELETE FROM `_forms`.`_catalog`.`functions`")
+    assert params == {"name": "finance__cost"}
 
 
 def test_grant_domain_role_revokes_then_grants_group_privileges():
     b, conn = make_backend()
-    b.grant_domain_role("finance__cost", "finance stewards", Role.EDITOR, ADMIN)
+    b.grant_function_role("finance__cost", "finance stewards", Role.EDITOR, ADMIN)
     [(revoke, _)] = statements(conn, r"^REVOKE")
     assert (
         revoke
@@ -211,12 +319,12 @@ def test_grant_domain_role_revokes_then_grants_group_privileges():
     )
     assert grants[1] == "GRANT USE CATALOG ON CATALOG `_forms` TO `finance stewards`"
     conn.calls.clear()
-    b.grant_domain_role("finance__cost", "finance_readers", Role.NONE, ADMIN)
+    b.grant_function_role("finance__cost", "finance_readers", Role.NONE, ADMIN)
     assert len(statements(conn, r"^REVOKE")) == 1 and not statements(conn, r"^GRANT")
     with pytest.raises(BackendError, match="groups only"):
-        b.grant_domain_role("finance__cost", "someone@example.org", Role.VIEWER, ADMIN)
+        b.grant_function_role("finance__cost", "someone@example.org", Role.VIEWER, ADMIN)
     with pytest.raises(BackendError, match="group is required"):
-        b.grant_domain_role("finance__cost", " ", Role.VIEWER, ADMIN)
+        b.grant_function_role("finance__cost", " ", Role.VIEWER, ADMIN)
 
 
 def test_drop_column_and_add_column_statements():
@@ -430,6 +538,10 @@ def test_audit_table_is_created_on_demand_and_history_reads_it():
     assert len(statements(conn, r"^INSERT INTO `_forms`.`_catalog`")) == 2
     df = b.get_history(form)
     assert list(df.columns)[:4] == ["version", "changed_at", "changed_by", "change_type"] and df.empty
+    # the per-row history adds a bound row filter
+    b.get_history(form, limit=50, row_id="r1")
+    sql, params = statements(conn, r"^SELECT changed_at")[-1]
+    assert "AND row_id = :row_id" in sql and params["row_id"] == "r1" and sql.endswith("LIMIT 50")
 
 
 # -- authorisation ---------------------------------------------------------------------------
@@ -454,7 +566,7 @@ def test_get_permissions_under_user_authorization_uses_current_user_and_group_me
     ]
     b, conn = make_backend(responses)
     perms = b.get_permissions(User("alice@example.org"))
-    assert perms.domain_roles == {"finance__cost": Role.EDITOR, "hr__reference": Role.ADMIN}
+    assert perms.function_roles == {"finance__cost": Role.EDITOR, "hr__reference": Role.ADMIN}
     assert perms.is_global_admin is False
     assert statements(conn, r"is_account_group_member\('data_platform_admins'\)")
     sql = statements(conn, r"schema_privileges")[0][0]
@@ -475,7 +587,7 @@ def test_get_permissions_in_service_principal_mode_uses_resolved_principals():
     ]
     b, conn = make_backend(responses, token=None)
     perms = b.get_permissions(User("bob@example.org", groups=("finance_readers",)))
-    assert perms.domain_roles == {"finance__cost": Role.ADMIN} and perms.is_global_admin
+    assert perms.function_roles == {"finance__cost": Role.ADMIN} and perms.is_global_admin
     sql, params = statements(conn, r"schema_privileges")[0]
     assert "grantee IN (:g0, :g1)" in sql and set(params.values()) >= {"bob@example.org", "finance_readers"}
 

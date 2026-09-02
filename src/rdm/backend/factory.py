@@ -43,10 +43,10 @@ def create_auth_provider(
         return MockAuthProvider(default_persona=settings.persona)
     if settings.auth == "databricks":
         if headers_getter is None:
-            import streamlit as st
+            import flask
 
             def headers_getter() -> Mapping[str, Any]:  # type: ignore[no-redef]
-                return st.context.headers
+                return flask.request.headers
 
         return DatabricksAuthProvider(headers_getter)
     raise RuntimeError(f"Unknown auth provider '{settings.auth}' (expected 'mock' or 'databricks').")

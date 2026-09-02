@@ -6,8 +6,8 @@ resources:
       name: ${var.app_name}
       description: >-
         Reference Data Manager - data stewards browse and edit reference lists stored as
-        Unity Catalog Delta tables (one schema per domain, one table per form), with change
-        history and role-based access derived from Unity Catalog grants.
+        Unity Catalog Delta tables (one schema per function, grouped into domains, one table
+        per form), with change history and role-based access derived from Unity Catalog grants.
       source_code_path: ../
       compute_size: MEDIUM
 
