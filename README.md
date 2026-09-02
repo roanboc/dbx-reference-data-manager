@@ -23,7 +23,8 @@ domains and forms at runtime and renders editable grids from the table definitio
   infrastructure; `DatabricksBackend` runs on a SQL warehouse with on-behalf-of-user
   authorization.
 
-Framework: **Dash + Dash AG Grid + Dash Mantine Components**. The rationale (versus
+Start with [docs/FUNCTIONAL_DESIGN.md](docs/FUNCTIONAL_DESIGN.md) for the business, data and
+process view. Framework: **Dash + Dash AG Grid + Dash Mantine Components**. The rationale (versus
 Streamlit, which was implemented first and is kept in git history) is in
 [docs/FRAMEWORK_DECISION.md](docs/FRAMEWORK_DECISION.md).
 
@@ -59,7 +60,8 @@ src/rdm/
   services/               FormService, CatalogService, Draft (row-id edit tracking), Excel import
   ui/                     Dash app: shell, routing, pages, AG Grid configuration
 tests/                    pytest suite (see docs/DESIGN.md §9 for the testing strategy)
-docs/                     DESIGN.md, FRAMEWORK_DECISION.md, DEPLOYMENT.md
+docs/                     FUNCTIONAL_DESIGN.md (business, data, process), DESIGN.md (technical),
+                          FRAMEWORK_DECISION.md, DEPLOYMENT.md
 ```
 
 ## How a save works
