@@ -1,0 +1,70 @@
+# Domain schemas of the reference-data catalog. One schema per business domain, named
+# <area>__<domain> (lowercase, matches the app's identifier rule ^[a-z][a-z0-9_]{0,62}$).
+# These three mirror the demo domains seeded locally by scripts/seed_demo.py (src/rdm/demo.py).
+#
+# Role mapping (docs/DESIGN.md §5) - grants go to account-level groups, never to users:
+#   Viewer        USE_SCHEMA, SELECT                         (+ USE_CATALOG from catalog.yml)
+#   Editor        Viewer + MODIFY
+#   Administrator Editor + CREATE_TABLE + MANAGE + APPLY_TAG
+#
+# The catalog administrators group already inherits the Administrator set from the catalog
+# (resources/catalog.yml); it is repeated on every schema so each domain is self-describing
+# and keeps working if the catalog grants are tightened. To delegate administration of one
+# domain, add a domain-specific group (e.g. finance_admins) with the same privilege list.
+#
+# Notes
+#   * `properties` carry the display name and owner the app shows in the sidebar
+#     (rdm.display_name / rdm.owner, see rdm.models). The app additionally sets schema tags
+#     (rdm_display_name, rdm_owner) for domains it creates itself; the bundle schema resource
+#     has no tags field, so tags for these schemas can be added later in Catalog Explorer.
+#   * In target `dev` (mode: development) the CLI prefixes each schema name with
+#     dev_<your-short-name>_, e.g. dev_alice_student__survey_service_improvement.
+#   * Grants are managed as the complete grant list of each schema (see catalog.yml).
+#   * Delete a domain by removing its block here (the CLI destroys the schema on the next
+#     deploy) - only after its tables have been migrated or dropped.
+resources:
+  schemas:
+    student_survey_service_improvement:
+      name: student__survey_service_improvement
+      catalog_name: ${resources.catalogs.forms.name}
+      comment: Reference lists used by the student survey and service improvement programme.
+      properties:
+        rdm.display_name: "Student Survey & Service Improvement"
+        rdm.owner: survey.team@example.org
+      grants:
+        - principal: student_readers          # Viewer
+          privileges: [USE_SCHEMA, SELECT]
+        - principal: student_stewards         # Editor
+          privileges: [USE_SCHEMA, SELECT, MODIFY]
+        - principal: ${var.admin_group}       # Administrator
+          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE, APPLY_TAG]
+
+    finance_cost_management:
+      name: finance__cost_management
+      catalog_name: ${resources.catalogs.forms.name}
+      comment: Cost centres, GL mappings and budget reference data owned by Finance.
+      properties:
+        rdm.display_name: "Finance - Cost Management"
+        rdm.owner: finance.data@example.org
+      grants:
+        - principal: finance_readers          # Viewer
+          privileges: [USE_SCHEMA, SELECT]
+        - principal: finance_stewards         # Editor
+          privileges: [USE_SCHEMA, SELECT, MODIFY]
+        - principal: ${var.admin_group}       # Administrator
+          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE, APPLY_TAG]
+
+    hr_reference:
+      name: hr__reference
+      catalog_name: ${resources.catalogs.forms.name}
+      comment: People and contract reference lists maintained by HR Systems.
+      properties:
+        rdm.display_name: "HR Reference"
+        rdm.owner: hr.systems@example.org
+      grants:
+        - principal: hr_readers               # Viewer
+          privileges: [USE_SCHEMA, SELECT]
+        - principal: hr_stewards              # Editor
+          privileges: [USE_SCHEMA, SELECT, MODIFY]
+        - principal: ${var.admin_group}       # Administrator
+          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE, APPLY_TAG]

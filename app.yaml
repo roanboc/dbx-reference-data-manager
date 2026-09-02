@@ -1,0 +1,54 @@
+# Databricks Apps runtime configuration for the Reference Data Manager (docs/DESIGN.md §10).
+#
+# Who reads this file
+#   * `databricks apps deploy <app-name> --source-code-path <workspace path>` - deploying the
+#     app without the bundle, and
+#   * `databricks apps run-local` - running the app on your machine against a workspace
+#     (see docs/DEPLOYMENT.md §6).
+#
+# When the app is deployed through the Databricks Asset Bundle (databricks.yml +
+# resources/app.yml) the `config` block of resources/app.yml carries the same command and
+# environment and takes precedence: the CLI materialises it as app.yml inside the deployed
+# source. Keep the two in sync whenever a variable is added.
+#
+# Never set the variables the Databricks Apps runtime injects itself:
+#   DATABRICKS_APP_PORT, DATABRICKS_APP_NAME, DATABRICKS_WORKSPACE_ID, DATABRICKS_HOST,
+#   DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET, STREAMLIT_SERVER_PORT,
+#   STREAMLIT_SERVER_ADDRESS, STREAMLIT_SERVER_HEADLESS,
+#   STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION, STREAMLIT_SERVER_ENABLE_CORS.
+# Secrets never belong here; bind a secret scope as an app resource instead.
+
+command: ["streamlit", "run", "app.py"]
+
+env:
+  # SQL warehouse ID injected from the app resource whose key is `sql-warehouse`
+  # (declared in resources/app.yml; when deploying without the bundle, attach the warehouse
+  # to the app under exactly this resource key). rdm.config.Settings turns it into the
+  # connector http_path /sql/1.0/warehouses/<id>.
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+
+  # Storage backend and identity provider (src/rdm/config.py, src/rdm/backend/factory.py).
+  # RDM_AUTH=databricks reads the X-Forwarded-Email / -Preferred-Username / -User /
+  # -Access-Token headers the Apps reverse proxy adds to every request.
+  - name: RDM_BACKEND
+    value: "databricks"
+  - name: RDM_AUTH
+    value: "databricks"
+
+  # Unity Catalog catalog that holds the domains (schemas) and forms (tables).
+  # Must match the catalog declared in resources/catalog.yml (bundle variable `catalog`).
+  - name: RDM_CATALOG
+    value: "_forms"
+
+  # Streamlit telemetry off. The Apps runtime already sets this to "false"; it is repeated
+  # (with the same value) so that `databricks apps run-local` and a plain `streamlit run`
+  # behave identically. Never set it to anything else.
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+
+  # Optional tuning - defaults live in rdm.config.Settings:
+  # - name: RDM_MAX_ROWS            # rows loaded into the grid per form (default 5000)
+  #   value: "5000"
+  # - name: RDM_METADATA_CACHE_TTL  # seconds navigation metadata is cached (default 60)
+  #   value: "60"

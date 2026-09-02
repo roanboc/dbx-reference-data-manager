@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local data and secrets
+data/*.duckdb
+data/*.duckdb.wal
+.env
+.databricks/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Test artefacts
+test-results/
+screenshots/

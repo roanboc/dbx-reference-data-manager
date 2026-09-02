@@ -1,0 +1,10 @@
+# Runtime dependencies for the Databricks App (and local development).
+# Pinned to the minor version; Databricks Apps installs these with pip on deploy.
+streamlit~=1.63
+pandas~=3.0
+pyarrow~=25.0
+openpyxl~=3.1
+duckdb~=1.5
+databricks-sql-connector~=4.5
+databricks-sdk~=0.133
+python-dotenv~=1.1
