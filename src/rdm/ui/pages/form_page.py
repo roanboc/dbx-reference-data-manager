@@ -467,7 +467,12 @@ def _import_modal(form: FormDef) -> dmc.Modal:
                     accept=".xlsx,.xls,.csv,.tsv",
                 ),
                 dmc.Select(
-                    id=ids.IMPORT_SHEET, label="Sheet", data=[], value=None, style={"display": "none"}
+                    id=ids.IMPORT_SHEET,
+                    label="Sheet",
+                    data=[],
+                    value=None,
+                    style={"display": "none"},
+                    searchable=True,
                 ),
                 html.Div(id=ids.IMPORT_PREVIEW),
                 dmc.Group(
@@ -551,6 +556,7 @@ def _schema_modals(form: FormDef) -> html.Div:
                         dmc.Select(
                             id=ids.DROP_COL_SELECT,
                             label="Column",
+                            searchable=True,
                             data=[
                                 {"value": c.name, "label": f"{humanize(c.name)} ({c.name})"}
                                 for c in form.user_columns
@@ -596,16 +602,30 @@ def history_panel(ctx_: AppContext, form: FormDef) -> Any:
     note = (
         "Backed by the audit table in the catalog (Change Data Feed as fallback)."
         if ctx_.settings.is_databricks
-        else "Locally this is the _rdm_meta.change_log table; in Databricks it is the audit table."
+        else "Locally this is the _catalog.change_log table; in Databricks it is the audit table."
     )
     return dmc.Stack(
         [
-            dmc.Text(
-                "Edits show the row after the change; deletions show the row as it was. " + note,
-                size="xs",
-                c="dimmed",
+            dmc.Group(
+                [
+                    dmc.TextInput(
+                        id=ids.HISTORY_FILTER,
+                        placeholder="Search the history",
+                        leftSection=icon("tabler:search"),
+                        debounce=250,
+                        w=300,
+                        size="sm",
+                    ),
+                    dmc.Text(
+                        "Edits show the row after the change; deletions show the row as it was. " + note,
+                        size="xs",
+                        c="dimmed",
+                    ),
+                ],
+                gap="md",
             ),
             dag.AgGrid(
+                id=ids.HISTORY_GRID,
                 rowData=rows,
                 columnDefs=g.history_column_defs(form),
                 defaultColDef={"sortable": True, "filter": True, "resizable": True},
@@ -1351,3 +1371,11 @@ def register(app) -> None:
         uploads.drop(token)
         invalidate_metadata()
         return False, (version or 0) + 1, notify(f"Imported {count:,} rows"), (nav_version or 0) + 1
+
+    @app.callback(
+        Output(ids.HISTORY_GRID, "dashGridOptions"),
+        Input(ids.HISTORY_FILTER, "value"),
+        prevent_initial_call=True,
+    )
+    def filter_history(text):
+        return {"rowHeight": 32, "enableCellTextSelection": True, "quickFilterText": text or ""}

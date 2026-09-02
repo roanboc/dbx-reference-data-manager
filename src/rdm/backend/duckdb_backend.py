@@ -1,11 +1,13 @@
 """DuckDB implementation of :class:`DatabaseBackend` for local development and tests.
 
 DuckDB gives us real DDL/DML, ``COMMENT ON``, ``information_schema`` and transactions.
-What Unity Catalog has and DuckDB lacks is emulated in a private ``_rdm_meta`` schema:
+What Unity Catalog has and DuckDB lacks is emulated in a private ``_catalog`` schema, which
+also holds the registry tables the Databricks backend maintains in ``<catalog>._catalog``:
 
-* ``object_properties`` - table properties / tags / schema comments
-* ``grants``           - schema-level roles for principals (groups or users)
-* ``change_log``       - row-level history (Delta Change Data Feed equivalent)
+* ``domains`` / ``forms``  - registry of domains and forms with their descriptive attributes
+* ``change_log``           - row-level history (audit trail)
+* ``object_properties``    - table properties / tags / schema comments (local emulation)
+* ``grants``               - schema-level roles for groups (local emulation of UC grants)
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from rdm.models import (
     ID_COLUMN,
     PROP_COLUMN_CONFIG,
     PROP_DISPLAY_NAME,
+    PROP_DOC_LINK,
     PROP_FORM,
     PROP_OWNER,
     SYSTEM_COLUMNS,
@@ -62,7 +65,18 @@ from rdm.models import (
 
 log = logging.getLogger(__name__)
 
-META_SCHEMA = "_rdm_meta"
+META_SCHEMA = "_catalog"
+#: Groups that exist in the local sandbox (the persona groups plus demo grants).
+DEFAULT_LOCAL_GROUPS = (
+    "rdm_admins",
+    "everyone",
+    "student_stewards",
+    "student_readers",
+    "finance_stewards",
+    "finance_readers",
+    "hr_stewards",
+    "hr_readers",
+)
 HIDDEN_SCHEMAS = frozenset({"main", "information_schema", "pg_catalog", "temp", META_SCHEMA})
 CATALOG_LEVEL = "*"
 
@@ -162,6 +176,82 @@ class DuckDBBackend(DatabaseBackend):
                         before_json VARCHAR,
                         after_json  VARCHAR)"""
             )
+            cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "domains"])} (
+                        name         VARCHAR PRIMARY KEY,
+                        display_name VARCHAR,
+                        description  VARCHAR,
+                        owner        VARCHAR,
+                        doc_link     VARCHAR,
+                        created_at   TIMESTAMP,
+                        created_by   VARCHAR,
+                        updated_at   TIMESTAMP,
+                        updated_by   VARCHAR)"""
+            )
+            cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "forms"])} (
+                        domain       VARCHAR NOT NULL,
+                        name         VARCHAR NOT NULL,
+                        display_name VARCHAR,
+                        description  VARCHAR,
+                        owner        VARCHAR,
+                        created_at   TIMESTAMP,
+                        created_by   VARCHAR,
+                        updated_at   TIMESTAMP,
+                        updated_by   VARCHAR,
+                        PRIMARY KEY (domain, name))"""
+            )
+
+    # -- registry (mirrors the Databricks ``_catalog`` tables) -----------------------------
+
+    def _register_domain(self, cur, domain: DomainDef, actor: User) -> None:
+        now = utcnow()
+        existing = cur.execute(
+            f"SELECT created_at, created_by FROM {qualified([META_SCHEMA, 'domains'])} WHERE name = ?",
+            [domain.name],
+        ).fetchone()
+        created_at, created_by = existing if existing else (now, actor.username)
+        cur.execute(
+            f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'domains'])} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                domain.name,
+                domain.display_name,
+                domain.description,
+                domain.owner,
+                domain.doc_link,
+                created_at,
+                created_by,
+                now,
+                actor.username,
+            ],
+        )
+
+    def _register_form(self, cur, form: FormDef, actor: User) -> None:
+        now = utcnow()
+        existing = cur.execute(
+            f"SELECT created_at, created_by FROM {qualified([META_SCHEMA, 'forms'])} WHERE domain = ? AND name = ?",
+            [form.domain, form.name],
+        ).fetchone()
+        created_at, created_by = existing if existing else (now, actor.username)
+        cur.execute(
+            f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'forms'])} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                form.domain,
+                form.name,
+                form.display_name,
+                form.description,
+                form.owner,
+                created_at,
+                created_by,
+                now,
+                actor.username,
+            ],
+        )
+
+    def _unregister_form(self, cur, domain: str, name: str) -> None:
+        cur.execute(
+            f"DELETE FROM {qualified([META_SCHEMA, 'forms'])} WHERE domain = ? AND name = ?", [domain, name]
+        )
 
     @staticmethod
     def _t(form: FormDef) -> str:
@@ -247,6 +337,7 @@ class DuckDBBackend(DatabaseBackend):
             display_name=props.get(PROP_DISPLAY_NAME, ""),
             description=props.get("comment", ""),
             owner=props.get(PROP_OWNER, ""),
+            doc_link=props.get(PROP_DOC_LINK, ""),
             form_count=form_count,
             properties=props,
         )
@@ -278,17 +369,15 @@ class DuckDBBackend(DatabaseBackend):
                     "comment": domain.description,
                     PROP_DISPLAY_NAME: domain.display_name,
                     PROP_OWNER: domain.owner or actor.username,
+                    PROP_DOC_LINK: domain.doc_link,
                     "created_by": actor.username,
                 },
             )
-            # The creator administers the new domain (Unity Catalog makes the creator the owner).
-            cur.execute(
-                f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'grants'])} VALUES (?, ?, ?)",
-                [domain.name, actor.username, Role.ADMIN.name],
-            )
+            self._register_domain(cur, domain, actor)
         return self.get_domain(domain.name)
 
     def update_domain(self, domain: DomainDef, actor: User) -> DomainDef:
+        domain.validate()
         with self._tx() as cur:
             if not self._schema_exists(cur, domain.name):
                 raise NotFoundError(f"Domain '{domain.name}' does not exist.")
@@ -301,11 +390,11 @@ class DuckDBBackend(DatabaseBackend):
                     "comment": domain.description,
                     PROP_DISPLAY_NAME: domain.display_name,
                     PROP_OWNER: domain.owner,
+                    PROP_DOC_LINK: domain.doc_link,
                 },
             )
+            self._register_domain(cur, domain, actor)
         return self.get_domain(domain.name)
-
-    # -- forms -------------------------------------------------------------------------------
 
     def list_forms(self, domain: str) -> list[FormDef]:
         with self._cursor() as cur:
@@ -452,6 +541,7 @@ class DuckDBBackend(DatabaseBackend):
                     "rdm_owner": form.owner or actor.username,
                 },
             )
+            self._register_form(cur, form, actor)
             if rows is not None and len(rows):
                 self._append_rows(cur, form, rows, actor)
         return self.get_form(form.domain, form.name)
@@ -502,6 +592,7 @@ class DuckDBBackend(DatabaseBackend):
                 form.name,
                 {"rdm_display_name": form.display_name, "rdm_owner": form.owner},
             )
+            self._register_form(cur, form, actor)
         return self.get_form(form.domain, form.name)
 
     def add_column(self, form: FormDef, column: ColumnDef, actor: User) -> FormDef:
@@ -546,6 +637,7 @@ class DuckDBBackend(DatabaseBackend):
                 raise NotFoundError(f"Form '{form.full_name}' does not exist.")
             cur.execute(f"DROP TABLE {self._t(form)}")
             self._delete_props(cur, form.domain, form.name)
+            self._unregister_form(cur, form.domain, form.name)
             cur.execute(
                 f"DELETE FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ?",
                 [form.domain, form.name],
@@ -817,7 +909,7 @@ class DuckDBBackend(DatabaseBackend):
             else:
                 per_domain[schema] = max(per_domain.get(schema, Role.NONE), role)
         roles = {d: max(per_domain.get(d, Role.NONE), catalog_role) for d in domains}
-        return Permissions(domain_roles=roles, can_create_domain=catalog_role.can_admin)
+        return Permissions(domain_roles=roles, is_global_admin=catalog_role.can_admin)
 
     def list_domain_grants(self, domain: str) -> list[tuple[str, Role]]:
         with self._cursor() as cur:
@@ -827,18 +919,30 @@ class DuckDBBackend(DatabaseBackend):
             ).fetchall()
         return [(p, Role[r]) for p, r in rows]
 
+    def list_groups(self, query: str | None = None) -> list[str]:
+        with self._cursor() as cur:
+            rows = cur.execute(
+                f"SELECT DISTINCT principal FROM {qualified([META_SCHEMA, 'grants'])}"
+            ).fetchall()
+        groups = set(DEFAULT_LOCAL_GROUPS) | {r[0] for r in rows if "@" not in r[0]}
+        needle = (query or "").strip().lower()
+        return sorted(g for g in groups if needle in g.lower())
+
     def grant_domain_role(self, domain: str, principal: str, role: Role, actor: User) -> None:
-        if not principal or not principal.strip():
-            raise BackendError("A principal (group or user) is required.")
+        principal = (principal or "").strip()
+        if not principal:
+            raise BackendError("A group is required.")
+        if "@" in principal:
+            raise BackendError("Access is granted to groups only, not to individual users.")
         with self._tx() as cur:
             if domain != CATALOG_LEVEL and not self._schema_exists(cur, domain):
                 raise NotFoundError(f"Domain '{domain}' does not exist.")
             cur.execute(
                 f"DELETE FROM {qualified([META_SCHEMA, 'grants'])} WHERE schema_name = ? AND principal = ?",
-                [domain, principal.strip()],
+                [domain, principal],
             )
             if role is not Role.NONE:
                 cur.execute(
                     f"INSERT INTO {qualified([META_SCHEMA, 'grants'])} VALUES (?, ?, ?)",
-                    [domain, principal.strip(), role.name],
+                    [domain, principal, role.name],
                 )

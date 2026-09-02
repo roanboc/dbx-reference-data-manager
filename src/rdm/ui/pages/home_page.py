@@ -1,19 +1,22 @@
-"""Landing page: the domains the user can see, with their forms."""
+"""Landing page: the domains the user can see, with their forms, filterable by text."""
 
 from __future__ import annotations
 
 import dash_mantine_components as dmc
+from dash import Input, Output, State, html
 
+from rdm.services import NavDomain
+from rdm.ui import ids
 from rdm.ui.components import ROLE_COLORS, empty_state, icon, link_button, page_title
-from rdm.ui.context import AppContext, navigation
+from rdm.ui.context import AppContext, get_context, navigation
 from rdm.ui.layout import domain_href, form_href
 
 
-def render(ctx: AppContext) -> dmc.Stack:
-    items = navigation(ctx, None)
+def render(ctx_: AppContext) -> dmc.Stack:
+    items = navigation(ctx_, None)
     header = page_title(
         "Reference data",
-        f"Welcome, {ctx.user.label}. Pick a form from the sidebar or from the domains below. "
+        f"Welcome, {ctx_.user.label}. Pick a form from the sidebar or from the domains below. "
         "Forms are editable grids backed by governed tables; every change is recorded.",
     )
     if not items:
@@ -37,18 +40,64 @@ def render(ctx: AppContext) -> dmc.Stack:
         ],
         cols={"base": 1, "sm": 3},
     )
-    cards = []
+    return dmc.Stack(
+        [
+            header,
+            stats,
+            dmc.TextInput(
+                id=ids.HOME_FILTER,
+                placeholder="Filter domains and forms",
+                leftSection=icon("tabler:filter"),
+                debounce=250,
+                w=360,
+            ),
+            html.Div(id=ids.HOME_CARDS, children=cards(items, None)),
+        ],
+        gap="lg",
+    )
+
+
+def cards(items: list[NavDomain], text: str | None) -> dmc.SimpleGrid | dmc.Paper:
+    needle = (text or "").strip().lower()
+    out = []
     for item in items:
         d = item.domain
+        forms = item.forms
+        if needle and needle not in f"{d.name} {d.title} {d.description} {d.owner}".lower():
+            forms = [f for f in forms if needle in f"{f.name} {f.title} {f.description} {f.owner}".lower()]
+            if not forms:
+                continue
         links = [
             dmc.Anchor(
                 dmc.Group([icon("tabler:table", 14), dmc.Text(f.title, size="sm")], gap=6),
                 href=form_href(d.name, f.name),
                 underline="never",
             )
-            for f in item.forms
+            for f in forms
         ] or [dmc.Text("No forms yet.", size="sm", c="dimmed")]
-        cards.append(
+        actions = [
+            link_button(
+                "Open domain",
+                domain_href(d.name),
+                variant="light",
+                size="xs",
+                leftSection=icon("tabler:folder-open", 14),
+            )
+        ]
+        if d.doc_link:
+            actions.append(
+                dmc.Anchor(
+                    dmc.Button(
+                        "Documentation",
+                        variant="subtle",
+                        size="xs",
+                        leftSection=icon("tabler:external-link", 14),
+                    ),
+                    href=d.doc_link,
+                    target="_blank",
+                )
+            )
+        out.append(
             dmc.Card(
                 dmc.Stack(
                     [
@@ -64,13 +113,7 @@ def render(ctx: AppContext) -> dmc.Stack:
                         dmc.Text(d.description or "No description", size="sm", c="dimmed"),
                         dmc.Text(f"Owner: {d.owner}" if d.owner else "", size="xs", c="dimmed"),
                         dmc.Stack(links, gap=4),
-                        link_button(
-                            "Open domain",
-                            domain_href(d.name),
-                            variant="light",
-                            size="xs",
-                            leftSection=icon("tabler:folder-open", 14),
-                        ),
+                        dmc.Group(actions, gap="xs"),
                     ],
                     gap="xs",
                 ),
@@ -79,9 +122,9 @@ def render(ctx: AppContext) -> dmc.Stack:
                 padding="md",
             )
         )
-    return dmc.Stack(
-        [header, stats, dmc.SimpleGrid(cards, cols={"base": 1, "md": 2, "xl": 3}, spacing="md")], gap="lg"
-    )
+    if not out:
+        return empty_state("No matches", "Try another word.", "tabler:search-off")
+    return dmc.SimpleGrid(out, cols={"base": 1, "md": 2, "xl": 3}, spacing="md")
 
 
 def _stat(label: str, value: int, icon_name: str) -> dmc.Paper:
@@ -98,3 +141,15 @@ def _stat(label: str, value: int, icon_name: str) -> dmc.Paper:
         p="md",
         radius="md",
     )
+
+
+def register(app) -> None:
+    @app.callback(
+        Output(ids.HOME_CARDS, "children"),
+        Input(ids.HOME_FILTER, "value"),
+        State(ids.PERSONA, "data"),
+        prevent_initial_call=True,
+    )
+    def filter_home(text, persona):
+        c = get_context(persona)
+        return cards(navigation(c, None), text)

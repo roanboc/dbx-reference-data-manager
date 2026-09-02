@@ -50,7 +50,7 @@ PERSONAS: dict[str, Persona] = {
             email="alice.admin@example.org",
             groups=("rdm_admins", "everyone"),
         ),
-        "Administrator - creates forms, edits schemas and data in every domain",
+        "Global admin - creates domains, grants access, creates and edits forms and data everywhere",
     ),
     "editor": Persona(
         "editor",

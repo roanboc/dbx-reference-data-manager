@@ -86,8 +86,20 @@ WIZ_EFFECTIVE = "wiz-effective"
 WIZ_CREATE = "wiz-create"
 WIZ_ERRORS = "wiz-errors"
 
+# home / help
+HOME_FILTER = "home-filter"
+HOME_CARDS = "home-cards"
+HELP_TABS = "help-tabs"
+HISTORY_FILTER = "history-filter"
+HISTORY_GRID = "history-grid"
+
 # domain pages
 DOMAIN_KEY = "domain-key"
+DOMAIN_DOC_LINK = "domain-doc-link"
+DOMAIN_FORMS_FILTER = "domain-forms-filter"
+DOMAIN_FORMS = "domain-forms"
+GRANTS_FILTER = "grants-filter"
+NEW_DOMAIN_DOC_LINK = "new-domain-doc-link"
 DOMAIN_DISPLAY = "domain-display-name"
 DOMAIN_DESC = "domain-description"
 DOMAIN_OWNER = "domain-owner"

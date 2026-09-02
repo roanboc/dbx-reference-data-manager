@@ -29,6 +29,7 @@ def seed(backend: DatabaseBackend) -> None:
             display_name="Student Survey & Service Improvement",
             description="Reference lists used by the student survey and service improvement programme.",
             owner="survey.team@example.org",
+            doc_link="https://wiki.example.org/student-survey/reference-data",
         ),
         admin,
     )
@@ -38,6 +39,7 @@ def seed(backend: DatabaseBackend) -> None:
             display_name="Finance - Cost Management",
             description="Cost centres, GL mappings and budget reference data owned by Finance.",
             owner="finance.data@example.org",
+            doc_link="https://wiki.example.org/finance/cost-management",
         ),
         admin,
     )

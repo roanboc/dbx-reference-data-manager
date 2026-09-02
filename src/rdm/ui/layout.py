@@ -8,10 +8,9 @@ import dash_mantine_components as dmc
 from dash import dcc, html
 
 from rdm.config import APP_TITLE
-from rdm.models import Role
 from rdm.services import NavDomain
 from rdm.ui import ids
-from rdm.ui.components import ROLE_COLORS, ROLE_ICONS, icon, link_button, role_badge
+from rdm.ui.components import ROLE_COLORS, ROLE_ICONS, global_admin_badge, icon, link_button
 from rdm.ui.context import AppContext
 
 THEME = {
@@ -89,11 +88,17 @@ def header(ctx: AppContext, persona: str | None) -> dmc.Group:
         ],
         gap="sm",
     )
+    help_button = link_button(
+        "Help", "/help", variant="subtle", size="sm", leftSection=icon("tabler:help-circle")
+    )
+    admin_badge = global_admin_badge() if ctx.permissions.is_global_admin else None
     if ctx.auth.supports_persona_switching:
         personas = ctx.auth.personas()
         current = persona if persona in {p.key for p in personas} else ctx.settings.persona
         right = dmc.Group(
             [
+                help_button,
+                admin_badge,
                 dmc.Text("Local persona", size="sm", c="dimmed"),
                 dmc.Select(
                     id=ids.PERSONA_SELECT,
@@ -111,6 +116,8 @@ def header(ctx: AppContext, persona: str | None) -> dmc.Group:
         mode = "queries run as you" if ctx.auth.access_token() else "queries run as the app service principal"
         right = dmc.Group(
             [
+                help_button,
+                admin_badge,
                 icon("tabler:user-circle", 20),
                 dmc.Stack(
                     [dmc.Text(ctx.user.label, size="sm", fw=500), dmc.Text(mode, size="xs", c="dimmed")],
@@ -236,13 +243,10 @@ def navbar(ctx: AppContext, items: list[NavDomain], pathname: str, search: str |
     )
     blocks.append(dmc.Divider())
     blocks.append(dmc.Stack(actions, gap="xs"))
-    blocks.append(
-        dmc.Group(
-            [dmc.Text("Roles:", size="xs", c="dimmed")]
-            + [role_badge(r, size="xs") for r in (Role.VIEWER, Role.EDITOR, Role.ADMIN)],
-            gap=4,
-        )
-    )
+    access = [dmc.Text(f"Your access: {perms.summary}", size="xs", c="dimmed")]
+    if perms.is_global_admin:
+        access.append(global_admin_badge(size="xs"))
+    blocks.append(dmc.Group(access, gap=6))
     return dmc.Stack(blocks, gap="sm", h="100%")
 
 

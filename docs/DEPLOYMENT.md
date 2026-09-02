@@ -31,6 +31,20 @@ browser --> Databricks Apps proxy --> python app.py (gunicorn, listens on DATABR
                                                         Unity Catalog enforces schema grants
 ```
 
+## Roles at a glance
+
+| Role | Scope | Unity Catalog privileges | Typical group |
+|---|---|---|---|
+| Viewer | one domain (schema) | `USE SCHEMA`, `SELECT` | `<domain>_readers` |
+| Editor | one domain | Viewer + `MODIFY` | `<domain>_stewards` |
+| Domain admin | one domain | Editor + `CREATE TABLE`, `MANAGE`, `APPLY TAG` | `<domain>_admins` |
+| Global admin | the catalog | `USE CATALOG`, `CREATE SCHEMA`, `MANAGE` (or catalog owner) | data platform / data engineering |
+
+All groups also need `USE CATALOG` on the catalog. Grants can be made from the app's domain
+page (groups only; the app runs `GRANT`/`REVOKE` as the signed-in user) or declared in the
+bundle. The app keeps a registry of domains and forms and the audit trail in the `_catalog`
+schema (`resources/schemas.yml`).
+
 ## 1. Prerequisites
 
 Workspace

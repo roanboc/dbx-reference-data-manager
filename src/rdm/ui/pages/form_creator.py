@@ -290,6 +290,7 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
 
 def step_columns(state: dict[str, Any]) -> dmc.Stack:
     rows = state.get("columns") or []
+    has_file = state.get("mode") == "upload" and uploads.get(state.get("token")) is not None
     defs = [
         {
             "field": "name",
@@ -337,6 +338,8 @@ def step_columns(state: dict[str, Any]) -> dmc.Stack:
             "editable": False,
             "minWidth": 220,
             "cellClass": "rdm-audit",
+            "hide": not has_file,
+            "headerTooltip": "First values found in the file (read-only)",
         },
         {"field": "source", "hide": True},
     ]
@@ -344,13 +347,80 @@ def step_columns(state: dict[str, Any]) -> dmc.Stack:
     return dmc.Stack(
         [
             dmc.Title("Confirm the columns", order=4),
-            dmc.Text(
-                "Adjust names (lower_snake_case), types and descriptions. Mark columns that must always have a value as required, "
-                "the column(s) that identify a row as business key, and use allowed values to turn a text column into a dropdown. Double-click a cell to edit.",
-                size="sm",
-                c="dimmed",
+            dmc.Alert(
+                dmc.Stack(
+                    [
+                        dmc.Text(
+                            "Double-click a cell to edit it. Each column of the table below defines one column of your form:",
+                            size="sm",
+                        ),
+                        dmc.List(
+                            [
+                                dmc.ListItem(
+                                    dmc.Text(
+                                        [
+                                            dmc.Text("Column name", fw=600, span=True),
+                                            " - technical name in lower_snake_case (the grid shows it as 'Cost Centre Code').",
+                                        ],
+                                        size="sm",
+                                    )
+                                ),
+                                dmc.ListItem(
+                                    dmc.Text(
+                                        [
+                                            dmc.Text("Type", fw=600, span=True),
+                                            " - "
+                                            + legend
+                                            + ". Types cannot be changed once the form exists.",
+                                        ],
+                                        size="sm",
+                                    )
+                                ),
+                                dmc.ListItem(
+                                    dmc.Text(
+                                        [
+                                            dmc.Text("Required", fw=600, span=True),
+                                            " - the value can never be empty. ",
+                                            dmc.Text("Business key", fw=600, span=True),
+                                            " - the column(s) that identify a row; duplicates are refused.",
+                                        ],
+                                        size="sm",
+                                    )
+                                ),
+                                dmc.ListItem(
+                                    dmc.Text(
+                                        [
+                                            dmc.Text("Allowed values", fw=600, span=True),
+                                            " - type a comma-separated list such as ",
+                                            dmc.Code("Active, Inactive, Retired"),
+                                            " to turn a text column into a dropdown; leave it empty for free text.",
+                                            " Suggestions are pre-filled for text columns with few distinct values in your file.",
+                                        ],
+                                        size="sm",
+                                    )
+                                ),
+                                dmc.ListItem(
+                                    dmc.Text(
+                                        [
+                                            dmc.Text("Sample values", fw=600, span=True),
+                                            " - read-only preview of the first values in your file, so you can check the inferred type.",
+                                        ],
+                                        size="sm",
+                                    )
+                                )
+                                if has_file
+                                else None,
+                            ],
+                            size="sm",
+                            spacing=2,
+                        ),
+                    ],
+                    gap=4,
+                ),
+                color="blue",
+                variant="light",
+                icon=icon("tabler:info-circle"),
             ),
-            dmc.Text("Types: " + legend, size="xs", c="dimmed"),
             dag.AgGrid(
                 id=ids.WIZ_COLUMNS_GRID,
                 rowData=rows,
@@ -418,6 +488,7 @@ def step_details(ctx_: AppContext, state: dict[str, Any]) -> dmc.Stack:
                                 value=state.get("domain") or (domains[0] if domains else None),
                                 allowDeselect=False,
                                 description="You can only create forms in domains you administer",
+                                searchable=True,
                             ),
                             dmc.TextInput(
                                 id=ids.WIZ_NAME,

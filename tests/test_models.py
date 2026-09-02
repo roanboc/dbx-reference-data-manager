@@ -51,7 +51,7 @@ from rdm.models import (
         ("  Name  ", "name"),
         ("first-name/last.name", "first_name_last_name"),
         ("Already_snake_case", "already_snake_case"),
-        ("Multiple   spaces -- and___underscores", "multiple_spaces_and_underscores"),
+        ("Multiple   spaces -- and___underscores", "multiple_spaces_and__underscores"),
         ("Ünïcode Ñame", "n_code_ame"),
         ("9", "col_9"),
         (123, "col_123"),
@@ -196,7 +196,7 @@ def test_role_ordering_and_capabilities():
     assert (Role.VIEWER.can_view, Role.VIEWER.can_edit, Role.VIEWER.can_admin) == (True, False, False)
     assert (Role.EDITOR.can_view, Role.EDITOR.can_edit, Role.EDITOR.can_admin) == (True, True, False)
     assert (Role.ADMIN.can_view, Role.ADMIN.can_edit, Role.ADMIN.can_admin) == (True, True, True)
-    assert [r.label for r in Role] == ["No access", "Viewer", "Editor", "Administrator"]
+    assert [r.label for r in Role] == ["No access", "Viewer", "Editor", "Domain admin"]
     assert Role["EDITOR"] is Role.EDITOR
 
 
@@ -227,7 +227,16 @@ def test_permissions_defaults_and_catalog_admin():
     assert Permissions().visible_domains == []
     assert not Permissions().is_admin_anywhere
     assert not Permissions({"a": Role.EDITOR}).is_admin_anywhere
-    assert Permissions(can_create_domain=True).is_admin_anywhere
+    assert Permissions(is_global_admin=True).is_admin_anywhere
+    assert (
+        Permissions(is_global_admin=True).can_create_domain
+        and Permissions(is_global_admin=True).summary == "Global admin"
+    )
+    assert (
+        Permissions({"a": Role.EDITOR, "b": Role.VIEWER, "c": Role.EDITOR}).summary
+        == "Editor of 2 domains, viewer of 1 domain"
+    )
+    assert Permissions().summary == "No access yet"
 
 
 # --------------------------------------------------------------------------------------

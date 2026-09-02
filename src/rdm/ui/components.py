@@ -10,7 +10,7 @@ from dash import dcc, html
 from dash_iconify import DashIconify
 
 from rdm.backend.base import BackendError
-from rdm.models import DataType, FormDef, Role, ValidationIssue
+from rdm.models import GLOBAL_ADMIN_LABEL, DataType, FormDef, Role, ValidationIssue
 
 ROLE_COLORS = {Role.ADMIN: "grape", Role.EDITOR: "teal", Role.VIEWER: "blue", Role.NONE: "gray"}
 ROLE_ICONS = {
@@ -42,6 +42,16 @@ def role_badge(role: Role, size: str = "sm") -> dmc.Badge:
         variant="light",
         size=size,
         leftSection=icon(ROLE_ICONS[role], 12),
+    )
+
+
+def global_admin_badge(size: str = "sm") -> dmc.Badge:
+    return dmc.Badge(
+        GLOBAL_ADMIN_LABEL,
+        color="orange",
+        variant="light",
+        size=size,
+        leftSection=icon("tabler:world-cog", 12),
     )
 
 

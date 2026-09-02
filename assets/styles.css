@@ -18,3 +18,9 @@
   border: 1px dashed #adb5bd; border-radius: 8px; padding: 24px; text-align: center; color: #495057; cursor: pointer;
 }
 .rdm-dropzone:hover { background: #f1f3f5; }
+.rdm-help table { border-collapse: collapse; margin: 8px 0 16px; font-size: 14px; }
+.rdm-help th, .rdm-help td { border: 1px solid #dee2e6; padding: 6px 10px; text-align: left; vertical-align: top; }
+.rdm-help th { background: #f3f5f8; }
+.rdm-help h2 { margin-top: 20px; font-size: 18px; }
+.rdm-help h3 { margin-top: 16px; font-size: 15px; }
+.rdm-help code { background: #f1f3f5; padding: 1px 4px; border-radius: 4px; font-size: 13px; }

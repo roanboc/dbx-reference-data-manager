@@ -112,3 +112,7 @@ def test_parse_path_routes():
     assert parse_path("/new-domain") == ("new-domain", None, None)
     assert parse_path("/f/only-domain") == ("home", None, None)
     assert parse_path("/f/a%20b/c") == ("form", "a b", "c")
+
+
+def test_parse_path_help():
+    assert parse_path("/help") == ("help", None, None)

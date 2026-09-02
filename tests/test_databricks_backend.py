@@ -163,12 +163,60 @@ def test_create_form_emits_single_create_table_with_features_and_escaped_comment
     assert statements(conn, r"SET TAGS")  # tags are set (best effort)
 
 
-def test_create_domain_and_grants_are_managed_as_infrastructure():
-    b, _ = make_backend()
-    with pytest.raises(BackendError, match="Asset Bundle"):
-        b.create_domain(DomainDef("x"), ADMIN)
-    with pytest.raises(BackendError, match="Asset Bundle"):
-        b.grant_domain_role("x", "g", Role.VIEWER, ADMIN)
+def test_create_domain_issues_create_schema_and_registers_it():
+    responses = [
+        (
+            r"schemata.*WHERE catalog_name = :catalog ORDER BY",
+            ["schema_name", "comment", "schema_owner"],
+            [("research__rimu", "RIMU lists", "alice")],
+        ),
+        (
+            r"SELECT name, display_name, description, owner, doc_link FROM",
+            ["name", "display_name", "description", "owner", "doc_link"],
+            [("research__rimu", "Research - RIMU", "RIMU lists", "r@example.org", "https://wiki/rimu")],
+        ),
+    ]
+    b, conn = make_backend(responses)
+    domain = b.create_domain(
+        DomainDef(
+            "research__rimu",
+            display_name="Research - RIMU",
+            description="RIMU lists",
+            owner="r@example.org",
+            doc_link="https://wiki/rimu",
+        ),
+        ADMIN,
+    )
+    [(ddl, _)] = statements(conn, r"^CREATE SCHEMA")
+    assert ddl.startswith("CREATE SCHEMA `_forms`.`research__rimu` COMMENT 'RIMU lists' WITH DBPROPERTIES (")
+    assert "'rdm.doc_link' = 'https://wiki/rimu'" in ddl and "'rdm.display_name' = 'Research - RIMU'" in ddl
+    assert statements(conn, r"ALTER SCHEMA .* SET TAGS")
+    [(merge, params)] = statements(conn, r"^MERGE INTO `_forms`.`_catalog`.`domains`")
+    assert params["doc_link"] == "https://wiki/rimu" and params["name"] == "research__rimu"
+    assert domain.doc_link == "https://wiki/rimu" and domain.display_name == "Research - RIMU"
+
+
+def test_grant_domain_role_revokes_then_grants_group_privileges():
+    b, conn = make_backend()
+    b.grant_domain_role("finance__cost", "finance stewards", Role.EDITOR, ADMIN)
+    [(revoke, _)] = statements(conn, r"^REVOKE")
+    assert (
+        revoke
+        == "REVOKE USE SCHEMA, SELECT, MODIFY, CREATE TABLE, MANAGE, APPLY TAG ON SCHEMA `_forms`.`finance__cost` FROM `finance stewards`"
+    )
+    grants = [s for s, _ in statements(conn, r"^GRANT")]
+    assert (
+        grants[0]
+        == "GRANT USE SCHEMA, SELECT, MODIFY ON SCHEMA `_forms`.`finance__cost` TO `finance stewards`"
+    )
+    assert grants[1] == "GRANT USE CATALOG ON CATALOG `_forms` TO `finance stewards`"
+    conn.calls.clear()
+    b.grant_domain_role("finance__cost", "finance_readers", Role.NONE, ADMIN)
+    assert len(statements(conn, r"^REVOKE")) == 1 and not statements(conn, r"^GRANT")
+    with pytest.raises(BackendError, match="groups only"):
+        b.grant_domain_role("finance__cost", "someone@example.org", Role.VIEWER, ADMIN)
+    with pytest.raises(BackendError, match="group is required"):
+        b.grant_domain_role("finance__cost", " ", Role.VIEWER, ADMIN)
 
 
 def test_drop_column_and_add_column_statements():
@@ -298,7 +346,7 @@ def test_apply_changes_is_one_merge_with_json_payload_and_audit_insert():
         and upd["budget"] == "2.25"
     )
     assert upd["seen"].startswith("2024-01-01T00:00:00")
-    [(audit, aparams)] = statements(conn, r"^INSERT INTO `_forms`.`_rdm_meta`.`change_log`")
+    [(audit, aparams)] = statements(conn, r"^INSERT INTO `_forms`.`_catalog`.`change_log`")
     entries = json.loads(aparams["payload"])
     assert [e["change_type"] for e in entries] == ["insert", "update"]
     assert (
@@ -357,14 +405,14 @@ def test_audit_table_is_created_on_demand_and_history_reads_it():
 
     responses = [
         (
-            r"^INSERT INTO `_forms`.`_rdm_meta`",
+            r"^INSERT INTO `_forms`.`_catalog`",
             None,
             lambda sql, params: (
                 (_ for _ in ()).throw(RuntimeError("TABLE_OR_VIEW_NOT_FOUND")) if not state["created"] else []
             ),
         ),
         (
-            r"^CREATE TABLE IF NOT EXISTS `_forms`.`_rdm_meta`",
+            r"^CREATE TABLE IF NOT EXISTS `_forms`.`_catalog`",
             None,
             lambda sql, params: state.__setitem__("created", True) or [],
         ),
@@ -379,7 +427,7 @@ def test_audit_table_is_created_on_demand_and_history_reads_it():
         [b._audit_row(form, "r1", "insert", ADMIN, "batch", None, {"code": "x"}, datetime(2024, 1, 1), 0)]
     )
     assert state["created"] and b._audit_ready is True
-    assert len(statements(conn, r"^INSERT INTO `_forms`.`_rdm_meta`")) == 2
+    assert len(statements(conn, r"^INSERT INTO `_forms`.`_catalog`")) == 2
     df = b.get_history(form)
     assert list(df.columns)[:4] == ["version", "changed_at", "changed_by", "change_type"] and df.empty
 
@@ -400,12 +448,15 @@ def test_get_permissions_under_user_authorization_uses_current_user_and_group_me
             [("finance__cost", "SELECT"), ("finance__cost", "MODIFY"), ("hr__reference", "SELECT")],
         ),
         (r"catalog_privileges", ["privilege_type"], [("USE CATALOG",)]),
+        (r"information_schema`\.`catalogs`", ["catalog_owner"], [("data_platform_admins",)]),
         (r"schema_owner", ["schema_name"], [("hr__reference",)]),
+        (r"^SELECT is_account_group_member", ["r"], [(False,)]),
     ]
     b, conn = make_backend(responses)
     perms = b.get_permissions(User("alice@example.org"))
     assert perms.domain_roles == {"finance__cost": Role.EDITOR, "hr__reference": Role.ADMIN}
-    assert perms.can_create_domain is False
+    assert perms.is_global_admin is False
+    assert statements(conn, r"is_account_group_member\('data_platform_admins'\)")
     sql = statements(conn, r"schema_privileges")[0][0]
     assert "grantee = current_user() OR is_account_group_member(grantee)" in sql
 
@@ -419,11 +470,12 @@ def test_get_permissions_in_service_principal_mode_uses_resolved_principals():
         ),
         (r"schema_privileges", ["schema_name", "privilege_type"], []),
         (r"catalog_privileges", ["privilege_type"], [("MANAGE",)]),
+        (r"information_schema`\.`catalogs`", ["catalog_owner"], [("someone",)]),
         (r"schema_owner", ["schema_name"], []),
     ]
     b, conn = make_backend(responses, token=None)
     perms = b.get_permissions(User("bob@example.org", groups=("finance_readers",)))
-    assert perms.domain_roles == {"finance__cost": Role.ADMIN}
+    assert perms.domain_roles == {"finance__cost": Role.ADMIN} and perms.is_global_admin
     sql, params = statements(conn, r"schema_privileges")[0]
     assert "grantee IN (:g0, :g1)" in sql and set(params.values()) >= {"bob@example.org", "finance_readers"}
 

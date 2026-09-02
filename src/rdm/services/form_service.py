@@ -287,12 +287,15 @@ class FormService:
 
     def create_domain(self, domain: DomainDef) -> DomainDef:
         if not self.permissions.can_create_domain:
-            raise PermissionDenied("Creating domains requires catalog administrator rights.")
+            raise PermissionDenied("Creating domains requires global administrator rights.")
         return self.backend.create_domain(domain, self.user)
 
     def update_domain(self, domain: DomainDef) -> DomainDef:
         self.require(domain.name, Role.ADMIN)
         return self.backend.update_domain(domain, self.user)
+
+    def list_groups(self, query: str | None = None) -> list[str]:
+        return self.backend.list_groups(query)
 
     def list_domain_grants(self, domain: str) -> list[tuple[str, Role]]:
         self.require(domain, Role.ADMIN)

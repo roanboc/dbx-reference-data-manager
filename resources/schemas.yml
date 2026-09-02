@@ -5,7 +5,8 @@
 # Role mapping (docs/DESIGN.md §5) - grants go to account-level groups, never to users:
 #   Viewer        USE_SCHEMA, SELECT                         (+ USE_CATALOG from catalog.yml)
 #   Editor        Viewer + MODIFY
-#   Administrator Editor + CREATE_TABLE + MANAGE + APPLY_TAG
+#   Domain admin  Editor + CREATE_TABLE + MANAGE + APPLY_TAG
+#   Global admin  CREATE_SCHEMA + MANAGE on the catalog (resources/catalog.yml)
 #
 # The catalog administrators group already inherits the Administrator set from the catalog
 # (resources/catalog.yml); it is repeated on every schema so each domain is self-describing
@@ -24,6 +25,18 @@
 #     deploy) - only after its tables have been migrated or dropped.
 resources:
   schemas:
+    # System schema used by the app: registry of domains/forms (domains, forms) and the
+    # row-level audit trail (change_log). Every app user writes audit rows, so editors need
+    # MODIFY here; the tables are created by the app on first use (CREATE TABLE IF NOT EXISTS).
+    rdm_catalog:
+      name: _catalog
+      catalog_name: ${resources.catalogs.forms.name}
+      comment: "Reference Data Manager registry and audit trail (managed by the app)"
+      grants:
+        - principal: ${var.app_users_group}
+          privileges: [USE_SCHEMA, SELECT, MODIFY]
+        - principal: ${var.admin_group}
+          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE]
     student_survey_service_improvement:
       name: student__survey_service_improvement
       catalog_name: ${resources.catalogs.forms.name}

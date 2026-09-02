@@ -8,12 +8,17 @@ domains and forms at runtime and renders editable grids from the table definitio
 * **Editable grid** (AG Grid): inline editing, sorting and filtering while editing, dropdowns
   for constrained values, cell-level validation highlighting, add/delete rows, one atomic save,
   optimistic concurrency (`_version`), CSV/Excel export, Excel/CSV row import.
-* **Three roles per domain**: Viewer, Editor, Administrator, resolved from Unity Catalog
-  privileges (locally from a mock persona switcher).
+* **Roles**: Viewer, Editor and Domain admin per domain, plus Global admin at catalog level
+  (creates domains, grants access, sees the administration guide). Resolved from Unity Catalog
+  privileges; locally from a mock persona switcher. Access is granted to groups only.
 * **Administrator tools**: create a form from an Excel file (types inferred, adjustable),
   edit descriptions / required flags / business keys / allowed values, add and remove columns.
 * **History**: row-level audit trail (who changed what, before/after) plus Delta Change Data
   Feed for downstream SCD Type 2 pipelines.
+* **Registry**: `_catalog.domains` and `_catalog.forms` record every domain and form with
+  display name, description, owner and project documentation link.
+* **Help**: in-app user guide, form-building guide and (for global admins) the Databricks
+  administration guide.
 * **Repository pattern**: the UI never contains SQL. `DuckDBBackend` runs locally with zero
   infrastructure; `DatabricksBackend` runs on a SQL warehouse with on-behalf-of-user
   authorization.
@@ -48,7 +53,7 @@ src/rdm/
   models.py               Domain model: DataType, ColumnDef, FormDef, DomainDef, Role, ChangeSet ...
   coercion.py             Value coercion shared by grid edits, imports and backends
   backend/base.py         DatabaseBackend interface (the only place SQL is allowed)
-  backend/duckdb_backend.py      Local backend (emulates UC metadata in _rdm_meta)
+  backend/duckdb_backend.py      Local backend (emulates UC metadata in _catalog)
   backend/databricks_backend.py  SQL warehouse backend (MERGE via from_json, audit table)
   auth/provider.py        MockAuthProvider (personas) / DatabricksAuthProvider (headers)
   services/               FormService, CatalogService, Draft (row-id edit tracking), Excel import
@@ -66,7 +71,7 @@ docs/                     DESIGN.md, FRAMEWORK_DECISION.md, DEPLOYMENT.md
 3. Save turns the draft into a `ChangeSet`; the DuckDB backend applies it in one transaction,
    the Databricks backend in one `MERGE` whose source is a single JSON parameter. Rows whose
    `_version` changed since loading are reported as conflicts and never overwritten.
-4. Every change is written to the audit log (`_rdm_meta.change_log`) and shown in History.
+4. Every change is written to the audit log (`_catalog.change_log`) and shown in History.
 
 ## Notes
 

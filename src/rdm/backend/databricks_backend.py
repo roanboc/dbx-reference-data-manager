@@ -11,14 +11,17 @@ Production mapping (see docs/DESIGN.md):
   (``inline(from_json(:payload, '<struct schema>'))``): atomic, idempotent on retry
   (app-generated ``_id``), no 255-parameter-marker limit. Concurrency uses the integer
   ``_version`` column.
-* Row history is written to an explicit audit table ``<catalog>._rdm_meta.change_log``
+* Row history is written to an explicit audit table ``<catalog>._catalog.change_log``; the
+  same schema holds the ``domains`` and ``forms`` registry tables (descriptive attributes
+  such as owner and documentation link, for reporting and lineage)
   (same shape as the DuckDB backend); Delta Change Data Feed is enabled on every form for
   downstream SCD pipelines and used as a fallback when the audit table is unavailable.
 * Roles are derived from Unity Catalog privileges inside the SQL session
   (``current_user()`` / ``is_account_group_member``), so with user authorization enabled
   the app renders exactly what the warehouse will allow.
-* Domains and grants are infrastructure (Databricks Asset Bundle): the backend refuses to
-  create schemas or to grant privileges.
+* Domains (schemas) can be created by global administrators (``CREATE SCHEMA`` on the
+  catalog) and access is granted to Unity Catalog *groups* only, through ``GRANT``/``REVOKE``
+  on the schema. The asset bundle seeds the initial domains and grants.
 
 All values are bound as parameters; identifiers are validated and back-quoted; DDL clauses
 that cannot take parameters (comments, properties, tags) are escaped with Spark rules.
@@ -53,6 +56,7 @@ from rdm.models import (
     ID_COLUMN,
     PROP_COLUMN_CONFIG,
     PROP_DISPLAY_NAME,
+    PROP_DOC_LINK,
     PROP_FORM,
     PROP_OWNER,
     SYSTEM_COLUMNS,
@@ -77,7 +81,7 @@ from rdm.models import (
 
 log = logging.getLogger(__name__)
 
-META_SCHEMA = "_rdm_meta"
+META_SCHEMA = "_catalog"
 AUDIT_TABLE = "change_log"
 HIDDEN_SCHEMAS = frozenset({"information_schema", "default", META_SCHEMA})
 
@@ -94,6 +98,14 @@ JSON_ROWS_CHUNK = 500  # rows per MERGE/INSERT payload (keeps parameters well un
 TS_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
 
 ADMIN_PRIVILEGES = {"MANAGE", "ALL PRIVILEGES", "ALL_PRIVILEGES", "OWN", "OWNER"}
+GLOBAL_ADMIN_PRIVILEGES = {"CREATE SCHEMA", "CREATE_SCHEMA", "MANAGE", "ALL PRIVILEGES", "ALL_PRIVILEGES"}
+#: Schema privileges the app manages per role (everything else is left untouched).
+ROLE_PRIVILEGES = {
+    Role.VIEWER: ["USE SCHEMA", "SELECT"],
+    Role.EDITOR: ["USE SCHEMA", "SELECT", "MODIFY"],
+    Role.ADMIN: ["USE SCHEMA", "SELECT", "MODIFY", "CREATE TABLE", "MANAGE", "APPLY TAG"],
+}
+MANAGED_PRIVILEGES = ROLE_PRIVILEGES[Role.ADMIN]
 CREATE_PRIVILEGES = {"CREATE TABLE", "CREATE_TABLE"}
 EDIT_PRIVILEGES = {"MODIFY"}
 VIEW_PRIVILEGES = {"SELECT"}
@@ -273,22 +285,38 @@ class DatabricksBackend(DatabaseBackend):
             )[0]
         )
         tags = self._schema_tags()
+        registry = self._domain_registry()
         domains = []
         for name, comment, owner in rows:
             if name in HIDDEN_SCHEMAS:
                 continue
             t = tags.get(name, {})
+            r = registry.get(name, {})
             domains.append(
                 DomainDef(
                     name=name,
-                    display_name=t.get(TAG_DISPLAY_NAME, ""),
-                    description=comment or "",
-                    owner=t.get(TAG_OWNER, "") or (owner or ""),
+                    display_name=r.get("display_name") or t.get(TAG_DISPLAY_NAME, ""),
+                    description=comment or r.get("description") or "",
+                    owner=r.get("owner") or t.get(TAG_OWNER, "") or (owner or ""),
+                    doc_link=r.get("doc_link") or "",
                     form_count=int(counts.get(name, 0)),
                     properties={"schema_owner": owner or "", **t},
                 )
             )
         return domains
+
+    def _domain_registry(self) -> dict[str, dict[str, Any]]:
+        """Descriptive attributes from ``_catalog.domains`` (empty when the table is absent)."""
+        try:
+            rows, cols = self._run(
+                f"SELECT name, display_name, description, owner, doc_link FROM {self._reg('domains')}"
+            )
+        except BackendError:
+            return {}
+        return {r[0]: dict(zip(cols, r, strict=True)) for r in rows}
+
+    def _reg(self, table: str) -> str:
+        return f"{_q(self.catalog)}.{_q(self.meta_schema)}.{_q(table)}"
 
     def get_domain(self, name: str) -> DomainDef:
         for d in self.list_domains():
@@ -297,19 +325,116 @@ class DatabricksBackend(DatabaseBackend):
         raise NotFoundError(f"Domain '{name}' does not exist.")
 
     def create_domain(self, domain: DomainDef, actor: User) -> DomainDef:
-        raise BackendError(
-            "Domains are managed as infrastructure (Databricks Asset Bundle, resources/schemas.yml). "
-            "Add the schema and its grants there and deploy."
+        """``CREATE SCHEMA`` in the catalog: requires CREATE SCHEMA on the catalog (global admin)."""
+        domain.validate()
+        if domain.name in HIDDEN_SCHEMAS:
+            raise ConflictError(f"'{domain.name}' is a reserved name.")
+        props = {
+            PROP_DISPLAY_NAME: domain.display_name,
+            PROP_OWNER: domain.owner or actor.username,
+            PROP_DOC_LINK: domain.doc_link,
+            "rdm.created_by": actor.username,
+        }
+        prop_ddl = ", ".join(f"{lit(k)} = {lit(v)}" for k, v in props.items() if v)
+        self._run(
+            f"CREATE SCHEMA {self._s(domain.name)} COMMENT {lit(domain.description or '')}"
+            + (f" WITH DBPROPERTIES ({prop_ddl})" if prop_ddl else "")
         )
+        self._set_tags(
+            f"ALTER SCHEMA {self._s(domain.name)}",
+            {TAG_DISPLAY_NAME: domain.display_name, TAG_OWNER: domain.owner or actor.username},
+        )
+        self._register_domain(domain, actor)
+        return self.get_domain(domain.name)
 
     def update_domain(self, domain: DomainDef, actor: User) -> DomainDef:
         domain.validate()
         self._run(f"COMMENT ON SCHEMA {self._s(domain.name)} IS {lit(domain.description or '')}")
+        props = {
+            PROP_DISPLAY_NAME: domain.display_name,
+            PROP_OWNER: domain.owner,
+            PROP_DOC_LINK: domain.doc_link,
+        }
+        prop_ddl = ", ".join(f"{lit(k)} = {lit(v)}" for k, v in props.items())
+        self._run(f"ALTER SCHEMA {self._s(domain.name)} SET DBPROPERTIES ({prop_ddl})")
         self._set_tags(
             f"ALTER SCHEMA {self._s(domain.name)}",
             {TAG_DISPLAY_NAME: domain.display_name, TAG_OWNER: domain.owner},
         )
+        self._register_domain(domain, actor)
         return self.get_domain(domain.name)
+
+    # -- registry tables ---------------------------------------------------------------------
+
+    REGISTRY_DDL = {
+        "domains": (
+            "CREATE TABLE IF NOT EXISTS {t} (name STRING NOT NULL, display_name STRING, description STRING, owner STRING, "
+            "doc_link STRING, created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
+            "USING DELTA COMMENT 'Registry of reference-data domains maintained by the Reference Data Manager'"
+        ),
+        "forms": (
+            "CREATE TABLE IF NOT EXISTS {t} (domain STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
+            "description STRING, owner STRING, created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, "
+            "updated_by STRING) USING DELTA COMMENT 'Registry of forms maintained by the Reference Data Manager'"
+        ),
+    }
+
+    def _registry_upsert(self, table: str, key: dict[str, Any], values: dict[str, Any], actor: User) -> None:
+        """Idempotent MERGE into a registry table; creates the table on first use. Best effort."""
+        now = utcnow()
+        params = {**key, **values, "now": now, "actor": actor.username}
+        on = " AND ".join(f"t.{_q(k)} = :{k}" for k in key)
+        set_clause = (
+            ", ".join(f"t.{_q(k)} = :{k}" for k in values)
+            + ", t.`updated_at` = :now, t.`updated_by` = :actor"
+        )
+        cols = [*key, *values, "created_at", "created_by", "updated_at", "updated_by"]
+        vals = [f":{k}" for k in [*key, *values]] + [":now", ":actor", ":now", ":actor"]
+        statement = (
+            f"MERGE INTO {self._reg(table)} AS t USING (SELECT 1) AS s ON {on} "
+            f"WHEN MATCHED THEN UPDATE SET {set_clause} "
+            f"WHEN NOT MATCHED THEN INSERT ({', '.join(_q(c) for c in cols)}) VALUES ({', '.join(vals)})"
+        )
+        try:
+            self._run(statement, params)
+        except NotFoundError:
+            try:
+                self._run(self.REGISTRY_DDL[table].format(t=self._reg(table)))
+                self._run(statement, params)
+            except BackendError as exc:
+                log.warning("Registry table %s unavailable: %s", table, exc)
+        except BackendError as exc:
+            log.warning("Registry update for %s failed: %s", table, exc)
+
+    def _register_domain(self, domain: DomainDef, actor: User) -> None:
+        self._registry_upsert(
+            "domains",
+            {"name": domain.name},
+            {
+                "display_name": domain.display_name,
+                "description": domain.description,
+                "owner": domain.owner,
+                "doc_link": domain.doc_link,
+            },
+            actor,
+        )
+
+    def _register_form(self, form: FormDef, actor: User) -> None:
+        self._registry_upsert(
+            "forms",
+            {"domain": form.domain, "name": form.name},
+            {"display_name": form.display_name, "description": form.description, "owner": form.owner},
+            actor,
+        )
+
+    def _unregister_form(self, form: FormDef) -> None:
+        try:
+            self._run(
+                f"DELETE FROM {self._reg('forms')} WHERE `domain` = :domain AND `name` = :name",
+                {"domain": form.domain, "name": form.name},
+            )
+        except BackendError as exc:
+            log.warning("Registry delete for %s failed: %s", form.full_name, exc)
 
     def _set_tags(self, alter_prefix: str, tags: dict[str, str]) -> None:
         """Tags are a best-effort mirror: they need APPLY TAG, which not every admin has."""
@@ -452,6 +577,7 @@ class DatabricksBackend(DatabaseBackend):
             f"ALTER TABLE {self._t(form)}",
             {TAG_FORM: "true", TAG_DISPLAY_NAME: form.display_name, TAG_OWNER: form.owner or actor.username},
         )
+        self._register_form(form, actor)
         if rows is not None and len(rows):
             self._append_rows(form, rows, actor)
         return self.get_form(form.domain, form.name)
@@ -483,6 +609,7 @@ class DatabricksBackend(DatabaseBackend):
         self._set_tags(
             f"ALTER TABLE {self._t(form)}", {TAG_DISPLAY_NAME: form.display_name, TAG_OWNER: form.owner}
         )
+        self._register_form(form, actor)
         return self.get_form(form.domain, form.name)
 
     def add_column(self, form: FormDef, column: ColumnDef, actor: User) -> FormDef:
@@ -516,8 +643,7 @@ class DatabricksBackend(DatabaseBackend):
 
     def drop_form(self, form: FormDef, actor: User) -> None:
         self._run(f"DROP TABLE {self._t(form)}")
-
-    # -- rows --------------------------------------------------------------------------------
+        self._unregister_form(form)
 
     def _select_columns(self, form: FormDef) -> list[str]:
         return [c.name for c in form.columns]
@@ -981,6 +1107,17 @@ class DatabricksBackend(DatabaseBackend):
             {"catalog": self.catalog, **params},
         )
         catalog_privs = {str(r[0]).upper() for r in rows}
+        owner_rows, _ = self._run(
+            f"SELECT catalog_owner FROM {self._info('catalogs')} WHERE catalog_name = :catalog",
+            {"catalog": self.catalog},
+        )
+        catalog_owners = {str(r[0]) for r in owner_rows if r and r[0]}
+        is_global_admin = bool(
+            {p.replace("_", " ") for p in catalog_privs}
+            & {p.replace("_", " ") for p in GLOBAL_ADMIN_PRIVILEGES}
+        )
+        if not is_global_admin and catalog_owners:
+            is_global_admin = self._is_principal(user, catalog_owners)
         # Owners hold every privilege implicitly
         owner_pred = predicate.replace("grantee", "schema_owner")
         rows, _ = self._run(
@@ -993,7 +1130,20 @@ class DatabricksBackend(DatabaseBackend):
             if s in owned:
                 p = p | {"MANAGE"}
             roles[s] = self._role_from_privileges(p)
-        return Permissions(domain_roles=roles, can_create_domain=False)
+        return Permissions(domain_roles=roles, is_global_admin=is_global_admin)
+
+    def _is_principal(self, user: User, names: set[str]) -> bool:
+        """Whether the user is (a member of) one of ``names``; uses the SQL session under OBO."""
+        if names & set(user.principals):
+            return True
+        if not self.access_token:
+            return False
+        checks = " OR ".join(f"is_account_group_member({lit(n)})" for n in sorted(names)) or "false"
+        try:
+            rows, _ = self._run(f"SELECT {checks}")
+            return bool(rows and rows[0][0])
+        except BackendError:
+            return False
 
     @staticmethod
     def _role_from_privileges(privs: set[str]) -> Role:
@@ -1020,8 +1170,48 @@ class DatabricksBackend(DatabaseBackend):
             by_grantee.setdefault(str(grantee), set()).add(str(priv).upper())
         return sorted((g, self._role_from_privileges(p)) for g, p in by_grantee.items())
 
+    def list_groups(self, query: str | None = None) -> list[str]:
+        """Account/workspace groups via the SDK (app identity). Empty when the lookup is not possible."""
+        try:
+            from databricks.sdk import WorkspaceClient
+
+            w = WorkspaceClient()
+            needle = (query or "").strip().replace('"', "")
+            flt = f'displayName co "{needle}"' if needle else None
+            groups = [
+                g.display_name
+                for g in w.groups.list(filter=flt, attributes="displayName", count=200)
+                if g.display_name
+            ]
+            return sorted(set(groups))
+        except Exception as exc:  # noqa: BLE001 - best effort
+            log.warning("Group lookup failed: %s", exc)
+            return []
+
     def grant_domain_role(self, domain: str, principal: str, role: Role, actor: User) -> None:
-        raise BackendError(
-            "Access is managed as infrastructure (Databricks Asset Bundle grants on the schema). "
-            "Change resources/schemas.yml and deploy."
-        )
+        """Replace the app-managed schema privileges of a *group* with the set for ``role``.
+
+        Requires MANAGE on the schema (domain admin). ``USE CATALOG`` is also granted so the
+        group can reach the schema; that part needs catalog rights and is best effort.
+        """
+        validate_identifier(domain, "domain name")
+        principal = (principal or "").strip()
+        if not principal:
+            raise BackendError("A group is required.")
+        if "@" in principal:
+            raise BackendError("Access is granted to Databricks groups only, not to individual users.")
+        known = self.list_groups(principal)
+        if known and principal not in known:
+            raise BackendError(f"'{principal}' is not a Databricks group.")
+        grantee = "`" + principal.replace("`", "``") + "`"
+        schema = self._s(domain)
+        self._run(f"REVOKE {', '.join(MANAGED_PRIVILEGES)} ON SCHEMA {schema} FROM {grantee}")
+        if role is Role.NONE:
+            return
+        self._run(f"GRANT {', '.join(ROLE_PRIVILEGES[role])} ON SCHEMA {schema} TO {grantee}")
+        try:
+            self._run(f"GRANT USE CATALOG ON CATALOG {_q(self.catalog)} TO {grantee}")
+        except BackendError as exc:
+            log.warning(
+                "Could not grant USE CATALOG to %s (%s); a global admin must grant it", principal, exc
+            )

@@ -715,7 +715,7 @@ def test_editor_cannot_administer(seeded_backend, editor):
     svc = service(seeded_backend, editor)
     form = svc.get_form(STUDENT, "service_areas")
     new_form = FormDef(STUDENT, "new_form", columns=[ColumnDef("x")])
-    with pytest.raises(PermissionDenied, match="Administrator access to domain"):
+    with pytest.raises(PermissionDenied, match="Domain admin access to domain"):
         svc.create_form(new_form)
     with pytest.raises(PermissionDenied):
         svc.update_form_metadata(form)
@@ -731,7 +731,7 @@ def test_editor_cannot_administer(seeded_backend, editor):
         svc.list_domain_grants(STUDENT)
     with pytest.raises(PermissionDenied):
         svc.grant_domain_role(STUDENT, "someone", Role.VIEWER)
-    with pytest.raises(PermissionDenied, match="catalog administrator"):
+    with pytest.raises(PermissionDenied, match="global administrator"):
         svc.create_domain(DomainDef("new_domain"))
     assert [f.name for f in seeded_backend.list_forms(STUDENT)] == ["service_areas", "survey_questions"]
     assert "new_domain" not in [d.name for d in seeded_backend.list_domains()]
@@ -739,16 +739,17 @@ def test_editor_cannot_administer(seeded_backend, editor):
 
 
 def test_domain_admin_without_catalog_rights_cannot_create_domains(seeded_backend):
-    seeded_backend.grant_domain_role(STUDENT, "local.admin@example.org", Role.ADMIN, User("seed"))
-    local_admin = User("local.admin@example.org")
+    seeded_backend.grant_domain_role(STUDENT, "local_admins", Role.ADMIN, User("seed"))
+    local_admin = User("local.admin@example.org", groups=("local_admins",))
     svc = service(seeded_backend, local_admin)
-    assert svc.role(STUDENT) is Role.ADMIN
-    with pytest.raises(PermissionDenied, match="catalog administrator"):
+    assert svc.role(STUDENT) is Role.ADMIN and not svc.permissions.is_global_admin
+    with pytest.raises(PermissionDenied, match="global administrator"):
         svc.create_domain(DomainDef("another"))
     # but they can administer their domain
     created = svc.create_form(FormDef(STUDENT, "local_form", columns=[ColumnDef("x")]))
     assert created.owner == "local.admin@example.org"
-    assert dict(svc.list_domain_grants(STUDENT))["local.admin@example.org"] is Role.ADMIN
+    assert dict(svc.list_domain_grants(STUDENT))["local_admins"] is Role.ADMIN
+    assert "local_admins" in svc.list_groups("local")
 
 
 def test_catalog_admin_can_create_domain_and_form(seeded_backend, admin):

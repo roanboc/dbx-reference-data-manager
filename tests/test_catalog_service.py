@@ -137,7 +137,7 @@ def test_get_form_on_unknown_domain_is_permission_denied(seeded_backend, admin):
 
 
 def test_navigation_reflects_new_grants_when_permissions_are_refreshed(seeded_backend, viewer):
-    seeded_backend.grant_domain_role(FINANCE, "vera.viewer@example.org", Role.EDITOR, User("seed"))
+    seeded_backend.grant_domain_role(FINANCE, "hr_readers", Role.EDITOR, User("seed"))
     stale = CatalogService(seeded_backend, viewer, Permissions({STUDENT: Role.VIEWER}))
     assert set(_nav(stale.navigation())) == {STUDENT}
     fresh = service(seeded_backend, viewer)

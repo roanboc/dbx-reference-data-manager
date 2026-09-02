@@ -38,7 +38,7 @@ src/rdm/
   models.py                 DataType, ColumnDef, FormDef, DomainDef, User, Role, ChangeSet, ...
   coercion.py               Value coercion shared by grid edits, imports and backends
   backend/base.py           DatabaseBackend abstract interface
-  backend/duckdb_backend.py Local backend (DuckDB file, emulates UC metadata in _rdm_meta)
+  backend/duckdb_backend.py Local backend (DuckDB file, emulates UC metadata in _catalog)
   backend/databricks_backend.py  SQL warehouse backend (databricks-sql-connector)
   backend/sql_utils.py      Identifier quoting, literal escaping, type maps, frame normalisation
   auth/provider.py          MockAuthProvider (personas), DatabricksAuthProvider (headers)
@@ -59,10 +59,10 @@ tests/                      Unit, backend contract and Dash server tests
 | Form | table | Delta table |
 | Form description | `COMMENT ON TABLE` | table `COMMENT` |
 | Column description | `COMMENT ON COLUMN` | column `COMMENT` |
-| Display name, owner, column config | `_rdm_meta.object_properties` | `TBLPROPERTIES ('rdm.display_name', 'rdm.owner', 'rdm.column_config')`, mirrored to tags `rdm_display_name` / `rdm_owner` (bulk-readable from `information_schema.table_tags`) |
-| Domain description / owner | `_rdm_meta.object_properties` (DuckDB cannot comment schemas) | `COMMENT ON SCHEMA` + schema tags |
-| Change history | `_rdm_meta.change_log` | `<catalog>._rdm_meta.change_log` (same shape) + Delta Change Data Feed |
-| Permissions | `_rdm_meta.grants` (persona groups) | UC schema/catalog privileges via `information_schema` |
+| Display name, owner, column config | `_catalog.object_properties` | `TBLPROPERTIES ('rdm.display_name', 'rdm.owner', 'rdm.column_config')`, mirrored to tags `rdm_display_name` / `rdm_owner` (bulk-readable from `information_schema.table_tags`) |
+| Domain description / owner | `_catalog.object_properties` (DuckDB cannot comment schemas) | `COMMENT ON SCHEMA` + schema tags |
+| Change history | `_catalog.change_log` | `<catalog>._catalog.change_log` (same shape) + Delta Change Data Feed |
+| Permissions | `_catalog.grants` (persona groups) | UC schema/catalog privileges via `information_schema` |
 | Domains and grants | created/granted in the app | infrastructure: bundle only (the app refuses) |
 
 ### 3.1 Portable data types
@@ -181,7 +181,7 @@ Excel/CSV import (append) instead.
 
 * The grid is the **current state** (SCD Type 1 semantics) of a reference list.
 * Every save writes row-level entries (before/after JSON, actor, batch) to
-  `_rdm_meta.change_log` on both backends, so the History tab is identical locally and in
+  `_catalog.change_log` on both backends, so the History tab is identical locally and in
   production and does not depend on Delta log retention. Delta Change Data Feed stays enabled
   on every form for downstream pipelines and is the fallback if the audit table is missing.
 * Type 2 dimensions should be built downstream from CDF (Lakeflow Declarative Pipelines

@@ -80,22 +80,34 @@ def test_fresh_backend_has_no_domains_and_describes_itself(backend: DuckDBBacken
     assert backend.describe() == "DuckDB (:memory:)"
 
 
-def test_create_domain_returns_metadata_and_grants_creator_admin(backend: DuckDBBackend, admin: User):
+def test_create_domain_returns_metadata_and_registers_it(backend: DuckDBBackend, admin: User):
     created = backend.create_domain(
-        DomainDef("finance", display_name="Finance", description="Money things", owner="cfo@example.org"),
+        DomainDef(
+            "finance",
+            display_name="Finance",
+            description="Money things",
+            owner="cfo@example.org",
+            doc_link="https://wiki.example.org/finance",
+        ),
         admin,
     )
     assert created.name == "finance"
     assert created.display_name == "Finance"
     assert created.description == "Money things"
     assert created.owner == "cfo@example.org"
+    assert created.doc_link == "https://wiki.example.org/finance"
     assert created.form_count == 0
     assert created.properties["created_by"] == admin.username
     assert created.properties[PROP_DISPLAY_NAME] == "Finance"
-    assert backend.list_domain_grants("finance") == [(admin.username, Role.ADMIN)]
+    # access comes from group grants only; creating a domain grants nothing to the creator
+    assert backend.list_domain_grants("finance") == []
     perms = backend.get_permissions(admin)
-    assert perms.role_for("finance") is Role.ADMIN
-    assert not perms.can_create_domain
+    assert perms.role_for("finance") is Role.NONE and not perms.is_global_admin
+    assert _meta_count(backend, "domains", name="finance") == 1
+    with pytest.raises(ValueError, match="http"):
+        backend.create_domain(DomainDef("bad", doc_link="wiki/finance"), admin)
+    updated = backend.update_domain(DomainDef("finance", display_name="Finance!", doc_link=""), admin)
+    assert updated.display_name == "Finance!" and updated.doc_link == ""
 
 
 def test_create_domain_defaults_owner_to_actor(backend: DuckDBBackend, admin: User):
@@ -963,45 +975,47 @@ def test_get_permissions_catalog_level_grant_applies_to_every_domain(backend: Du
 def test_get_permissions_takes_the_max_of_all_matching_grants(backend: DuckDBBackend, admin: User):
     _domains(backend, admin, "a", "b")
     backend.grant_domain_role("a", "grp_view", Role.VIEWER, admin)
-    backend.grant_domain_role("a", "u@example.org", Role.EDITOR, admin)
+    backend.grant_domain_role("a", "grp_edit", Role.EDITOR, admin)
     backend.grant_domain_role("b", "grp_view", Role.ADMIN, admin)
     backend.grant_domain_role(CATALOG_LEVEL, "grp_view", Role.VIEWER, admin)
-    user = User("u", groups=("grp_view",), email="u@example.org")
+    user = User("u", groups=("grp_view", "grp_edit"))
     perms = backend.get_permissions(user)
-    assert perms.role_for("a") is Role.EDITOR  # max(VIEWER via group, EDITOR via email, VIEWER via catalog)
+    assert (
+        perms.role_for("a") is Role.EDITOR
+    )  # max(VIEWER via grp_view, EDITOR via grp_edit, VIEWER via catalog)
     assert perms.role_for("b") is Role.ADMIN
-    assert not perms.can_create_domain
+    assert not perms.is_global_admin
     # a lower domain-level grant never reduces a higher catalog-level one
-    backend.grant_domain_role(CATALOG_LEVEL, "u", Role.ADMIN, admin)
-    assert backend.get_permissions(user).role_for("a") is Role.ADMIN
+    backend.grant_domain_role(CATALOG_LEVEL, "grp_edit", Role.ADMIN, admin)
+    perms = backend.get_permissions(user)
+    assert perms.role_for("a") is Role.ADMIN and perms.is_global_admin
 
 
 def test_get_permissions_matches_username_email_and_groups_separately(backend: DuckDBBackend, admin: User):
+    """Grants to individuals cannot be created through the app, but ones that exist still count."""
     _domains(backend, admin, "a")
-    backend.grant_domain_role("a", "mail@example.org", Role.VIEWER, admin)
+    backend._conn.execute("INSERT INTO _catalog.grants VALUES ('a', 'mail@example.org', 'VIEWER')")
     assert backend.get_permissions(User("someone", email="mail@example.org")).role_for("a") is Role.VIEWER
     assert backend.get_permissions(User("mail@example.org")).role_for("a") is Role.VIEWER
     assert backend.get_permissions(User("other", groups=("mail@example.org",))).role_for("a") is Role.VIEWER
     assert backend.get_permissions(User("other")).role_for("a") is Role.NONE
+    assert "mail@example.org" not in backend.list_groups()
 
 
 def test_grant_replace_and_revoke(backend: DuckDBBackend, admin: User):
     _domains(backend, admin, "a")
     backend.grant_domain_role("a", "zeta", Role.EDITOR, admin)
     backend.grant_domain_role("a", "  beta  ", Role.VIEWER, admin)
-    assert backend.list_domain_grants("a") == [
-        (admin.username, Role.ADMIN),
-        ("beta", Role.VIEWER),
-        ("zeta", Role.EDITOR),
-    ]
+    assert backend.list_domain_grants("a") == [("beta", Role.VIEWER), ("zeta", Role.EDITOR)]
+    assert {"beta", "zeta"} <= set(backend.list_groups()) and backend.list_groups("ZET") == ["zeta"]
     backend.grant_domain_role("a", "zeta", Role.VIEWER, admin)  # replaces
     assert dict(backend.list_domain_grants("a"))["zeta"] is Role.VIEWER
     backend.grant_domain_role("a", "zeta", Role.NONE, admin)  # revokes
-    assert [p for p, _ in backend.list_domain_grants("a")] == [admin.username, "beta"]
+    assert [p for p, _ in backend.list_domain_grants("a")] == ["beta"]
     assert backend.get_permissions(User("zeta")).role_for("a") is Role.NONE
     backend.grant_domain_role("a", "beta", Role.NONE, admin)
     backend.grant_domain_role("a", "beta", Role.NONE, admin)  # revoking twice is harmless
-    assert backend.list_domain_grants("a") == [(admin.username, Role.ADMIN)]
+    assert backend.list_domain_grants("a") == []
     assert backend.list_domain_grants("never_granted") == []
 
 
@@ -1010,14 +1024,11 @@ def test_grant_errors(backend: DuckDBBackend, admin: User):
         backend.grant_domain_role("ghost", "grp", Role.VIEWER, admin)
     _domains(backend, admin, "a")
     for bad in ("", "   "):
-        with pytest.raises(BackendError, match="principal"):
+        with pytest.raises(BackendError, match="group is required"):
             backend.grant_domain_role("a", bad, Role.VIEWER, admin)
-    assert len(backend.list_domain_grants("a")) == 1
-
-
-# ======================================================================================
-# Persistence and demo seed
-# ======================================================================================
+    with pytest.raises(BackendError, match="groups only"):
+        backend.grant_domain_role("a", "someone@example.org", Role.VIEWER, admin)
+    assert backend.list_domain_grants("a") == []
 
 
 def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
@@ -1054,7 +1065,7 @@ def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
         assert int(_row(df, "A001")["qty"]) == 12
         history = reopened.get_history(form)
         assert history["change_type"].tolist() == ["update", "insert", "insert", "insert", "insert"]
-        assert reopened.list_domain_grants("dom") == [(admin.username, Role.ADMIN), ("readers", Role.VIEWER)]
+        assert reopened.list_domain_grants("dom") == [("readers", Role.VIEWER)]
         assert reopened.get_permissions(User("x", groups=("readers",))).role_for("dom") is Role.VIEWER
         # the meta schema is created idempotently
         assert (

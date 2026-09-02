@@ -15,7 +15,7 @@ from rdm.config import APP_TITLE
 from rdm.ui import ids, layout
 from rdm.ui.components import error_alert
 from rdm.ui.context import get_context, navigation
-from rdm.ui.pages import domain_page, form_creator, form_page, home_page
+from rdm.ui.pages import domain_page, form_creator, form_page, help_page, home_page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -36,6 +36,8 @@ def parse_path(pathname: str | None) -> tuple[str, str | None, str | None]:
         return "new-form", None, None
     if parts[0] == "new-domain":
         return "new-domain", None, None
+    if parts[0] == "help":
+        return "help", None, None
     return "home", None, None
 
 
@@ -53,6 +55,7 @@ def create_app() -> dash.Dash:
     form_page.register(app)
     form_creator.register(app)
     domain_page.register(app)
+    home_page.register(app)
     return app
 
 
@@ -105,6 +108,8 @@ def register_shell_callbacks(app: dash.Dash) -> None:
                 return form_creator.render(app_ctx)
             if view == "new-domain":
                 return domain_page.render_new(app_ctx)
+            if view == "help":
+                return help_page.render(app_ctx)
             return home_page.render(app_ctx)
         except PermissionDenied as exc:
             return error_alert(str(exc), "Access denied")

@@ -142,4 +142,11 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def grant_domain_role(self, domain: str, principal: str, role: Role, actor: User) -> None:
-        """Grant (or, with ``Role.NONE``, revoke) a role on a domain to a principal."""
+        """Grant (or, with ``Role.NONE``, revoke) a role on a domain to a *group*.
+
+        Individual users are rejected: access is always managed through groups.
+        """
+
+    def list_groups(self, query: str | None = None) -> list[str]:
+        """Groups that can be granted access (best effort; empty when unknown)."""
+        return []

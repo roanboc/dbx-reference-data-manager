@@ -132,7 +132,7 @@ def is_system_column(name: str) -> bool:
 def validate_identifier(name: str, kind: str = "identifier", allow_leading_underscore: bool = True) -> str:
     """Return ``name`` if it is a safe identifier, else raise ``ValueError``.
 
-    Leading underscores are reserved for system objects (``_id``, ``_rdm_meta``, the
+    Leading underscores are reserved for system objects (``_id``, ``_catalog``, the
     ``_forms`` catalog); user-created names must start with a letter.
     """
     if not isinstance(name, str) or not IDENTIFIER_RE.match(name):
@@ -152,8 +152,9 @@ def sanitize_identifier(raw: Any, fallback: str = "column") -> str:
     """
     text = "" if raw is None else str(raw)
     text = text.strip().lower()
-    text = re.sub(r"[^a-z0-9]+", "_", text)
-    text = re.sub(r"_+", "_", text).strip("_")
+    text = re.sub(r"[^a-z0-9_]+", "_", text)
+    # keep deliberate double underscores (domain convention <function>__<area>), fold longer runs
+    text = re.sub(r"_{3,}", "__", text).strip("_")
     if not text:
         text = fallback
     if not text[0].isalpha():
@@ -237,7 +238,7 @@ class Role(enum.IntEnum):
             Role.NONE: "No access",
             Role.VIEWER: "Viewer",
             Role.EDITOR: "Editor",
-            Role.ADMIN: "Administrator",
+            Role.ADMIN: "Domain admin",
         }[self]
 
     @property
@@ -275,12 +276,25 @@ class User:
         return self.display_name or self.username
 
 
+GLOBAL_ADMIN_LABEL = "Global admin"
+
+
 @dataclass
 class Permissions:
-    """Effective access of one user, as resolved by the backend."""
+    """Effective access of one user, as resolved by the backend.
+
+    * ``domain_roles`` - role per domain (schema). ``Role.ADMIN`` is a *domain admin*: creates
+      and administers forms inside that domain.
+    * ``is_global_admin`` - catalog-level rights (create domains, grant access, see the
+      technical documentation). In Unity Catalog this is CREATE SCHEMA / MANAGE on the catalog.
+    """
 
     domain_roles: dict[str, Role] = field(default_factory=dict)
-    can_create_domain: bool = False
+    is_global_admin: bool = False
+
+    @property
+    def can_create_domain(self) -> bool:
+        return self.is_global_admin
 
     def role_for(self, domain: str) -> Role:
         return self.domain_roles.get(domain, Role.NONE)
@@ -295,7 +309,24 @@ class Permissions:
 
     @property
     def is_admin_anywhere(self) -> bool:
-        return self.can_create_domain or any(r.can_admin for r in self.domain_roles.values())
+        return self.is_global_admin or any(r.can_admin for r in self.domain_roles.values())
+
+    @property
+    def summary(self) -> str:
+        """Short human description, e.g. 'Global admin' or 'Domain admin of 2, editor of 1'."""
+        if self.is_global_admin:
+            return GLOBAL_ADMIN_LABEL
+        counts = {}
+        for r in self.domain_roles.values():
+            if r.can_view:
+                counts[r] = counts.get(r, 0) + 1
+        if not counts:
+            return "No access yet"
+        parts = [
+            f"{r.label.lower()} of {n} domain{'s' if n != 1 else ''}"
+            for r, n in sorted(counts.items(), key=lambda x: -x[0])
+        ]
+        return ", ".join(parts).capitalize()
 
 
 # --------------------------------------------------------------------------------------
@@ -375,6 +406,7 @@ class DomainDef:
     display_name: str = ""
     description: str = ""
     owner: str = ""
+    doc_link: str = ""  # project documentation URL
     form_count: int | None = None
     properties: dict[str, str] = field(default_factory=dict)
 
@@ -384,6 +416,8 @@ class DomainDef:
 
     def validate(self) -> DomainDef:
         validate_identifier(self.name, "domain name", allow_leading_underscore=False)
+        if self.doc_link and not self.doc_link.lower().startswith(("http://", "https://")):
+            raise ValueError("The documentation link must start with http:// or https://")
         return self
 
 
@@ -392,6 +426,7 @@ PROP_FORM = "rdm.form"
 PROP_DISPLAY_NAME = "rdm.display_name"
 PROP_OWNER = "rdm.owner"
 PROP_COLUMN_CONFIG = "rdm.column_config"
+PROP_DOC_LINK = "rdm.doc_link"
 TAG_DISPLAY_NAME = "rdm_display_name"
 TAG_OWNER = "rdm_owner"
 TAG_FORM = "rdm_form"
