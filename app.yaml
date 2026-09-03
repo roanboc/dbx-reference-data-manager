@@ -42,5 +42,7 @@ env:
   # Optional tuning - defaults live in rdm.config.Settings:
   # - name: RDM_MAX_ROWS            # rows loaded into the grid per form (default 5000)
   #   value: "5000"
+  # - name: RDM_ADMIN_CONTACT  # e-mail/URL shown in Help > About for other use cases
+  #   value: "data-office@example.org"
   # - name: RDM_METADATA_CACHE_TTL  # seconds navigation metadata is cached (default 60)
   #   value: "60"

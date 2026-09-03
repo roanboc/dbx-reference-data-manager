@@ -28,6 +28,7 @@ class Settings:
     catalog: str = "_reference_data"
     max_rows: int = 5000
     max_file_mb: int = 200  # largest file accepted through the browser upload
+    admin_contact: str = ""  # e-mail, URL or text shown in Help > About for other use cases
     databricks_host: str | None = None
     databricks_warehouse_id: str | None = None
     databricks_http_path: str | None = None
@@ -61,6 +62,7 @@ class Settings:
             catalog=env.get("RDM_CATALOG", "_reference_data").strip(),
             max_rows=int(env.get("RDM_MAX_ROWS", "5000")),
             max_file_mb=int(env.get("RDM_MAX_FILE_MB", "200")),
+            admin_contact=env.get("RDM_ADMIN_CONTACT", "").strip(),
             databricks_host=env.get("DATABRICKS_HOST") or None,
             databricks_warehouse_id=env.get("DATABRICKS_WAREHOUSE_ID") or None,
             databricks_http_path=env.get("DATABRICKS_HTTP_PATH") or None,

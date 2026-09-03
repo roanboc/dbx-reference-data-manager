@@ -7,6 +7,7 @@ PERSONA_SELECT = "persona-select"
 NAV_VERSION = "nav-version"
 NAV_SEARCH = "nav-search"
 NAVBAR = "navbar-content"
+NAV_RESIZER = "nav-resizer"  # draggable sidebar edge (assets/navbar_resize.js)
 PAGE = "page-content"
 NOTIFY = "notifications"
 DOWNLOAD = "download"

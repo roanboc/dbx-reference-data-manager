@@ -104,6 +104,50 @@ def test_help_shows_administration_only_to_global_admins(seeded_backend):
     assert "Allowed values" in texts_in(admin_tree) and "Allowed values" in texts_in(editor_tree)
 
 
+def test_help_about_tab_explains_the_app_to_everyone(seeded_backend):
+    import dataclasses
+
+    from rdm.ui.layout import shell
+    from rdm.ui.pages import about
+
+    ctx = make_ctx(seeded_backend, "viewer")
+    tree = help_page.render(ctx)
+    tabs = next(n for n in walk(tree) if getattr(n, "id", None) == ids.HELP_TABS)
+    assert tabs.value == "about"  # the orientation tab opens first
+    text = texts_in(tree)
+    for expected in [
+        "About the Reference Data Manager",
+        "How the data is organised",
+        "Domain",
+        "Function (sub-domain)",
+        "Objects: forms and files",
+        "The problem today",
+        "What the app gives you",
+        "Centralised",
+        "Governed",
+        "Fresh",
+        "Not designed for",
+        "Transactional or operational data",
+        "changes slowly and normally in batches",
+        "your Reference Data administrator",
+        "_reference_data",
+    ]:
+        assert expected in text, expected
+    # a configured contact is shown as a link
+    contact_ctx = dataclasses.replace(
+        ctx, settings=dataclasses.replace(ctx.settings, admin_contact="data-office@example.org")
+    )
+    contact_tree = about.render(contact_ctx)
+    anchors = {getattr(n, "href", None) for n in walk(contact_tree)}
+    assert "mailto:data-office@example.org" in anchors
+    url_ctx = dataclasses.replace(
+        ctx, settings=dataclasses.replace(ctx.settings, admin_contact="https://x.y/z")
+    )
+    assert "https://x.y/z" in {getattr(n, "href", None) for n in walk(about.render(url_ctx))}
+    # the sidebar has its draggable edge
+    assert ids.NAV_RESIZER in ids_in(shell())
+
+
 def test_function_page_admin_has_doc_link_group_picker_and_filters(seeded_backend):
     ctx = make_ctx(seeded_backend, "admin")
     tree = function_page.render(ctx, "finance__cost_management")

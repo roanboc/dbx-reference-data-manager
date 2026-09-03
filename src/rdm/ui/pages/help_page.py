@@ -10,6 +10,7 @@ from dash import dcc
 from rdm.ui import ids
 from rdm.ui.components import icon, page_title
 from rdm.ui.context import AppContext
+from rdm.ui.pages import about
 
 HELP_DIR = Path(__file__).resolve().parents[1] / "help"
 
@@ -22,17 +23,19 @@ def _md(name: str) -> dcc.Markdown:
 
 def render(ctx_: AppContext) -> dmc.Stack:
     tabs = [
+        dmc.TabsTab("About", value="about", leftSection=icon("tabler:info-circle")),
         dmc.TabsTab("Using the app", value="using", leftSection=icon("tabler:book")),
         dmc.TabsTab("Creating forms", value="forms", leftSection=icon("tabler:table-plus")),
     ]
     panels = [
+        dmc.TabsPanel(about.render(ctx_), value="about", pt="md"),
         dmc.TabsPanel(_md("using_the_app.md"), value="using", pt="md"),
         dmc.TabsPanel(_md("creating_forms.md"), value="forms", pt="md"),
     ]
     if ctx_.permissions.is_global_admin:
         tabs.append(dmc.TabsTab("Administration", value="admin", leftSection=icon("tabler:server-cog")))
         panels.append(dmc.TabsPanel(_md("administration.md"), value="admin", pt="md"))
-    subtitle = "How to find, edit and create forms" + (
+    subtitle = "What the app is for, how to find, edit and create forms and files" + (
         ", and how the app maps onto Databricks (administration tab)."
         if ctx_.permissions.is_global_admin
         else "."
@@ -41,7 +44,7 @@ def render(ctx_: AppContext) -> dmc.Stack:
         [
             page_title("Help", subtitle),
             dmc.Paper(
-                dmc.Tabs([dmc.TabsList(tabs), *panels], value="using", id=ids.HELP_TABS),
+                dmc.Tabs([dmc.TabsList(tabs), *panels], value="about", id=ids.HELP_TABS),
                 withBorder=True,
                 p="md",
                 radius="md",

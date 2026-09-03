@@ -35,8 +35,10 @@ definitions. The catalog is `_reference_data`.
 * **Registry**: `_catalog.domains`, `_catalog.functions`, `_catalog.forms` and
   `_catalog.files` record every domain, function, form and file with display name,
   description, owner and documentation link.
-* **Help**: in-app user guide, form-building guide and (for global admins) the Databricks
-  administration guide.
+* **Help**: an *About* tab for anyone in the organisation (purpose, hierarchy diagram, pains and
+  benefits, what the app is and is not for, whom to contact), the user guide, the form-building
+  guide and (for global admins) the Databricks administration guide.
+* **Layout**: functions grouped by domain in a sidebar whose edge can be dragged to resize it.
 * **Repository pattern**: the UI never contains SQL. `DuckDBBackend` runs locally with zero
   infrastructure; `DatabricksBackend` runs on a SQL warehouse with on-behalf-of-user
   authorization.

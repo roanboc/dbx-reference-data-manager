@@ -67,28 +67,35 @@ def shell() -> dmc.MantineProvider:
                     dmc.AppShellHeader(html.Div(id="header-content"), px="md"),
                     dmc.AppShellNavbar(
                         id="navbar",
-                        children=dmc.Stack(
-                            [
-                                dmc.TextInput(
-                                    id=ids.NAV_SEARCH,
-                                    placeholder="Search forms and files",
-                                    leftSection=icon("tabler:search"),
-                                    debounce=350,
-                                    size="sm",
-                                ),
-                                html.Div(
-                                    id=ids.NAVBAR,
-                                    style={
-                                        "flex": 1,
-                                        "minHeight": 0,
-                                        "display": "flex",
-                                        "flexDirection": "column",
-                                    },
-                                ),
-                            ],
-                            gap="sm",
-                            h="100%",
-                        ),
+                        children=[
+                            dmc.Stack(
+                                [
+                                    dmc.TextInput(
+                                        id=ids.NAV_SEARCH,
+                                        placeholder="Search forms and files",
+                                        leftSection=icon("tabler:search"),
+                                        debounce=350,
+                                        size="sm",
+                                    ),
+                                    html.Div(
+                                        id=ids.NAVBAR,
+                                        style={
+                                            "flex": 1,
+                                            "minHeight": 0,
+                                            "display": "flex",
+                                            "flexDirection": "column",
+                                        },
+                                    ),
+                                ],
+                                gap="sm",
+                                h="100%",
+                            ),
+                            html.Div(
+                                id=ids.NAV_RESIZER,
+                                className="rdm-nav-resizer",
+                                title="Drag to resize the sidebar, double-click to reset",
+                            ),
+                        ],
                         p="sm",
                     ),
                     dmc.AppShellMain(

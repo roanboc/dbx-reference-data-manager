@@ -99,6 +99,8 @@ Your machine
    admins) - the bundle only records the assignment on the schema.
 4. `app.yaml` - only needed when deploying **without** the bundle or for `run-local`; keep
    `RDM_CATALOG` in sync with the `catalog` variable.
+   Optional: `RDM_ADMIN_CONTACT` (an e-mail address, URL or text) is shown in **Help > About** as
+   the person or team to contact for use cases the app is not designed for.
 
 ## 3. Deploy to `dev`
 
