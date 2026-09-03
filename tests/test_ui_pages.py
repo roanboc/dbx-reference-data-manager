@@ -181,6 +181,41 @@ def test_new_function_page_requires_global_admin(seeded_backend):
     )
 
 
+def test_new_file_page_and_function_page_entry_points(seeded_backend):
+    from rdm.ui.pages import form_creator
+
+    admin = make_ctx(seeded_backend, "admin")
+    tree = function_page.render_new_file(admin, "finance__cost_management")
+    found = ids_in(tree)
+    assert {ids.FUNCTION_KEY, ids.NEW_FILE_FUNCTION, ids.ADD_FILE_UPLOAD, ids.ADD_FILE_SUBMIT} <= found
+    store = next(n for n in walk(tree) if getattr(n, "id", None) == ids.FUNCTION_KEY)
+    select = next(n for n in walk(tree) if getattr(n, "id", None) == ids.NEW_FILE_FUNCTION)
+    assert store.data == "finance__cost_management" == select.value
+    assert {d["value"] for d in select.data} == set(admin.permissions.admin_functions)
+    # an unknown or foreign function falls back to the first administered one
+    fa = make_ctx(seeded_backend, "function_admin")
+    tree = function_page.render_new_file(fa, "hr__reference")
+    store = next(n for n in walk(tree) if getattr(n, "id", None) == ids.FUNCTION_KEY)
+    assert store.data == fa.permissions.admin_functions[0]
+    assert "Function admins only" in texts_in(
+        function_page.render_new_file(make_ctx(seeded_backend, "viewer"))
+    )
+    # the function page offers New form (to the wizard, function pre-selected) and New file to admins
+    tree = function_page.render(fa, "finance__cost_management")
+    hrefs = {getattr(n, "href", None) for n in walk(tree)}
+    assert "/new-form/finance__cost_management" in hrefs
+    add_button = next(n for n in walk(tree) if getattr(n, "id", None) == ids.ADD_FILE_OPEN)
+    assert add_button.children == "New file" and "New form" in texts_in(tree)
+    tree = function_page.render(make_ctx(seeded_backend, "editor"), "finance__cost_management")
+    assert "/new-form/finance__cost_management" not in {getattr(n, "href", None) for n in walk(tree)}
+    # the wizard pre-selects the function only when the user administers it
+    tree = form_creator.render(fa, "finance__cost_management")
+    wiz = next(n for n in walk(tree) if getattr(n, "id", None) == ids.WIZ_STORE)
+    assert wiz.data["function"] == "finance__cost_management"
+    tree = form_creator.render(fa, "hr__reference")
+    assert next(n for n in walk(tree) if getattr(n, "id", None) == ids.WIZ_STORE).data["function"] == ""
+
+
 def test_domains_page_is_for_global_admins_only(seeded_backend):
     tree = domains_page.render(make_ctx(seeded_backend, "admin"))
     assert {ids.DOMAIN_NAME, ids.DOMAIN_SUBMIT, ids.DOMAINS_TABLE, ids.DOMAIN_DELETE_SUBMIT} <= ids_in(tree)

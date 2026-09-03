@@ -64,6 +64,7 @@ def test_page_callback_renders_home_for_admin(client):
         ("/domains", "admin", "Business domains group the functions"),
         ("/domains", "editor", "Global admins only"),
         ("/new-function", "admin", "New function"),
+        ("/new-file", "viewer", "Function admins only"),
         ("/fn/nowhere", "admin", "Access denied"),
         ("/file/finance__cost_management/nothing.csv", "admin", "Access denied"),
         ("/dm/finance", "viewer", "Domain 'finance' does not exist"),  # unseeded database

@@ -40,6 +40,17 @@ def domain_href(domain: str) -> str:
 DOMAINS_HREF = "/domains"
 NEW_FUNCTION_HREF = "/new-function"
 NEW_FORM_HREF = "/new-form"
+NEW_FILE_HREF = "/new-file"
+
+
+def new_form_href(function: str | None = None) -> str:
+    """The form wizard, with the function pre-selected when given."""
+    return f"{NEW_FORM_HREF}/{quote(function)}" if function else NEW_FORM_HREF
+
+
+def new_file_href(function: str | None = None) -> str:
+    """The new-file page, with the function pre-selected when given."""
+    return f"{NEW_FILE_HREF}/{quote(function)}" if function else NEW_FILE_HREF
 
 
 def shell() -> dmc.MantineProvider:
@@ -211,7 +222,7 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
                 links.append(
                     dmc.Text(
                         "No forms or files yet."
-                        + (" Use New form or Add file to create one." if item.role.can_admin else ""),
+                        + (" Use New form or New file to create one." if item.role.can_admin else ""),
                         size="xs",
                         c="dimmed",
                         px="sm",
@@ -269,13 +280,27 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
     actions = []
     if perms.is_admin_anywhere:
         actions.append(
-            link_button(
-                "New form",
-                NEW_FORM_HREF,
-                leftSection=icon("tabler:circle-plus"),
-                variant="light",
-                fullWidth=True,
-                disabled=not perms.admin_functions,
+            dmc.SimpleGrid(
+                [
+                    link_button(
+                        "New form",
+                        NEW_FORM_HREF,
+                        leftSection=icon("tabler:circle-plus"),
+                        variant="light",
+                        fullWidth=True,
+                        disabled=not perms.admin_functions,
+                    ),
+                    link_button(
+                        "New file",
+                        NEW_FILE_HREF,
+                        leftSection=icon("tabler:file-plus"),
+                        variant="light",
+                        fullWidth=True,
+                        disabled=not perms.admin_functions,
+                    ),
+                ],
+                cols=2,
+                spacing="xs",
             )
         )
     if perms.can_create_function:

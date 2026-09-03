@@ -274,7 +274,7 @@ removes exactly the one object that was confirmed.
 
 ```mermaid
 flowchart LR
-    A[Function admin: Add file\nupload CSV/Parquet, preview, name, description] --> B[Stored in the function's volume\nrow count computed, registry entry, history]
+    A[Function admin: New file\nupload CSV/Parquet, preview, name, description] --> B[Stored in the function's volume\nrow count computed, registry entry, history]
     B --> C[Everyone with access\npreview, columns, download]
     C --> D[Editor: Replace file\nsame format, previous size and rows kept in history]
     D --> E[Pipelines read the file\nfrom the volume]

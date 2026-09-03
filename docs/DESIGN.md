@@ -245,7 +245,7 @@ import (append) cover bulk changes instead.
 * **Domains** (global admins): list, create, edit, delete when unassigned. The sidebar and
   the home page group functions under their domain; unassigned functions form a trailing
   group.
-* **Files**: *Add file* on the function page (function admins) uploads a CSV/Parquet file
+* **Files**: *New file* on the function page or in the sidebar (function admins) uploads a CSV/Parquet file
   through `dcc.Upload` (limit `RDM_MAX_FILE_MB`), previews the first rows locally
   (`services/files.preview_bytes`) and stores it with `put_file`; the file page previews the
   first rows through the backend reader, lists inferred columns and the upload history,

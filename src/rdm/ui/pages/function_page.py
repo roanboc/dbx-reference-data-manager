@@ -28,8 +28,8 @@ from rdm.ui.components import (
     page_title,
     role_badge,
 )
-from rdm.ui.context import AppContext, get_context, invalidate_metadata
-from rdm.ui.layout import domain_href, file_href, form_href, function_href
+from rdm.ui.context import AppContext, get_context, invalidate_metadata, navigation
+from rdm.ui.layout import domain_href, file_href, form_href, function_href, new_form_href
 
 GRID_THEME = "ag-theme-quartz"
 
@@ -99,13 +99,28 @@ def render(ctx_: AppContext, function_name: str) -> dmc.Stack:
         dmc.Group(
             [
                 dmc.Title(f"Forms ({len(forms)})", order=4),
-                dmc.TextInput(
-                    id=ids.FUNCTION_FORMS_FILTER,
-                    placeholder="Filter forms",
-                    leftSection=icon("tabler:filter"),
-                    debounce=250,
-                    w=280,
-                    size="sm",
+                dmc.Group(
+                    [
+                        dmc.TextInput(
+                            id=ids.FUNCTION_FORMS_FILTER,
+                            placeholder="Filter forms",
+                            leftSection=icon("tabler:filter"),
+                            debounce=250,
+                            w=280,
+                            size="sm",
+                        ),
+                        link_button(
+                            "New form",
+                            new_form_href(function.name),
+                            variant="light",
+                            size="sm",
+                            leftSection=icon("tabler:circle-plus"),
+                        )
+                        if role.can_admin
+                        else None,
+                    ],
+                    gap="xs",
+                    wrap="nowrap",
                 ),
             ],
             justify="space-between",
@@ -115,7 +130,7 @@ def render(ctx_: AppContext, function_name: str) -> dmc.Stack:
             [
                 dmc.Title(f"Files ({len(files)})", order=4),
                 dmc.Button(
-                    "Add file",
+                    "New file",
                     id=ids.ADD_FILE_OPEN,
                     variant="light",
                     size="sm",
@@ -153,7 +168,7 @@ def file_cards(
         if not files:
             return empty_state(
                 "No files in this function",
-                "Function admins can add a CSV or Parquet file with Add file."
+                "Function admins can add a CSV or Parquet file with New file."
                 if role.can_admin
                 else "Nothing here yet.",
                 "tabler:file-spreadsheet",
@@ -211,62 +226,117 @@ def file_cards(
 
 
 def _add_file_modal(ctx_: AppContext, function: FunctionDef) -> dmc.Modal:
-    max_mb = ctx_.settings.max_file_mb
     return dmc.Modal(
-        id=ids.ADD_FILE_MODAL,
-        title=f"Add a file to {function.title}",
-        size="xl",
-        children=dmc.Stack(
-            [
-                dcc.Store(id=ids.ADD_FILE_TOKEN, data=None),
-                dmc.Text(
-                    f"Upload a CSV or Parquet file (up to {max_mb} MB through the browser; larger files can be "
-                    "landed in the function's volume directly and appear here automatically). The file is stored "
-                    "as a whole; rows are not edited in a grid.",
-                    size="sm",
-                    c="dimmed",
-                ),
-                dcc.Upload(
-                    id=ids.ADD_FILE_UPLOAD,
-                    children=html.Div(
-                        ["Drag and drop or ", html.B("click to choose"), " a CSV or Parquet file"]
+        id=ids.ADD_FILE_MODAL, title=f"New file in {function.title}", size="xl", children=_add_file_form(ctx_)
+    )
+
+
+def _add_file_form(ctx_: AppContext) -> dmc.Stack:
+    """Upload, preview and describe a new file. Shared by the function page modal and the
+    New file page; the target function is the ``FUNCTION_KEY`` store on the page."""
+    max_mb = ctx_.settings.max_file_mb
+    return dmc.Stack(
+        [
+            dcc.Store(id=ids.ADD_FILE_TOKEN, data=None),
+            dmc.Text(
+                f"Upload a CSV or Parquet file (up to {max_mb} MB through the browser; larger files can be "
+                "landed in the function's volume directly and appear here automatically). The file is stored "
+                "as a whole; rows are not edited in a grid.",
+                size="sm",
+                c="dimmed",
+            ),
+            dcc.Upload(
+                id=ids.ADD_FILE_UPLOAD,
+                children=html.Div(["Drag and drop or ", html.B("click to choose"), " a CSV or Parquet file"]),
+                className="rdm-dropzone",
+                multiple=False,
+                accept=".csv,.parquet",
+                max_size=max_mb * 1024 * 1024,
+            ),
+            html.Div(id=ids.ADD_FILE_PREVIEW),
+            dmc.SimpleGrid(
+                [
+                    dmc.TextInput(
+                        id=ids.ADD_FILE_NAME,
+                        label="File name",
+                        description="lower_snake_case plus .csv or .parquet; the name in the volume",
+                        required=True,
                     ),
-                    className="rdm-dropzone",
-                    multiple=False,
-                    accept=".csv,.parquet",
-                    max_size=max_mb * 1024 * 1024,
+                    dmc.TextInput(id=ids.ADD_FILE_DISPLAY, label="Display name"),
+                    dmc.Textarea(id=ids.ADD_FILE_DESC, label="Description", autosize=True, minRows=2),
+                    dmc.TextInput(
+                        id=ids.ADD_FILE_OWNER, label="Owner", value=ctx_.user.email or ctx_.user.username
+                    ),
+                ],
+                cols={"base": 1, "md": 2},
+            ),
+            dmc.Group(
+                [
+                    dmc.Button(
+                        "Add file",
+                        id=ids.ADD_FILE_SUBMIT,
+                        disabled=True,
+                        leftSection=icon("tabler:file-plus"),
+                    )
+                ],
+                justify="flex-end",
+            ),
+        ],
+        gap="sm",
+    )
+
+
+def render_new_file(ctx_: AppContext, function_name: str | None = None) -> dmc.Stack:
+    """``/new-file[/<function>]``: add a CSV/Parquet file to a function the user administers."""
+    header = page_title(
+        "New file",
+        "Add a CSV or Parquet dataset (too large for a grid) to a function; it is stored as a whole in "
+        "the function's volume.",
+    )
+    functions = ctx_.permissions.admin_functions
+    if not functions:
+        return dmc.Stack(
+            [
+                header,
+                info_alert(
+                    "You need Function admin access to at least one function to add files.",
+                    "Function admins only",
+                    "yellow",
                 ),
-                html.Div(id=ids.ADD_FILE_PREVIEW),
-                dmc.SimpleGrid(
+            ]
+        )
+    titles = {item.function.name: item.function.title for item in navigation(ctx_, None)}
+    selected = function_name if function_name in functions else functions[0]
+    return dmc.Stack(
+        [
+            dcc.Store(id=ids.FUNCTION_KEY, data=selected),
+            header,
+            dmc.Paper(
+                dmc.Stack(
                     [
-                        dmc.TextInput(
-                            id=ids.ADD_FILE_NAME,
-                            label="File name",
-                            description="lower_snake_case plus .csv or .parquet; the name in the volume",
-                            required=True,
+                        dmc.Select(
+                            id=ids.NEW_FILE_FUNCTION,
+                            label="Function",
+                            data=[
+                                {"value": f, "label": f"{titles.get(f, humanize(f))} ({f})"}
+                                for f in functions
+                            ],
+                            value=selected,
+                            allowDeselect=False,
+                            description="You can only add files to functions you administer",
+                            searchable=True,
+                            maw=480,
                         ),
-                        dmc.TextInput(id=ids.ADD_FILE_DISPLAY, label="Display name"),
-                        dmc.Textarea(id=ids.ADD_FILE_DESC, label="Description", autosize=True, minRows=2),
-                        dmc.TextInput(
-                            id=ids.ADD_FILE_OWNER, label="Owner", value=ctx_.user.email or ctx_.user.username
-                        ),
+                        _add_file_form(ctx_),
                     ],
-                    cols={"base": 1, "md": 2},
+                    gap="md",
                 ),
-                dmc.Group(
-                    [
-                        dmc.Button(
-                            "Add file",
-                            id=ids.ADD_FILE_SUBMIT,
-                            disabled=True,
-                            leftSection=icon("tabler:file-plus"),
-                        )
-                    ],
-                    justify="flex-end",
-                ),
-            ],
-            gap="sm",
-        ),
+                withBorder=True,
+                p="md",
+                radius="md",
+            ),
+        ],
+        gap="md",
     )
 
 
@@ -673,6 +743,12 @@ def register(app) -> None:
     )
     def open_add_file(n):
         return bool(n)
+
+    @app.callback(
+        Output(ids.FUNCTION_KEY, "data"), Input(ids.NEW_FILE_FUNCTION, "value"), prevent_initial_call=True
+    )
+    def choose_new_file_function(function):
+        return function
 
     @app.callback(
         Output(ids.ADD_FILE_PREVIEW, "children"),

@@ -47,7 +47,7 @@ the grid refreshes so you can redo the edit on the current values.
 | Preview | everyone with access | The **Preview** tab shows the first rows; **Columns** the inferred types. |
 | Download | everyone with access | **Download** on the file page. |
 | Replace | Editors | **Replace file**: upload a new file of the same format; the previous size and row count stay in the **History** tab. |
-| Add | Function admins | **Add file** on the function page: upload, check the preview, give it a name and description. |
+| Add | Function admins | **New file** on the function page or in the sidebar: choose the function, upload, check the preview, give it a name and description. |
 | Delete | Global admins | **Settings** tab of the file. |
 
 Files larger than the upload limit are landed in the function's volume directly (Databricks

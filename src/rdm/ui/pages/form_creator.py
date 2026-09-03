@@ -29,7 +29,7 @@ STEPS = [
 TYPE_VALUES = [t.value for t in DataType.editable_types()]
 
 
-def _default_state() -> dict[str, Any]:
+def _default_state(function: str | None = None) -> dict[str, Any]:
     return {
         "step": 0,
         "mode": "upload",
@@ -38,7 +38,7 @@ def _default_state() -> dict[str, Any]:
         "sheet": None,
         "header_row": 1,
         "columns": [],
-        "function": "",
+        "function": function or "",
         "name": "",
         "display_name": "",
         "description": "",
@@ -47,7 +47,9 @@ def _default_state() -> dict[str, Any]:
     }
 
 
-def render(ctx_: AppContext) -> dmc.Stack:
+def render(ctx_: AppContext, function: str | None = None) -> dmc.Stack:
+    """The wizard; ``function`` (from ``/new-form/<function>``) pre-selects the function when the
+    user administers it."""
     header = page_title(
         "New form",
         "Create a governed, editable list from an Excel file or from a hand-written column definition.",
@@ -65,7 +67,10 @@ def render(ctx_: AppContext) -> dmc.Stack:
         )
     return dmc.Stack(
         [
-            dcc.Store(id=ids.WIZ_STORE, data=_default_state()),
+            dcc.Store(
+                id=ids.WIZ_STORE,
+                data=_default_state(function if function in ctx_.permissions.admin_functions else None),
+            ),
             header,
             dmc.Stepper(
                 id=ids.WIZ_STEPPER,

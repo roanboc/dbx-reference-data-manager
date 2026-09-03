@@ -34,7 +34,7 @@ ASSETS = Path(__file__).resolve().parents[3] / "assets"
 
 def parse_path(pathname: str | None) -> tuple[str, str | None, str | None]:
     """``/`` -> home, ``/fn/<function>``, ``/f/<function>/<form>``, ``/file/<function>/<file>``,
-    ``/new-form``, ``/new-function``, ``/domains``, ``/help``."""
+    ``/new-form[/<function>]``, ``/new-file[/<function>]``, ``/new-function``, ``/domains``, ``/help``."""
     parts = [unquote(p) for p in (pathname or "/").split("/") if p]
     if not parts:
         return "home", None, None
@@ -47,7 +47,9 @@ def parse_path(pathname: str | None) -> tuple[str, str | None, str | None]:
     if parts[0] == "dm" and len(parts) >= 2:
         return "domain", parts[1], None
     if parts[0] == "new-form":
-        return "new-form", None, None
+        return "new-form", parts[1] if len(parts) >= 2 else None, None
+    if parts[0] == "new-file":
+        return "new-file", parts[1] if len(parts) >= 2 else None, None
     if parts[0] == "new-function":
         return "new-function", None, None
     if parts[0] == "domains":
@@ -128,7 +130,9 @@ def register_shell_callbacks(app: dash.Dash) -> None:
             if view == "domain":
                 return domain_page.render(app_ctx, function)
             if view == "new-form":
-                return form_creator.render(app_ctx)
+                return form_creator.render(app_ctx, function)
+            if view == "new-file":
+                return function_page.render_new_file(app_ctx, function)
             if view == "new-function":
                 return function_page.render_new(app_ctx)
             if view == "domains":
