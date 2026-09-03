@@ -1,0 +1,82 @@
+# Databricks Asset Bundle for the Reference Data Manager.
+#
+# Declares everything the app needs in a workspace: the Unity Catalog catalog
+# (resources/catalog.yml), the domain schemas with their grants (resources/schemas.yml) and
+# the Databricks App itself (resources/app.yml). See docs/DEPLOYMENT.md for the workflow.
+#
+#   databricks bundle validate -t dev --var="warehouse_id=<id>"
+#   databricks bundle deploy   -t dev --var="warehouse_id=<id>"
+#   databricks bundle run reference_data_manager -t dev
+
+bundle:
+  name: rdm_reference_data_manager
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: >-
+      Unity Catalog catalog that holds the reference-data domains (schemas) and forms
+      (tables). Created by resources/catalog.yml; the app reads it as RDM_CATALOG.
+    default: _reference_data
+
+  warehouse_id:
+    description: >-
+      ID of the SQL warehouse the app queries (serverless recommended, see DESIGN.md §10).
+      Deliberately has no default: pass --var="warehouse_id=<id>", export
+      BUNDLE_VAR_warehouse_id, or set it per target below. List warehouses with
+      `databricks warehouses list`. (A `lookup: {warehouse: <name>}` is a possible
+      alternative to hard-coding the id.)
+
+  admin_group:
+    description: >-
+      Account-level group of global administrators: may create functions (CREATE_SCHEMA),
+      manage grants (MANAGE) and manage the app (CAN_MANAGE).
+    default: rdm_admins
+
+  app_name:
+    description: >-
+      Name of the Databricks App. Lowercase letters, digits and hyphens only; must be
+      unique in the workspace (apps are NOT prefixed per developer in development mode).
+    default: reference-data-manager
+
+  app_users_group:
+    description: >-
+      Group that may open the app (CAN_USE on the app). What a user can see or edit is
+      still decided only by Unity Catalog grants on the schemas.
+    default: users
+
+targets:
+  # Personal development deployment. `mode: development` makes the CLI prefix schema names
+  # with `dev_<your-short-name>_` (catalog and app names are not prefixed), skips the
+  # deployment lock and deploys as you (no run_as).
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com   # TODO: e.g. https://adb-1234567890123456.7.azuredatabricks.net
+    variables:
+      # A separate catalog keeps dev deployments away from production data. If several
+      # developers deploy `dev` to the same workspace they need distinct catalog and app
+      # names (--var="catalog=_reference_data_dev_<name>" --var="app_name=rdm-dev-<name>") because
+      # every developer holds their own bundle state.
+      catalog: _reference_data_dev
+      app_name: reference-data-manager-dev
+      # warehouse_id: <dev warehouse id>
+
+  # Production. Deployed by CI (.github/workflows/ci.yml) with the credentials of the
+  # service principal named in run_as. The CLI refuses to deploy apps when run_as differs
+  # from the identity performing the deployment, so the CI credentials MUST belong to this
+  # same service principal.
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com   # TODO
+      # Shared path so the deployment does not live under one person's home folder.
+      root_path: /Shared/.bundle/${bundle.target}/${bundle.name}
+    run_as:
+      service_principal_name: 00000000-0000-0000-0000-000000000000   # TODO: application ID of the deploying service principal
+    variables:
+      catalog: _reference_data
+      # warehouse_id: <prod warehouse id>   # or export BUNDLE_VAR_warehouse_id in CI

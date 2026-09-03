@@ -1,0 +1,70 @@
+# The Databricks App. Source is the repository root (app.py, src/, requirements.txt);
+# files matched by .gitignore (data/*.duckdb, .venv, .env, ...) are not uploaded.
+resources:
+  apps:
+    reference_data_manager:
+      name: ${var.app_name}
+      description: >-
+        Reference Data Manager - data stewards browse and edit reference lists stored as
+        Unity Catalog Delta tables (one schema per function, grouped into domains, one table
+        per form) and CSV/Parquet files in a volume per function, with change history and
+        role-based access derived from Unity Catalog grants.
+      source_code_path: ../
+      compute_size: MEDIUM
+
+      # Runtime configuration. Mirrors app.yaml at the repository root (which serves
+      # `databricks apps deploy` / `run-local`); when deployed by the bundle this block wins.
+      # Do not set the variables the runtime injects (DATABRICKS_HOST, DATABRICKS_CLIENT_ID/
+      # SECRET, DATABRICKS_APP_*, DATABRICKS_APP_PORT).
+      config:
+        command: ["python", "app.py"]
+        env:
+          - name: DATABRICKS_WAREHOUSE_ID
+            value_from: sql-warehouse            # resolved from the app resource below
+          - name: RDM_BACKEND
+            value: databricks
+          - name: RDM_AUTH
+            value: databricks                    # identity from the X-Forwarded-* headers
+          - name: RDM_CATALOG
+            value: ${resources.catalogs.forms.name}                       # same value the runtime sets; never anything else
+          # - name: RDM_MAX_ROWS
+          #   value: "5000"
+          # - name: RDM_MAX_FILE_MB
+          #   value: "200"
+
+      # App resources: the CLI grants the app's service principal `permission` on each one
+      # and exposes the id through `value_from: <name>`. CAN_USE is all the service principal
+      # needs (least privilege, DESIGN.md §10): with user authorization enabled the data
+      # access rights are the signed-in user's, not the service principal's.
+      resources:
+        - name: sql-warehouse
+          description: SQL warehouse that runs every reference-data query (serverless recommended)
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+
+      # User authorization (on-behalf-of-user). With these scopes declared, the Apps proxy
+      # forwards a user-scoped OAuth token in X-Forwarded-Access-Token (after the user consents
+      # on first visit) and the app opens the SQL connection with it, so every statement runs
+      # as the signed-in user and Unity Catalog enforces the schema grants directly.
+      #   sql                    - run statements on the SQL warehouse as the user
+      #                            (the user needs CAN_USE on the warehouse, see DEPLOYMENT.md)
+      #   files.files            - upload, download and delete files in the function volumes
+      #                            (Files API) as the user; READ/WRITE VOLUME grants apply
+      #   iam.current-user:read  - lets DatabricksAuthProvider read the user's group
+      #                            memberships (/Me) with the same token; a default scope in
+      #                            the UI, declared explicitly here.
+      # Without user authorization the app falls back to its service principal, which would
+      # then need the union of all data privileges - documented but not recommended (§5).
+      user_api_scopes:
+        - sql
+        - files.files
+        - iam.current-user:read
+
+      # Who may open the app. CAN_USE only opens the door: what a user sees and edits is
+      # decided by Unity Catalog grants (resources/schemas.yml).
+      permissions:
+        - group_name: ${var.admin_group}
+          level: CAN_MANAGE
+        - group_name: ${var.app_users_group}
+          level: CAN_USE

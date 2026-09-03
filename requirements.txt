@@ -1,0 +1,14 @@
+# Runtime dependencies for the Databricks App (and local development).
+# Pinned to the minor version; Databricks Apps installs these with pip on deploy.
+dash~=4.4
+dash-ag-grid~=35.3
+dash-mantine-components~=2.8
+dash-iconify~=0.1
+gunicorn~=23.0
+pandas~=3.0
+pyarrow~=25.0
+openpyxl~=3.1
+duckdb~=1.5
+databricks-sql-connector~=4.5
+databricks-sdk~=0.133
+python-dotenv~=1.1

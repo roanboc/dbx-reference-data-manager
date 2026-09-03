@@ -1,0 +1,97 @@
+# Function schemas of the reference-data catalog. The app's hierarchy is
+# domain > function > form | file: one schema per business *function*, named <domain>__<area>
+# (lowercase, matches the app's identifier rule ^[a-z][a-z0-9_]{0,62}$), grouped into
+# business *domains* (a classifier the app keeps in _catalog.domains and records on the
+# schema as the property rdm.domain / tag rdm_domain). These three mirror the demo
+# functions seeded locally by scripts/seed_demo.py (src/rdm/demo.py). Each function's files
+# live in the managed volume <schema>._files, created by the app on first use (CREATE_VOLUME).
+#
+# Role mapping (docs/DESIGN.md §5) - grants go to account-level groups, never to users:
+#   Viewer          USE_SCHEMA, SELECT, READ_VOLUME            (+ USE_CATALOG from catalog.yml)
+#   Editor          Viewer + MODIFY + WRITE_VOLUME             (replace files)
+#   Function admin  Editor + CREATE_TABLE + CREATE_VOLUME + MANAGE + APPLY_TAG
+#   Global admin    CREATE_SCHEMA + MANAGE on the catalog (resources/catalog.yml); only
+#                   global admins delete functions and forms and maintain the domain list
+#
+# The catalog administrators group already inherits the Function admin set from the catalog
+# (resources/catalog.yml); it is repeated on every schema so each function is self-describing
+# and keeps working if the catalog grants are tightened. To delegate administration of one
+# function, add a function-specific group (finance_admins below) with the same privilege list.
+#
+# Notes
+#   * `properties` carry the display name, owner and domain the app shows in the sidebar
+#     (rdm.display_name / rdm.owner / rdm.domain, see rdm.models). The domain name must exist
+#     in the app's domain list (Domains page, global admins); a schema without rdm.domain
+#     shows under "Unassigned" until a global admin assigns it. The app additionally sets
+#     schema tags (rdm_display_name, rdm_owner, rdm_domain) for functions it creates itself;
+#     the bundle schema resource has no tags field, so tags for these schemas can be added
+#     later in Catalog Explorer.
+#   * In target `dev` (mode: development) the CLI prefixes each schema name with
+#     dev_<your-short-name>_, e.g. dev_alice_student__survey_service_improvement.
+#   * Grants are managed as the complete grant list of each schema (see catalog.yml).
+#   * Delete a function by removing its block here (the CLI destroys the schema on the next
+#     deploy) - only after its tables have been migrated or dropped. The app's own "Delete
+#     function" (global admins) refuses while tables exist.
+resources:
+  schemas:
+    # System schema used by the app: registry (domains, functions, forms) and the
+    # row-level audit trail (change_log). Every app user writes audit rows, so editors need
+    # MODIFY here; the tables are created by the app on first use (CREATE TABLE IF NOT EXISTS).
+    rdm_catalog:
+      name: _catalog
+      catalog_name: ${resources.catalogs.forms.name}
+      comment: "Reference Data Manager registry and audit trail (managed by the app)"
+      grants:
+        - principal: ${var.app_users_group}
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME]
+        - principal: ${var.admin_group}
+          privileges: [USE_SCHEMA, SELECT, MODIFY, CREATE_TABLE, MANAGE]
+    student_survey_service_improvement:
+      name: student__survey_service_improvement
+      catalog_name: ${resources.catalogs.forms.name}
+      comment: Reference lists used by the student survey and service improvement programme.
+      properties:
+        rdm.display_name: "Student Survey & Service Improvement"
+        rdm.owner: survey.team@example.org
+        rdm.domain: student
+      grants:
+        - principal: student_readers          # Viewer
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME]
+        - principal: student_stewards         # Editor
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME]
+        - principal: ${var.admin_group}       # Global admin group (Function admin set)
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME, CREATE_TABLE, CREATE_VOLUME, MANAGE, APPLY_TAG]
+
+    finance_cost_management:
+      name: finance__cost_management
+      catalog_name: ${resources.catalogs.forms.name}
+      comment: Cost centres, GL mappings and budget reference data owned by Finance.
+      properties:
+        rdm.display_name: "Finance - Cost Management"
+        rdm.owner: finance.data@example.org
+        rdm.domain: finance
+      grants:
+        - principal: finance_readers          # Viewer
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME]
+        - principal: finance_stewards         # Editor
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME]
+        - principal: finance_admins           # Function admin (delegated to the owning team)
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME, CREATE_TABLE, CREATE_VOLUME, MANAGE, APPLY_TAG]
+        - principal: ${var.admin_group}       # Global admin group (Function admin set)
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME, CREATE_TABLE, CREATE_VOLUME, MANAGE, APPLY_TAG]
+
+    hr_reference:
+      name: hr__reference
+      catalog_name: ${resources.catalogs.forms.name}
+      comment: People and contract reference lists maintained by HR Systems.
+      properties:
+        rdm.display_name: "HR Reference"
+        rdm.owner: hr.systems@example.org
+        rdm.domain: people
+      grants:
+        - principal: hr_readers               # Viewer
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME]
+        - principal: hr_stewards              # Editor
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME]
+        - principal: ${var.admin_group}       # Global admin group (Function admin set)
+          privileges: [USE_SCHEMA, SELECT, READ_VOLUME, MODIFY, WRITE_VOLUME, CREATE_TABLE, CREATE_VOLUME, MANAGE, APPLY_TAG]
