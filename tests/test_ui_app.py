@@ -56,3 +56,33 @@ def test_page_callback_renders_home_for_admin(client):
     resp = client.post("/_dash-update-component", data=json.dumps(body), content_type="application/json")
     assert resp.status_code == 200
     assert "Reference data" in json.dumps(resp.get_json())
+
+
+@pytest.mark.parametrize(
+    ("pathname", "persona", "expected"),
+    [
+        ("/domains", "admin", "Business domains group the functions"),
+        ("/domains", "editor", "Global admins only"),
+        ("/new-function", "admin", "New function"),
+        ("/new-file", "viewer", "Function admins only"),
+        ("/fn/nowhere", "admin", "Access denied"),
+        ("/file/finance__cost_management/nothing.csv", "admin", "Access denied"),
+        ("/dm/finance", "viewer", "Domain 'finance' does not exist"),  # unseeded database
+        ("/dm/ghost", "admin", "Not found"),
+    ],
+)
+def test_page_callback_routes(client, pathname, persona, expected):
+    body = {
+        "output": "page-content.children",
+        "outputs": {"id": "page-content", "property": "children"},
+        "inputs": [
+            {"id": "url", "property": "pathname", "value": pathname},
+            {"id": "persona-store", "property": "data", "value": persona},
+            {"id": "nav-version", "property": "data", "value": 0},
+        ],
+        "changedPropIds": ["url.pathname"],
+        "state": [],
+    }
+    resp = client.post("/_dash-update-component", data=json.dumps(body), content_type="application/json")
+    assert resp.status_code == 200
+    assert expected in json.dumps(resp.get_json())

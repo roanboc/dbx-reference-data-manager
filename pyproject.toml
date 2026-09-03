@@ -1,7 +1,7 @@
 [project]
 name = "rdm"
 version = "0.1.0"
-description = "Databricks Reference Data Manager (SCD Manager) - Streamlit data steward app"
+description = "Databricks Reference Data Manager (SCD Manager) - Dash data steward app"
 requires-python = ">=3.11"
 readme = "README.md"
 

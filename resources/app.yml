@@ -6,8 +6,9 @@ resources:
       name: ${var.app_name}
       description: >-
         Reference Data Manager - data stewards browse and edit reference lists stored as
-        Unity Catalog Delta tables (one schema per domain, one table per form), with change
-        history and role-based access derived from Unity Catalog grants.
+        Unity Catalog Delta tables (one schema per function, grouped into domains, one table
+        per form) and CSV/Parquet files in a volume per function, with change history and
+        role-based access derived from Unity Catalog grants.
       source_code_path: ../
       compute_size: MEDIUM
 
@@ -28,6 +29,8 @@ resources:
             value: ${resources.catalogs.forms.name}                       # same value the runtime sets; never anything else
           # - name: RDM_MAX_ROWS
           #   value: "5000"
+          # - name: RDM_MAX_FILE_MB
+          #   value: "200"
 
       # App resources: the CLI grants the app's service principal `permission` on each one
       # and exposes the id through `value_from: <name>`. CAN_USE is all the service principal
@@ -46,6 +49,8 @@ resources:
       # as the signed-in user and Unity Catalog enforces the schema grants directly.
       #   sql                    - run statements on the SQL warehouse as the user
       #                            (the user needs CAN_USE on the warehouse, see DEPLOYMENT.md)
+      #   files.files            - upload, download and delete files in the function volumes
+      #                            (Files API) as the user; READ/WRITE VOLUME grants apply
       #   iam.current-user:read  - lets DatabricksAuthProvider read the user's group
       #                            memberships (/Me) with the same token; a default scope in
       #                            the UI, declared explicitly here.
@@ -53,6 +58,7 @@ resources:
       # then need the union of all data privileges - documented but not recommended (§5).
       user_api_scopes:
         - sql
+        - files.files
         - iam.current-user:read
 
       # Who may open the app. CAN_USE only opens the door: what a user sees and edits is

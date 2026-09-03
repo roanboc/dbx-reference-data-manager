@@ -21,12 +21,36 @@ THEME = {
 }
 
 
-def form_href(domain: str, form: str) -> str:
-    return f"/f/{quote(domain)}/{quote(form)}"
+def form_href(function: str, form: str) -> str:
+    return f"/f/{quote(function)}/{quote(form)}"
+
+
+def function_href(function: str) -> str:
+    return f"/fn/{quote(function)}"
+
+
+def file_href(function: str, name: str) -> str:
+    return f"/file/{quote(function)}/{quote(name)}"
 
 
 def domain_href(domain: str) -> str:
-    return f"/d/{quote(domain)}"
+    return f"/dm/{quote(domain)}"
+
+
+DOMAINS_HREF = "/domains"
+NEW_FUNCTION_HREF = "/new-function"
+NEW_FORM_HREF = "/new-form"
+NEW_FILE_HREF = "/new-file"
+
+
+def new_form_href(function: str | None = None) -> str:
+    """The form wizard, with the function pre-selected when given."""
+    return f"{NEW_FORM_HREF}/{quote(function)}" if function else NEW_FORM_HREF
+
+
+def new_file_href(function: str | None = None) -> str:
+    """The new-file page, with the function pre-selected when given."""
+    return f"{NEW_FILE_HREF}/{quote(function)}" if function else NEW_FILE_HREF
 
 
 def shell() -> dmc.MantineProvider:
@@ -47,7 +71,7 @@ def shell() -> dmc.MantineProvider:
                             [
                                 dmc.TextInput(
                                     id=ids.NAV_SEARCH,
-                                    placeholder="Search forms by name or description",
+                                    placeholder="Search forms and files",
                                     leftSection=icon("tabler:search"),
                                     debounce=350,
                                     size="sm",
@@ -105,7 +129,7 @@ def header(ctx: AppContext, persona: str | None) -> dmc.Group:
                     data=[{"value": p.key, "label": p.label} for p in personas],
                     value=current,
                     size="sm",
-                    w=200,
+                    w=220,
                     allowDeselect=False,
                     leftSection=icon("tabler:user-circle"),
                 ),
@@ -129,111 +153,172 @@ def header(ctx: AppContext, persona: str | None) -> dmc.Group:
     return dmc.Group([left, right], justify="space-between", h=56)
 
 
-def navbar(ctx: AppContext, items: list[NavDomain], pathname: str, search: str | None) -> dmc.Stack:
+def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str | None) -> dmc.Stack:
+    """Sidebar: functions grouped under their domain, forms under each function."""
     perms = ctx.permissions
     persona = ctx.auth.personas()
     caption = next((p.description for p in persona if p.user.username == ctx.user.username), "")
     blocks = []
     if caption:
         blocks.append(dmc.Text(caption, size="xs", c="dimmed"))
-    if not items:
+    if not groups:
         blocks.append(
             dmc.Alert(
                 "No matches. Try another word."
                 if search
-                else "You have not been granted access to any domain yet.",
+                else "You have not been granted access to any function yet.",
                 color="gray",
                 variant="light",
                 icon=icon("tabler:search-off" if search else "tabler:lock"),
             )
         )
-    current_domain = _current_domain(pathname)
-    accordion_items = []
-    opened = []
-    for item in items:
-        d = item.domain
-        if search or d.name == current_domain:
-            opened.append(d.name)
-        links = [
-            dmc.NavLink(
-                label="Domain overview",
-                href=domain_href(d.name),
-                active=pathname == domain_href(d.name),
-                leftSection=icon("tabler:folder-open"),
-                variant="light",
-            )
-        ]
-        for f in item.forms:
-            links.append(
+    current_function = _current_function(pathname)
+    sections = []
+    for group in groups:
+        accordion_items = []
+        opened = []
+        for item in group.functions:
+            f = item.function
+            if search or f.name == current_function:
+                opened.append(f.name)
+            links = [
                 dmc.NavLink(
-                    label=f.title,
-                    description=(f.description[:80] + "…")
-                    if f.description and len(f.description) > 80
-                    else (f.description or None),
-                    href=form_href(d.name, f.name),
-                    active=pathname == form_href(d.name, f.name),
-                    leftSection=icon("tabler:table"),
+                    label="Function overview",
+                    href=function_href(f.name),
+                    active=pathname == function_href(f.name),
+                    leftSection=icon("tabler:folder-open"),
                     variant="light",
                 )
-            )
-        if not item.forms:
-            links.append(
-                dmc.Text(
-                    "No forms yet." + (" Use New form to create one." if item.role.can_admin else ""),
-                    size="xs",
-                    c="dimmed",
-                    px="sm",
+            ]
+            for x in item.forms:
+                links.append(
+                    dmc.NavLink(
+                        label=x.title,
+                        description=(x.description[:80] + "…")
+                        if x.description and len(x.description) > 80
+                        else (x.description or None),
+                        href=form_href(f.name, x.name),
+                        active=pathname == form_href(f.name, x.name),
+                        leftSection=icon("tabler:table"),
+                        variant="light",
+                    )
+                )
+            for x in item.files:
+                links.append(
+                    dmc.NavLink(
+                        label=x.title,
+                        description=(x.description[:80] + "…")
+                        if x.description and len(x.description) > 80
+                        else (x.description or f"{x.format.upper()} file"),
+                        href=file_href(f.name, x.name),
+                        active=pathname == file_href(f.name, x.name),
+                        leftSection=icon(
+                            "tabler:file-spreadsheet" if x.format == "csv" else "tabler:file-database"
+                        ),
+                        variant="light",
+                    )
+                )
+            if item.is_empty:
+                links.append(
+                    dmc.Text(
+                        "No forms or files yet."
+                        + (" Use New form or New file to create one." if item.role.can_admin else ""),
+                        size="xs",
+                        c="dimmed",
+                        px="sm",
+                    )
+                )
+            accordion_items.append(
+                dmc.AccordionItem(
+                    [
+                        dmc.AccordionControl(
+                            dmc.Group(
+                                [
+                                    dmc.Text(f.title, size="sm", fw=600),
+                                    dmc.Badge(
+                                        item.role.label,
+                                        size="xs",
+                                        color=ROLE_COLORS[item.role],
+                                        variant="light",
+                                    ),
+                                ],
+                                justify="space-between",
+                                wrap="nowrap",
+                            ),
+                            icon=icon(ROLE_ICONS[item.role]),
+                        ),
+                        dmc.AccordionPanel(dmc.Stack(links, gap=0)),
+                    ],
+                    value=f.name,
                 )
             )
-        accordion_items.append(
-            dmc.AccordionItem(
+        sections.append(
+            dmc.Stack(
                 [
-                    dmc.AccordionControl(
-                        dmc.Group(
-                            [
-                                dmc.Text(d.title, size="sm", fw=600),
-                                dmc.Badge(
-                                    item.role.label, size="xs", color=ROLE_COLORS[item.role], variant="light"
-                                ),
-                            ],
-                            justify="space-between",
-                            wrap="nowrap",
-                        ),
-                        icon=icon(ROLE_ICONS[item.role]),
+                    dmc.Anchor(
+                        _domain_heading(group),
+                        href=domain_href(group.domain.name),
+                        underline="never",
+                        c="inherit",
+                    )
+                    if not group.is_unassigned
+                    else _domain_heading(group),
+                    dmc.Accordion(
+                        accordion_items,
+                        multiple=True,
+                        value=opened,
+                        variant="separated",
+                        chevronPosition="left",
                     ),
-                    dmc.AccordionPanel(dmc.Stack(links, gap=0)),
                 ],
-                value=d.name,
+                gap=4,
+                className="rdm-domain-group",
             )
         )
-    if accordion_items:
-        blocks.append(
-            dmc.ScrollArea(
-                dmc.Accordion(
-                    accordion_items, multiple=True, value=opened, variant="separated", chevronPosition="left"
-                ),
-                type="auto",
-                style={"flex": 1},
-            )
-        )
+    if sections:
+        blocks.append(dmc.ScrollArea(dmc.Stack(sections, gap="sm"), type="auto", style={"flex": 1}))
     actions = []
     if perms.is_admin_anywhere:
         actions.append(
-            link_button(
-                "New form",
-                "/new-form",
-                leftSection=icon("tabler:circle-plus"),
-                variant="light",
-                fullWidth=True,
-                disabled=not perms.admin_domains,
+            dmc.SimpleGrid(
+                [
+                    link_button(
+                        "New form",
+                        NEW_FORM_HREF,
+                        leftSection=icon("tabler:circle-plus"),
+                        variant="light",
+                        fullWidth=True,
+                        disabled=not perms.admin_functions,
+                    ),
+                    link_button(
+                        "New file",
+                        NEW_FILE_HREF,
+                        leftSection=icon("tabler:file-plus"),
+                        variant="light",
+                        fullWidth=True,
+                        disabled=not perms.admin_functions,
+                    ),
+                ],
+                cols=2,
+                spacing="xs",
             )
         )
-    if perms.can_create_domain:
+    if perms.can_create_function:
         actions.append(
             link_button(
-                "New domain",
-                "/new-domain",
+                "New function",
+                NEW_FUNCTION_HREF,
                 leftSection=icon("tabler:folder-plus"),
+                variant="light",
+                fullWidth=True,
+            )
+        )
+    if perms.can_manage_domains:
+        actions.append(
+            link_button(
+                "Domains",
+                DOMAINS_HREF,
+                leftSection=icon("tabler:sitemap"),
                 variant="light",
                 fullWidth=True,
             )
@@ -250,8 +335,19 @@ def navbar(ctx: AppContext, items: list[NavDomain], pathname: str, search: str |
     return dmc.Stack(blocks, gap="sm", h="100%")
 
 
-def _current_domain(pathname: str) -> str | None:
+def _domain_heading(group: NavDomain) -> dmc.Group:
+    return dmc.Group(
+        [
+            icon("tabler:sitemap" if not group.is_unassigned else "tabler:folder-question", 14),
+            dmc.Text(group.domain.title, size="xs", fw=700, tt="uppercase", c="dimmed"),
+        ],
+        gap=6,
+        px=4,
+    )
+
+
+def _current_function(pathname: str) -> str | None:
     parts = [p for p in (pathname or "").split("/") if p]
-    if len(parts) >= 2 and parts[0] in ("d", "f"):
+    if len(parts) >= 2 and parts[0] in ("fn", "f", "file"):
         return parts[1]
     return None

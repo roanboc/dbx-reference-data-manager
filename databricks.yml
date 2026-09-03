@@ -19,7 +19,7 @@ variables:
     description: >-
       Unity Catalog catalog that holds the reference-data domains (schemas) and forms
       (tables). Created by resources/catalog.yml; the app reads it as RDM_CATALOG.
-    default: _forms
+    default: _reference_data
 
   warehouse_id:
     description: >-
@@ -31,7 +31,7 @@ variables:
 
   admin_group:
     description: >-
-      Account-level group of catalog administrators: may create domains (CREATE_SCHEMA),
+      Account-level group of global administrators: may create functions (CREATE_SCHEMA),
       manage grants (MANAGE) and manage the app (CAN_MANAGE).
     default: rdm_admins
 
@@ -59,9 +59,9 @@ targets:
     variables:
       # A separate catalog keeps dev deployments away from production data. If several
       # developers deploy `dev` to the same workspace they need distinct catalog and app
-      # names (--var="catalog=_forms_dev_<name>" --var="app_name=rdm-dev-<name>") because
+      # names (--var="catalog=_reference_data_dev_<name>" --var="app_name=rdm-dev-<name>") because
       # every developer holds their own bundle state.
-      catalog: _forms_dev
+      catalog: _reference_data_dev
       app_name: reference-data-manager-dev
       # warehouse_id: <dev warehouse id>
 
@@ -78,5 +78,5 @@ targets:
     run_as:
       service_principal_name: 00000000-0000-0000-0000-000000000000   # TODO: application ID of the deploying service principal
     variables:
-      catalog: _forms
+      catalog: _reference_data
       # warehouse_id: <prod warehouse id>   # or export BUNDLE_VAR_warehouse_id in CI

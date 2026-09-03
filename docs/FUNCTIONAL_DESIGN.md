@@ -18,16 +18,29 @@ in and out, and a clear record of who changed what.
 
 In scope
 
-* Creating, editing and retiring reference lists ("forms") per business domain.
+* Creating, editing and retiring reference lists ("forms") per business function, with the
+  functions grouped into the organisation's data domains.
+* Keeping large reference datasets (thousands to millions of rows) as governed **files**
+  (CSV or Parquet) in the same hierarchy, with preview, download, replace and history
+  instead of row-by-row editing.
 * Access by role, granted to groups, enforced by Unity Catalog.
-* Full change history and a registry of every domain and form for the data catalogue.
+* Full change history (per form and per row, with restore; per file per upload) and a
+  registry of every domain, function, form and file for the data catalogue.
 * Feeding downstream pipelines that build slowly changing dimensions.
 
 Out of scope
 
-* Large transactional or high-volume datasets (the grid is designed for lists of up to a
-  few thousand rows; the row limit is configurable).
-* Approval workflows and notifications (see §10, roadmap).
+* Editing high-volume datasets row by row (the grid is designed for lists of up to a few
+  thousand rows; the row limit is configurable). Larger datasets are kept as files, which are
+  replaced as a whole.
+* Approval workflows and notifications: a saved change takes effect immediately and is
+  attributable through the history. Organisations that need sign-off keep it in their
+  business process, outside the app.
+* Lookup columns that reference another form: relationships between lists are documented in
+  the column descriptions and validated downstream.
+* Effective dating as a built-in feature: the app tracks *who changed what and when* through
+  its own audit columns and history; lists that carry business validity dates define them as
+  ordinary columns.
 * Building the Type 2 dimensions themselves; the app supplies the current state and the
   change feed, pipelines derive history.
 
@@ -41,9 +54,9 @@ the lists cannot be joined reliably with lakehouse data.
 
 | Goal | Measure |
 |---|---|
-| One governed home for reference data | Every list has a domain, an owner and a description in the catalogue |
-| Business users maintain their own lists | Editors change rows without a data engineer; new lists are created from Excel by domain admins |
-| Trustworthy history | Every change is attributable (who, when, before, after); no silent overwrites |
+| One governed home for reference data | Every list has a domain, a function, an owner and a description in the catalogue |
+| Business users maintain their own lists | Editors change rows without a data engineer; new lists are created from Excel by function admins |
+| Trustworthy history | Every change is attributable (who, when, before, after); no silent overwrites; any version of a row can be restored |
 | Platform-native governance | Access is Unity Catalog grants to groups; nothing is enforced by the app alone |
 | Downstream reuse | Pipelines read the tables directly and build SCD Type 2 from the change feed |
 
@@ -53,51 +66,62 @@ the lists cannot be joined reliably with lakehouse data.
 |---|---|
 | Business teams (Finance, HR, Student services, Research, ...) | Own and maintain their lists |
 | Data stewards | Data quality of the lists, descriptions, keys and allowed values |
-| Data engineering (platform team) | Operates the app, the catalog and the pipelines; acts as global administrator |
+| Data engineering (platform team) | Operates the app, the catalog and the pipelines; acts as global administrator; maintains the domain list |
 | Analytics and reporting | Consume current values and history |
 
 ## 3. Glossary
 
+The hierarchy is **domain > function > form | file**.
+
 | Term | Meaning |
 |---|---|
-| **Catalog** | The Unity Catalog catalog that holds all reference data (`_forms`). |
-| **Domain** | A business function or area, e.g. *Finance - Cost Management*. One Unity Catalog schema. |
-| **Form** | One reference list, e.g. *Cost Centres*. One Delta table in a domain. |
+| **Catalog** | The Unity Catalog catalog that holds all reference data (`_reference_data`). |
+| **Domain** | A business classifier at the top of the hierarchy, aligned with the organisation's data domains (the classification Databricks calls *domains*), e.g. *Student*, *Finance*, *People*. Groups functions. Maintained by global admins in the registry; not a Unity Catalog securable. |
+| **Function** | A business function or area, e.g. *Finance - Cost Management*. One Unity Catalog schema; belongs to one domain. Roles are held on functions. |
+| **Form** | One reference list, e.g. *Cost Centres*. One Delta table in a function; edited row by row in a grid. |
+| **File** | One reference dataset too large for a grid, e.g. *GL Transactions*. One CSV or Parquet file in the function's volume; previewed, downloaded and replaced as a whole. |
+| **Volume** | The Unity Catalog volume `_files` the app creates in every function schema to hold its files. |
 | **Row** | One entry of a list. Identified technically by `_id`; identified for people by the business key. |
 | **Business key** | The column(s) that identify a row for users (a code). The app refuses duplicates. |
 | **Allowed values** | A fixed list of permitted values for a text column; shown as a dropdown. |
 | **Required** | A column that must always have a value. |
 | **System columns** | Columns the app manages on every form: `_id`, `_version`, `_created_at/by`, `_updated_at/by`. |
-| **Registry** | Tables `_catalog.domains` and `_catalog.forms` describing every domain and form (display name, description, owner, documentation link). |
-| **Audit trail** | Table `_catalog.change_log` with one entry per changed row and save. |
-| **Viewer / Editor / Domain admin / Global admin** | The four roles, see §4. |
+| **Registry** | Tables `_catalog.domains`, `_catalog.functions`, `_catalog.forms` and `_catalog.files` describing every domain, function, form and file (display name, description, owner, documentation link; size and row count for files). |
+| **Audit trail** | Table `_catalog.change_log` with one entry per changed row and save (and per file upload, replacement or deletion); the source of the History tabs, the per-row history and restore. |
+| **Draft** | The unsaved changes of one user on one form (cell edits, added and deleted rows, bulk updates, item-form edits, restored versions). Written in one save. |
+| **Viewer / Editor / Function admin / Global admin** | The four roles, see §4. |
 | **SCD** | Slowly changing dimension. The app maintains the current state (Type 1); pipelines derive Type 2 history from the change feed. |
 
 ## 4. Actors and roles
 
-Roles are held on a domain (schema) except Global admin, which is held on the catalog.
+Roles are held on a function (schema) except Global admin, which is held on the catalog.
 Access is always granted to a **group**, never to an individual account.
 
 | Role | Held on | Can |
 |---|---|---|
-| **Viewer** | domain | Open the domain's forms, search, sort, filter, export to CSV/Excel, read history |
-| **Editor** | domain | Viewer + add, change and delete rows, import rows from Excel/CSV |
-| **Domain admin** | domain | Editor + create forms (from Excel or from scratch), change column descriptions and rules, add/remove columns, edit domain details, grant roles on the domain to groups, delete forms |
-| **Global admin** | catalog | Everything in every domain + create domains, set domain attributes such as the project documentation link, read the administration guide |
+| **Viewer** | function | Open the function's forms and files, search, sort, filter, open a row in the item form, export to CSV/Excel, preview and download files, read history |
+| **Editor** | function | Viewer + add, change and delete rows, bulk-update selected rows, import rows from Excel/CSV, restore earlier versions of rows, replace the content of files |
+| **Function admin** | function | Editor + create forms (from Excel or from scratch), change column descriptions and rules, add/remove columns, add files and edit their details, edit function details, grant roles on the function to groups |
+| **Global admin** | catalog | Everything in every function + create and delete functions, assign functions to domains, maintain the domain list, delete forms and files, read the administration guide |
 
-Typical mapping: `<domain>_readers` = Viewer, `<domain>_stewards` = Editor,
-`<domain>_admins` = Domain admin, the data platform group = Global admin.
+Typical mapping: `<function>_readers` = Viewer, `<function>_stewards` = Editor,
+`<function>_admins` = Function admin, the data platform group = Global admin.
 
 Permission matrix
 
-| Capability | Viewer | Editor | Domain admin | Global admin |
+| Capability | Viewer | Editor | Function admin | Global admin |
 |---|---|---|---|---|
-| Browse, search, export, history | yes | yes | yes | yes |
-| Edit / add / delete rows, import rows | | yes | yes | yes |
-| Create form, edit form definition, delete form | | | yes | yes |
-| Edit domain details, grant roles on the domain | | | yes | yes |
-| Create domain, documentation link on any domain | | | | yes |
+| Browse, search, export, item form, history, preview and download files | yes | yes | yes | yes |
+| Edit / add / delete rows, bulk update, import rows, restore versions, replace files | | yes | yes | yes |
+| Create form, edit form definition and details; add files, edit file details | | | yes | yes |
+| Edit function details, grant roles on the function | | | yes | yes |
+| Delete form, delete file, delete function | | | | yes |
+| Create function, assign a function to a domain | | | | yes |
+| Maintain the domain list | | | | yes |
 | Administration guide (technical documentation) | | | | yes |
+
+Locally the persona switcher offers one user per role (Global admin, Function admin,
+Editor, Viewer) so that every screen can be exercised without a workspace.
 
 ## 5. Functional requirements
 
@@ -105,12 +129,12 @@ Status: **done** = implemented and tested; **planned** = agreed, not built.
 
 | Id | Requirement | Status |
 |---|---|---|
-| FR-01 | Show only the domains and forms the signed-in user may see, with their role. | done |
+| FR-01 | Show only the domains, functions and forms the signed-in user may see, with their role. | done |
 | FR-02 | Search forms by name, description or owner; filter every list in the app by text. | done |
 | FR-03 | Every form has a bookmarkable address. | done |
 | FR-04 | Editable grid: inline editing, dropdowns for allowed values, add row, delete selected rows, undo, sort/filter while editing, server-side search. | done |
 | FR-05 | Validate before saving: required values, types, allowed values, unique business keys; highlight the cell and list the problem; block Save until clean. | done |
-| FR-06 | Save all pending changes at once; nothing is written while problems remain. | done |
+| FR-06 | Save all pending changes at once; nothing is written while problems remain. Pending changes survive switching between the form's tabs. | done |
 | FR-07 | Detect concurrent edits: a row changed by someone else since it was loaded is not overwritten; the user is told which rows to redo. | done |
 | FR-08 | Export what is shown (CSV) or the whole list (Excel). | done |
 | FR-09 | Import rows from Excel/CSV into an existing form; headers matched by name; invalid cells reported; existing rows never modified. | done |
@@ -118,40 +142,52 @@ Status: **done** = implemented and tested; **planned** = agreed, not built.
 | FR-11 | Create a form from an Excel file: infer column names and types, let the admin adjust names, types, descriptions, required, business key, allowed values; optionally load the rows. | done |
 | FR-12 | Create a form from scratch by defining columns by hand. | done |
 | FR-13 | Change a form's definition later: descriptions, required, business key, allowed values, add/remove columns. Types and names are fixed once created. | done |
-| FR-14 | Form details: display name, description, owner; delete form with typed confirmation. | done |
-| FR-15 | Domains carry display name, description, owner and a project documentation link; all recorded in the registry. | done |
-| FR-16 | Global admins create domains from the app (also possible through the asset bundle). | done |
-| FR-17 | Domain admins grant Viewer/Editor/Domain admin to groups from the domain page; individuals are rejected; group names are searchable. | done |
+| FR-14 | Form details: display name, description, owner. | done |
+| FR-15 | Functions carry display name, description, owner, a project documentation link and their domain; all recorded in the registry. | done |
+| FR-16 | Global admins create functions from the app (also possible through the asset bundle). | done |
+| FR-17 | Function admins grant Viewer/Editor/Function admin to groups from the function page; individuals are rejected; group names are searchable. | done |
 | FR-18 | In-app help: user guide, form-building guide; administration guide visible to global admins only. | done |
 | FR-19 | The user's effective access is visible at all times (sidebar summary, role badges). | done |
-| FR-20 | Optional effective-dating columns (`valid_from`, `valid_to`) when creating a form, for lists whose changes are scheduled. | done |
-| FR-21 | Lookup columns referencing another form, dependent dropdowns. | planned |
-| FR-22 | Bulk update of selected rows (set a value on many rows). | planned |
-| FR-23 | Approval step before changes take effect, with notifications. | planned |
-| FR-24 | Item form (one row in a dialog) for wide lists, with per-row history and restore. | planned |
+| FR-22 | Bulk update of selected rows: set one column to the same value (or clear it) on every selected row, validated and saved with the other pending changes. | done |
+| FR-24 | Item form: one row in a dialog with one input per column, for wide lists; shows the row's own history and restores any earlier version into the pending changes. Deleted rows are restored from the History tab. | done |
+| FR-25 | Hierarchy domain > function > form: every function belongs to a domain; the sidebar and the home page group functions by domain. | done |
+| FR-26 | Global admins maintain the domain list (create, edit, delete when no function is assigned) and assign functions to domains. | done |
+| FR-27 | Only global admins delete functions (when empty) and forms; function admins create and change but never delete. | done |
+| FR-28 | A local persona for the Function admin role, next to Global admin, Editor and Viewer. | done |
+| FR-29 | Files: a function holds CSV/Parquet datasets next to its forms, with display name, description, owner, size and row count in the registry; preview of the first rows, inferred columns, download; editors replace the content, function admins add files, global admins delete them; every upload, replacement and deletion is in the history. | done |
+| FR-30 | Files landed in the function's volume outside the app (pipelines, CLI) are shown automatically, marked unregistered until an admin describes them; the browser upload has a configurable size limit. | done |
+| FR-31 | The catalog is named `_reference_data` (it holds forms and files, not only forms). | done |
+| FR-32 | Domain overview page: one page per domain (reachable from the sidebar and home headings) showing its description and owner, how many functions/forms/files it holds and a filterable card per function the user can open, with links to the function, its forms and its files. | done |
+| FR-33 | Every form and file page shows its full Databricks path (`catalog`.`schema`.`object`, volume path for files) with a copy button, and the Settings tab lists copy-ready query snippets (`SELECT`, `table_changes`, `read_files`). | done |
+| FR-34 | No action in the app can delete anything outside the `_reference_data` catalog or more than one object at a time: deletes are reserved to global admins, need a typed confirmation, never cascade, and the Databricks backend refuses any statement or file path that leaves the catalog (see DESIGN.md §11). | done |
+
+Removed requirements (decided in review, see §1 *Out of scope*): FR-20 effective-dating
+columns, FR-21 lookup columns and dependent dropdowns, FR-23 approval step with
+notifications. The ids are not reused.
 
 ## 6. Business processes
 
-### 6.1 Onboarding a domain
+### 6.1 Onboarding a domain and a function
 
 ```mermaid
 flowchart LR
-    A[Business team requests a domain] --> B[Global admin creates the domain\nname, display name, owner, description, documentation link]
-    B --> C[Groups agreed: readers, stewards, admins]
-    C --> D[Domain admin group granted on the domain\ngroups need USE CATALOG]
-    D --> E[Domain admins create the first forms]
+    A[Business team requests a function] --> B[Global admin checks the domain list\nadds the domain if missing]
+    B --> C[Global admin creates the function\nname, domain, display name, owner,\ndescription, documentation link]
+    C --> D[Groups agreed: readers, stewards, admins]
+    D --> E[Function admin group granted on the function\ngroups need USE CATALOG]
+    E --> F[Function admins create the first forms]
 ```
 
-The domain name follows `<business_function>__<area>` (double underscore), for example
-`finance__cost_management`. It becomes the schema name and cannot change; the display name
-can.
+The domain list is kept aligned with the organisation's data domains. The function name
+follows `<domain>__<area>` (double underscore), for example `finance__cost_management`. It
+becomes the schema name and cannot change; the display name and the domain assignment can.
 
 ### 6.2 Creating a form from Excel
 
 ```mermaid
 flowchart TD
     S1[1. Source\nupload Excel/CSV, choose sheet and header row] --> S2[2. Columns\nconfirm names, types, descriptions,\nrequired, business key, allowed values]
-    S2 --> S3[3. Details\ndomain, table name, display name,\ndescription, owner, effective dating, load rows?]
+    S2 --> S3[3. Details\nfunction, table name, display name,\ndescription, owner, load rows?]
     S3 --> S4[4. Review\ncolumns and the rows that will load]
     S4 --> C[Create: table + system columns,\ncomments, properties, tags, registry entry]
 ```
@@ -169,7 +205,7 @@ sequenceDiagram
     participant G as Grid (browser)
     participant A as App
     participant T as Table (Unity Catalog)
-    U->>G: edit cells, add rows, delete rows
+    U->>G: edit cells, add rows, delete rows,<br/>bulk update, item form, restore a version
     G->>A: each change (row id + column + value)
     A-->>G: validation result, highlighted cells, pending summary
     U->>G: Save
@@ -180,6 +216,12 @@ sequenceDiagram
     A-->>G: refreshed rows, "Saved: 2 edited, 1 added", conflicts if any
 ```
 
+Every way of changing rows ends in the same draft: cell edits in the grid, **Add row**,
+**Delete selected**, **Bulk update** (one column, one value, all selected rows), the **item
+form** (one row in a dialog) and **Restore** (an earlier version of a row). The draft is
+validated as a whole and written in one save; it survives switching to the History, Schema
+or Settings tab.
+
 Conflict rule: a row carries `_version`; an update or delete is applied only if the row's
 version is still the one the user loaded. Otherwise the change is skipped and reported; the
 user sees the current values and decides.
@@ -188,31 +230,64 @@ user sees the current values and decides.
 
 Editor uploads a file -> headers are matched to column names (case, spaces and punctuation
 ignored) -> rows are converted to the column types -> problems are listed -> **Append**
-inserts every row as new (business keys are not used to update existing rows). To update
-existing rows in bulk, edit in the grid or export, change and re-import into a fresh form.
+inserts every row as new (business keys are not used to update existing rows). To change
+existing rows in bulk, select them and use **Bulk update**, or export, change and re-import
+into a fresh form.
 
 ### 6.5 Changing a form definition
 
-Domain admin opens the **Schema** tab: descriptions, required flags, business keys and
-allowed values are edited in place and saved together; **Add column** adds an optional column;
-**Remove column** requires typing the column name. Changing a column's type or name is not
-offered: create a new column, migrate values, remove the old one. Every change is recorded on
-the table (comments, properties) and in the registry.
+Function admin opens the **Schema** tab: descriptions, required flags, business keys and
+allowed values are edited in place and saved together; **Add column** adds an optional
+column; **Remove column** requires typing the column name. Changing a column's type or name
+is not offered: create a new column, migrate values, remove the old one. Every change is
+recorded on the table (comments, properties) and in the registry.
 
 ### 6.6 Granting access
 
-Domain admin opens the domain page -> **Access** -> searches a group -> chooses Viewer,
-Editor or Domain admin -> **Grant**. The app replaces the group's app-managed privileges on
-the schema and reports the result. **Revoke** removes them. Global admins can do the same on
-any domain and through the asset bundle for initial setup.
+Function admin opens the function page -> **Access** -> searches a group -> chooses Viewer,
+Editor or Function admin -> **Grant**. The app replaces the group's app-managed privileges
+on the schema and reports the result. **Revoke** removes them. Global admins can do the
+same on any function and through the asset bundle for initial setup.
 
-### 6.7 Reviewing history
+### 6.7 Reviewing history and restoring a version
 
 Anyone with access opens **History** on a form: one line per changed row and save, newest
 first, with who, when, the kind of change, the fields changed and the row values (after the
 change for edits and additions, before the change for deletions). The list is searchable.
 
-### 6.8 Feeding slowly changing dimensions
+For one row, **Open row** shows the item form with the row's own history. **Restore** next
+to a version stages that version's values on the row; the change is reviewed and saved like
+any other. A deleted row is restored from the History tab (tick the deletion, **Restore
+selected version**): it comes back as a new row with the old values and a new `_id`.
+
+### 6.8 Retiring a form or a function
+
+Only global admins delete. A form is deleted from its **Settings** tab with a typed
+confirmation (Delta keeps the table recoverable for the retention period; the audit entries
+are kept). A function is deleted from its page once it holds no forms and its file volume is
+empty (anything left in the volume, whatever its type, blocks the deletion; so does a volume
+that cannot be listed); its grants and registry entry go with it. A domain is deleted from
+the **Domains** page once no function is assigned to it. Nothing cascades: every deletion
+removes exactly the one object that was confirmed.
+
+### 6.9 Managing a file
+
+```mermaid
+flowchart LR
+    A[Function admin: New file\nupload CSV/Parquet, preview, name, description] --> B[Stored in the function's volume\nrow count computed, registry entry, history]
+    B --> C[Everyone with access\npreview, columns, download]
+    C --> D[Editor: Replace file\nsame format, previous size and rows kept in history]
+    D --> E[Pipelines read the file\nfrom the volume]
+    F[Pipeline or CLI lands a file\nin the volume] --> C
+```
+
+Files are the answer for reference datasets that are too large for a grid (thousands to
+millions of rows): the same domain > function hierarchy, the same roles, the same registry
+and history, but no row-by-row editing. A file is replaced as a whole. Files that arrive in
+the volume by other means (a pipeline, the Databricks CLI) appear on the function page as
+*not registered* until a function admin gives them a display name and description.
+
+### 6.10 Feeding slowly changing dimensions
 
 The form table is the **current state** (Type 1). Change Data Feed is enabled on every form;
 a Lakeflow / Delta Live Tables pipeline reads the feed (`table_changes`) and applies it as
@@ -225,25 +300,43 @@ travel with every row so the dimension can show who made the change effective.
 
 ```mermaid
 erDiagram
-    CATALOG ||--o{ DOMAIN : contains
-    DOMAIN ||--o{ FORM : contains
+    DOMAIN ||--o{ FUNCTION : groups
+    CATALOG ||--o{ FUNCTION : contains
+    FUNCTION ||--o{ FORM : contains
+    FUNCTION ||--o{ FILE : "holds in its volume"
     FORM ||--o{ ROW : contains
-    DOMAIN ||--o{ GRANT : "access for group"
+    FUNCTION ||--o{ GRANT : "access for group"
     FORM ||--o{ CHANGE : "audit trail"
     DOMAIN {
-        string name PK "schema name, function__area"
+        string name PK "classifier, registry only"
+        string display_name
+        string description
+        string owner
+    }
+    FUNCTION {
+        string name PK "schema name, domain__area"
+        string domain FK "rdm.domain property + tag"
         string display_name
         string description
         string owner
         string doc_link "project documentation URL"
     }
     FORM {
-        string domain PK
+        string function PK
         string name PK "table name"
         string display_name
         string description
         string owner
         json column_config "keys, allowed values"
+    }
+    FILE {
+        string function PK
+        string name PK "identifier.csv or .parquet"
+        string display_name
+        string description
+        string owner
+        int size_bytes
+        int row_count
     }
     ROW {
         string _id PK "generated"
@@ -267,19 +360,25 @@ erDiagram
 
 | Information | Location | Why |
 |---|---|---|
-| Domain description | schema `COMMENT` | Visible in Catalog Explorer and to every tool |
-| Domain display name, owner, documentation link | schema `DBPROPERTIES` (`rdm.*`), schema tags, `_catalog.domains` | Properties are canonical; tags are searchable in Catalog Explorer; the registry is one table for reporting |
+| Domain list (name, display name, description, owner) | `_catalog.domains` | Domains are a classifier, not a securable; the registry is the single list global admins maintain |
+| Function's domain | schema `DBPROPERTIES` (`rdm.domain`), schema tag `rdm_domain`, `_catalog.functions` | The property is canonical; the tag is visible and searchable in Catalog Explorer, where it can be aligned with the workspace's domain classification |
+| Function description | schema `COMMENT` | Visible in Catalog Explorer and to every tool |
+| Function display name, owner, documentation link | schema `DBPROPERTIES` (`rdm.*`), schema tags, `_catalog.functions` | Properties are canonical; tags are searchable; the registry is one table for reporting |
 | Form description | table `COMMENT` | Same |
 | Form display name, owner, column rules (keys, allowed values) | `TBLPROPERTIES` (`rdm.display_name`, `rdm.owner`, `rdm.column_config`), tags, `_catalog.forms` | Same |
+| File content | Unity Catalog volume `<catalog>.<function>._files` | Files are read by pipelines and tools directly from the volume; the app moves them with the Files API as the signed-in user |
+| File display name, description, owner, size, row count | `_catalog.files` | Volumes carry no properties; the registry is the single description |
 | Column description, required | column `COMMENT`, `NOT NULL` | Native, enforced by the table |
 | Row identity and audit | system columns on every form | Travel with the data into every consumer |
-| Change history | `_catalog.change_log` (+ Delta Change Data Feed) | Queryable audit trail independent of Delta log retention |
+| Change history | `_catalog.change_log` (+ Delta Change Data Feed) | Queryable audit trail independent of Delta log retention; source of per-row history and restore |
 | Access | Unity Catalog grants on the schema (groups) | Enforced by the platform |
 
 ### 7.3 Conventions
 
-* Names: `lower_snake_case`, letters, digits and underscores, starting with a letter; domains
-  use `<function>__<area>`; names starting with `_` are reserved for the app.
+* Names: `lower_snake_case`, letters, digits and underscores, starting with a letter;
+  functions use `<domain>__<area>`; domains are short single words (`student`, `finance`);
+  file names are `<identifier>.csv` or `<identifier>.parquet`; names starting with `_` are
+  reserved for the app (the `_files` volume, the `_catalog` schema).
 * Types: `STRING`, `INTEGER` (BIGINT), `DECIMAL(p,s)` (default 18,4), `DOUBLE`, `BOOLEAN`,
   `DATE`, `TIMESTAMP`. Tables created outside the app with other types are shown read-only.
 * Every form created by the app has the six system columns and a primary key on `_id`.
@@ -290,21 +389,29 @@ erDiagram
 | Rule | Where enforced |
 |---|---|
 | Required columns cannot be empty | App validation and `NOT NULL` on the table |
-| Values must match the column type | App conversion (grid and import); the table rejects the rest |
-| Allowed values | App validation (dropdown in the grid, check on import) |
+| Values must match the column type | App conversion (grid, bulk update, item form, import); the table rejects the rest |
+| Allowed values | App validation (dropdown in the grid and the item form, check on bulk update and import) |
 | Business key uniqueness | App validation against the loaded rows and the draft; informational primary key on `_id` |
 | No silent overwrite of another person's change | `_version` check on every update and delete |
 | Attributable changes | `_updated_by` / `_created_by` set from the signed-in identity; audit entries per row |
+| A function belongs to an existing domain | App validation against the domain list when a function is created or reassigned |
+| A file is readable as CSV or Parquet | The backend counts its rows with the platform reader on upload; unreadable uploads are rejected |
 
 ### 7.5 Data lifecycle
 
 | Event | What happens |
 |---|---|
+| Domain created / edited | Registry row added / updated |
+| Function created | Schema created with comment, properties (incl. domain), tags; registry row added |
 | Form created | Table created with comments, properties, tags, Change Data Feed, column mapping; registry row added; rows loaded (each logged as an insert) |
 | Rows changed | One atomic write; audit entries; `_version` incremented |
+| Version restored | Staged as ordinary row changes (or a new row for a deleted one); saved and logged like any edit |
 | Definition changed | Table altered (comments, NOT NULL, columns); registry updated |
-| Form deleted | Table dropped (Delta keeps it recoverable for the retention period); registry row removed; audit entries kept |
-| Domain retired | Remove from the bundle / drop the schema after its forms are migrated (manual, global admin) |
+| File added / replaced | File written to the function's volume; size and row count recorded in the registry; audit entry (previous size and rows kept) |
+| File deleted (global admin) | File removed from the volume; registry row removed; audit entries kept |
+| Form deleted (global admin) | Table dropped (Delta keeps it recoverable for the retention period); registry row removed; audit entries kept |
+| Function deleted (global admin) | Refused while forms or files exist; empty volume and schema dropped, grants and registry row removed |
+| Domain deleted (global admin) | Refused while functions are assigned; registry row removed |
 
 ## 8. Technology design (high level)
 
@@ -319,9 +426,9 @@ flowchart LR
         P[Databricks Apps proxy\nsign-in, identity headers,\nuser access token]
         A[Reference Data Manager\nDash app on gunicorn]
         W[SQL warehouse\nserverless]
-        subgraph UC[Unity Catalog: catalog _forms]
-            S1[(domain schemas\nform tables)]
-            S2[(_catalog\ndomains, forms, change_log)]
+        subgraph UC[Unity Catalog: catalog _reference_data]
+            S1[(function schemas\nform tables + _files volumes)]
+            S2[(_catalog\ndomains, functions, forms, files, change_log)]
         end
     end
     subgraph Source control
@@ -337,11 +444,18 @@ flowchart LR
 
 Key choices
 
-* **The app runs SQL as the signed-in user** (Databricks Apps user authorization, scope
-  `sql`). Unity Catalog is the enforcement point; the app only decides what to show. Roles
-  are read from the catalog's `information_schema` inside the user's session.
+* **The app runs SQL and file operations as the signed-in user** (Databricks Apps user
+  authorization, scopes `sql` and `files.files`). Unity Catalog is the enforcement point; the
+  app only decides what to show. Roles are read from the catalog's `information_schema`
+  inside the user's session.
+* **Files stay files.** A file is a Unity Catalog volume object read with `read_files`;
+  the app never loads it into a table, so pipelines and notebooks read the same bytes the
+  steward uploaded.
 * **Grants go to groups.** The app validates group names and issues `GRANT`/`REVOKE` on the
-  schema; the asset bundle seeds the initial catalog, `_catalog` schema, domains and grants.
+  schema; the asset bundle seeds the initial catalog, `_catalog` schema, functions and grants.
+* **Domains are metadata.** The domain list lives in the registry; each function's domain is
+  a schema property and tag, so the classification is visible in Catalog Explorer and can be
+  mirrored to the workspace's own domain classification.
 * **One atomic write per save** (a single `MERGE` fed by one JSON parameter), so a save
   either happens or does not, and retrying is safe.
 * **Infrastructure as code.** Catalog, schemas, grants and the app are declared in
@@ -364,23 +478,24 @@ backends implement it:
 
 | Aspect | Design position |
 |---|---|
-| Volume | Lists up to a few thousand rows per form (grid page limit `RDM_MAX_ROWS`, default 5,000); server-side search for the rest |
+| Volume | Lists up to a few thousand rows per form (grid page limit `RDM_MAX_ROWS`, default 5,000); server-side search for the rest. Larger datasets as files: any size in the volume, `RDM_MAX_FILE_MB` (default 200) through the browser |
 | Concurrency | Many users may edit the same list; row-level version checks prevent lost updates; Delta deletion vectors reduce write conflicts |
 | Latency | One or two warehouse statements per action; metadata cached per user for a short time |
 | Security | Identity from the Databricks proxy; SQL parameters everywhere; identifiers validated; no secrets in code |
 | Auditability | Audit table plus Delta history and Change Data Feed |
-| Recoverability | Delta time travel on every table; dropped tables recoverable within retention |
+| Recoverability | Any version of a row restorable from the app; Delta time travel on every table; dropped tables recoverable within retention |
 | Availability | Stateless app; a restart loses no data (drafts live in the browser until saved) |
 
 ### 8.4 Side note: DuckDB for local development
 
 DuckDB is a single-file database that gives the same SQL surface the app needs (schemas,
 tables, comments, transactions) with no infrastructure. Locally the app runs against
-`data/rdm.duckdb` with three demo domains and a persona switcher (Global admin, Editor,
-Viewer) so that every screen can be exercised offline. Anything Unity Catalog has and DuckDB
-lacks (properties, tags, grants, the change feed) is emulated in the local `_catalog` schema.
-It is a development aid, not a deployment target: the Databricks backend is validated by SQL
-generation tests and, before releases, by running against a development catalog.
+`data/rdm.duckdb` with four demo domains, three functions and a persona switcher (Global
+admin, Function admin, Editor, Viewer) so that every screen can be exercised offline.
+Anything Unity Catalog has and DuckDB lacks (properties, tags, grants, the change feed) is
+emulated in the local `_catalog` schema. It is a development aid, not a deployment target:
+the Databricks backend is validated by SQL generation tests and, before releases, by running
+against a development catalog.
 
 ## 9. Operations
 
@@ -388,15 +503,16 @@ generation tests and, before releases, by running against a development catalog.
 |---|---|
 | Environments | Bundle targets `dev` (developer-prefixed schemas, separate catalog) and `prod` |
 | Releases | Pull request -> CI (lint, tests) -> merge -> `bundle deploy -t prod` |
-| Support | Global admins (data platform team); in-app Help for users; owner shown on every domain and form |
+| Support | Global admins (data platform team); in-app Help for users; owner shown on every function and form |
 | Monitoring | App logs in the Databricks Apps console; warehouse query history; `_catalog.change_log` for usage |
 | Backup | Delta time travel and Change Data Feed; audit table retained indefinitely |
 
 ## 10. Roadmap and open points
 
-* Lookup columns and dependent dropdowns (FR-21), bulk update of selected rows (FR-22),
-  approval workflow and notifications (FR-23), item form with per-row history (FR-24).
-* Multi-cell paste from Excel is not available in the community data grid; import covers
-  bulk changes today.
-* Domain retirement is manual; a guided "retire domain" is a candidate.
-* Pending feedback from the first review round is tracked in the pull request.
+* Mirroring the app's domain assignment onto the workspace's native domain classification
+  automatically (today: the `rdm_domain` tag makes it visible; the alignment is done in
+  Catalog Explorer).
+* Multi-cell paste from Excel is not available in the community data grid; bulk update and
+  import cover bulk changes today.
+* A guided "retire function" that migrates or archives its forms before the schema is dropped.
+* Pending feedback from the review rounds is tracked in the pull request.

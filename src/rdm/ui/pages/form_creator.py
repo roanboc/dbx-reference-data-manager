@@ -23,17 +23,13 @@ GRID_THEME = "ag-theme-quartz"
 STEPS = [
     ("Source", "Upload a file or start from scratch"),
     ("Columns", "Confirm names, types and rules"),
-    ("Details", "Domain, name and description"),
+    ("Details", "Function, name and description"),
     ("Review", "Check and create"),
 ]
 TYPE_VALUES = [t.value for t in DataType.editable_types()]
-EFFECTIVE_DATING = [
-    ColumnDef("valid_from", DataType.DATE, "Start of validity", nullable=False),
-    ColumnDef("valid_to", DataType.DATE, "End of validity (empty = current)"),
-]
 
 
-def _default_state() -> dict[str, Any]:
+def _default_state(function: str | None = None) -> dict[str, Any]:
     return {
         "step": 0,
         "mode": "upload",
@@ -42,35 +38,39 @@ def _default_state() -> dict[str, Any]:
         "sheet": None,
         "header_row": 1,
         "columns": [],
-        "domain": "",
+        "function": function or "",
         "name": "",
         "display_name": "",
         "description": "",
         "owner": "",
         "load_rows": True,
-        "effective": False,
     }
 
 
-def render(ctx_: AppContext) -> dmc.Stack:
+def render(ctx_: AppContext, function: str | None = None) -> dmc.Stack:
+    """The wizard; ``function`` (from ``/new-form/<function>``) pre-selects the function when the
+    user administers it."""
     header = page_title(
         "New form",
         "Create a governed, editable list from an Excel file or from a hand-written column definition.",
     )
-    if not ctx_.permissions.admin_domains:
+    if not ctx_.permissions.admin_functions:
         return dmc.Stack(
             [
                 header,
                 info_alert(
-                    "You need Administrator access to at least one domain to create forms.",
-                    "Administrators only",
+                    "You need Function admin access to at least one function to create forms.",
+                    "Function admins only",
                     "yellow",
                 ),
             ]
         )
     return dmc.Stack(
         [
-            dcc.Store(id=ids.WIZ_STORE, data=_default_state()),
+            dcc.Store(
+                id=ids.WIZ_STORE,
+                data=_default_state(function if function in ctx_.permissions.admin_functions else None),
+            ),
             header,
             dmc.Stepper(
                 id=ids.WIZ_STEPPER,
@@ -107,13 +107,14 @@ def _stubs(state: dict[str, Any], present: set[str]) -> html.Div:
         ids.WIZ_CREATE: lambda: dmc.Button("", id=ids.WIZ_CREATE),
         ids.WIZ_ADD_COLUMN: lambda: dmc.Button("", id=ids.WIZ_ADD_COLUMN),
         ids.WIZ_COLUMNS_GRID: lambda: dag.AgGrid(id=ids.WIZ_COLUMNS_GRID, rowData=[], columnDefs=[]),
-        ids.WIZ_DOMAIN: lambda: dmc.Select(id=ids.WIZ_DOMAIN, data=[], value=state.get("domain") or None),
+        ids.WIZ_FUNCTION: lambda: dmc.Select(
+            id=ids.WIZ_FUNCTION, data=[], value=state.get("function") or None
+        ),
         ids.WIZ_NAME: lambda: dmc.TextInput(id=ids.WIZ_NAME, value=state.get("name") or ""),
         ids.WIZ_DISPLAY: lambda: dmc.TextInput(id=ids.WIZ_DISPLAY, value=state.get("display_name") or ""),
         ids.WIZ_DESC: lambda: dmc.Textarea(id=ids.WIZ_DESC, value=state.get("description") or ""),
         ids.WIZ_OWNER: lambda: dmc.TextInput(id=ids.WIZ_OWNER, value=state.get("owner") or ""),
         ids.WIZ_LOAD_ROWS: lambda: dmc.Checkbox(id=ids.WIZ_LOAD_ROWS, checked=bool(state.get("load_rows"))),
-        ids.WIZ_EFFECTIVE: lambda: dmc.Checkbox(id=ids.WIZ_EFFECTIVE, checked=bool(state.get("effective"))),
         ids.WIZ_ERRORS: lambda: html.Div(id=ids.WIZ_ERRORS),
     }
     return html.Div(
@@ -468,8 +469,8 @@ def step_columns(state: dict[str, Any]) -> dmc.Stack:
 
 
 def step_details(ctx_: AppContext, state: dict[str, Any]) -> dmc.Stack:
-    titles = {item.domain.name: item.domain.title for item in navigation(ctx_, None)}
-    domains = ctx_.permissions.admin_domains
+    titles = {item.function.name: item.function.title for item in navigation(ctx_, None)}
+    functions = ctx_.permissions.admin_functions
     has_file = uploads.get(state.get("token")) is not None and state["mode"] == "upload"
     return dmc.Stack(
         [
@@ -479,15 +480,15 @@ def step_details(ctx_: AppContext, state: dict[str, Any]) -> dmc.Stack:
                     dmc.Stack(
                         [
                             dmc.Select(
-                                id=ids.WIZ_DOMAIN,
-                                label="Domain",
+                                id=ids.WIZ_FUNCTION,
+                                label="Function",
                                 data=[
-                                    {"value": d, "label": f"{titles.get(d, humanize(d))} ({d})"}
-                                    for d in domains
+                                    {"value": f, "label": f"{titles.get(f, humanize(f))} ({f})"}
+                                    for f in functions
                                 ],
-                                value=state.get("domain") or (domains[0] if domains else None),
+                                value=state.get("function") or (functions[0] if functions else None),
                                 allowDeselect=False,
-                                description="You can only create forms in domains you administer",
+                                description="You can only create forms in functions you administer",
                                 searchable=True,
                             ),
                             dmc.TextInput(
@@ -521,12 +522,6 @@ def step_details(ctx_: AppContext, state: dict[str, Any]) -> dmc.Stack:
                                 value=state.get("owner") or ctx_.user.email or ctx_.user.username,
                             ),
                             dmc.Checkbox(
-                                id=ids.WIZ_EFFECTIVE,
-                                label="Add effective-dating columns (valid_from, valid_to)",
-                                checked=bool(state.get("effective")),
-                                description="For lists whose changes must be scheduled ahead of time",
-                            ),
-                            dmc.Checkbox(
                                 id=ids.WIZ_LOAD_ROWS,
                                 label="Load the rows from the file",
                                 checked=bool(state.get("load_rows")) and has_file,
@@ -543,29 +538,12 @@ def step_details(ctx_: AppContext, state: dict[str, Any]) -> dmc.Stack:
             _stubs(
                 state,
                 {
-                    ids.WIZ_DOMAIN,
+                    ids.WIZ_FUNCTION,
                     ids.WIZ_NAME,
                     ids.WIZ_DISPLAY,
                     ids.WIZ_DESC,
                     ids.WIZ_OWNER,
                     ids.WIZ_LOAD_ROWS,
-                    ids.WIZ_EFFECTIVE,
-                    ids.WIZ_ERRORS,
-                    ids.WIZ_BACK,
-                    ids.WIZ_NEXT,
-                    ids.WIZ_CANCEL,
-                },
-            ),
-            _stubs(
-                state,
-                {
-                    ids.WIZ_DOMAIN,
-                    ids.WIZ_NAME,
-                    ids.WIZ_DISPLAY,
-                    ids.WIZ_DESC,
-                    ids.WIZ_OWNER,
-                    ids.WIZ_LOAD_ROWS,
-                    ids.WIZ_EFFECTIVE,
                     ids.WIZ_ERRORS,
                     ids.WIZ_BACK,
                     ids.WIZ_NEXT,
@@ -623,13 +601,6 @@ def build_columns(rows: list[dict[str, Any]]) -> tuple[list[ColumnDef], list[str
 
 def assemble(state: dict[str, Any]) -> tuple[FormDef, list[ColumnDef], list[str], dict[str, str]]:
     columns, errors = build_columns(state.get("columns") or [])
-    names = {c.name for c in columns}
-    if state.get("effective"):
-        for extra in EFFECTIVE_DATING:
-            if extra.name not in names:
-                columns.append(
-                    ColumnDef(extra.name, extra.data_type, extra.description, nullable=extra.nullable)
-                )
     mapping: dict[str, str] = {}
     for row, col in zip(
         [r for r in state.get("columns") or [] if (r.get("name") or "").strip()], columns, strict=False
@@ -638,7 +609,7 @@ def assemble(state: dict[str, Any]) -> tuple[FormDef, list[ColumnDef], list[str]
         if src:
             mapping[col.name] = src
     form = FormDef(
-        domain=state.get("domain") or "",
+        function=state.get("function") or "",
         name=state.get("name") or "",
         display_name=(state.get("display_name") or "").strip(),
         description=(state.get("description") or "").strip(),
@@ -666,7 +637,7 @@ def step_review(state: dict[str, Any]) -> dmc.Stack:
                 dmc.Stack(
                     [
                         dmc.Text(form.title, fw=600, size="lg"),
-                        dmc.Code(f"{form.domain}.{form.name}"),
+                        dmc.Code(f"{form.function}.{form.name}"),
                         dmc.Text(form.description or "No description", size="sm", c="dimmed"),
                         dmc.Text(f"Owner: {form.owner or '-'}", size="sm", c="dimmed"),
                     ],
@@ -831,13 +802,12 @@ def register(app) -> None:
         State(ids.WIZ_STORE, "data"),
         State(ids.WIZ_COLUMNS_GRID, "virtualRowData"),
         State(ids.WIZ_COLUMNS_GRID, "rowData"),
-        State(ids.WIZ_DOMAIN, "value"),
+        State(ids.WIZ_FUNCTION, "value"),
         State(ids.WIZ_NAME, "value"),
         State(ids.WIZ_DISPLAY, "value"),
         State(ids.WIZ_DESC, "value"),
         State(ids.WIZ_OWNER, "value"),
         State(ids.WIZ_LOAD_ROWS, "checked"),
-        State(ids.WIZ_EFFECTIVE, "checked"),
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
@@ -851,13 +821,12 @@ def register(app) -> None:
         state,
         virtual_rows,
         row_data,
-        domain,
+        function,
         name,
         display,
         desc,
         owner,
         load_rows,
-        effective,
         nav_version,
         persona,
     ):
@@ -898,7 +867,7 @@ def register(app) -> None:
             if step == 1 and grid_rows is not None:
                 state["columns"] = list(grid_rows)
             if step == 2:
-                state.update(_details(domain, name, display, desc, owner, load_rows, effective))
+                state.update(_details(function, name, display, desc, owner, load_rows))
             state["step"] = max(0, step - 1)
             return state, None, no_update, no_update, no_update
         if trigger == ids.WIZ_NEXT:
@@ -971,7 +940,7 @@ def register(app) -> None:
                 state["step"] = 2
                 return state, None, no_update, no_update, no_update
             if step == 2:
-                state.update(_details(domain, name, display, desc, owner, load_rows, effective))
+                state.update(_details(function, name, display, desc, owner, load_rows))
                 if not state["name"]:
                     return (
                         state,
@@ -980,10 +949,10 @@ def register(app) -> None:
                         no_update,
                         no_update,
                     )
-                if not state["domain"]:
+                if not state["function"]:
                     return (
                         state,
-                        error_alert("Choose a domain.", "Missing domain"),
+                        error_alert("Choose a function.", "Missing function"),
                         no_update,
                         no_update,
                         no_update,
@@ -1015,21 +984,20 @@ def register(app) -> None:
             return (
                 _default_state(),
                 None,
-                form_href(created.domain, created.name),
+                form_href(created.function, created.name),
                 (nav_version or 0) + 1,
                 notify(f"Form '{created.title}' created with {created.row_count or 0:,} rows"),
             )
         return (no_update,) * 5
 
 
-def _details(domain, name, display, desc, owner, load_rows, effective) -> dict[str, Any]:
+def _details(function, name, display, desc, owner, load_rows) -> dict[str, Any]:
     clean = sanitize_identifier(name or "", fallback="") if (name or "").strip() else ""
     return {
-        "domain": domain or "",
+        "function": function or "",
         "name": clean,
         "display_name": (display or "").strip() or (humanize(clean) if clean else ""),
         "description": desc or "",
         "owner": owner or "",
         "load_rows": bool(load_rows),
-        "effective": bool(effective),
     }

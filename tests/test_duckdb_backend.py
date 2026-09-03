@@ -9,7 +9,7 @@ import duckdb
 import pandas as pd
 import pytest
 
-from conftest import SAMPLE_DOMAIN, SAMPLE_FORM, sample_columns, sample_rows
+from conftest import SAMPLE_FORM, SAMPLE_FUNCTION, sample_columns, sample_rows
 from rdm.backend.base import BackendError, ConflictError, NotFoundError
 from rdm.backend.duckdb_backend import CATALOG_LEVEL, META_SCHEMA, DuckDBBackend
 from rdm.models import (
@@ -29,7 +29,9 @@ from rdm.models import (
     ColumnDef,
     DataType,
     DomainDef,
+    FileDef,
     FormDef,
+    FunctionDef,
     Role,
     RowDelete,
     RowInsert,
@@ -75,14 +77,14 @@ def _meta_count(backend: DuckDBBackend, table: str, **where: str) -> int:
 
 
 def test_fresh_backend_has_no_domains_and_describes_itself(backend: DuckDBBackend):
-    assert backend.list_domains() == []
+    assert backend.list_functions() == []
     assert backend.name == "duckdb"
     assert backend.describe() == "DuckDB (:memory:)"
 
 
-def test_create_domain_returns_metadata_and_registers_it(backend: DuckDBBackend, admin: User):
-    created = backend.create_domain(
-        DomainDef(
+def test_create_function_returns_metadata_and_registers_it(backend: DuckDBBackend, admin: User):
+    created = backend.create_function(
+        FunctionDef(
             "finance",
             display_name="Finance",
             description="Money things",
@@ -100,67 +102,67 @@ def test_create_domain_returns_metadata_and_registers_it(backend: DuckDBBackend,
     assert created.properties["created_by"] == admin.username
     assert created.properties[PROP_DISPLAY_NAME] == "Finance"
     # access comes from group grants only; creating a domain grants nothing to the creator
-    assert backend.list_domain_grants("finance") == []
+    assert backend.list_function_grants("finance") == []
     perms = backend.get_permissions(admin)
     assert perms.role_for("finance") is Role.NONE and not perms.is_global_admin
-    assert _meta_count(backend, "domains", name="finance") == 1
+    assert _meta_count(backend, "functions", name="finance") == 1
     with pytest.raises(ValueError, match="http"):
-        backend.create_domain(DomainDef("bad", doc_link="wiki/finance"), admin)
-    updated = backend.update_domain(DomainDef("finance", display_name="Finance!", doc_link=""), admin)
+        backend.create_function(FunctionDef("bad", doc_link="wiki/finance"), admin)
+    updated = backend.update_function(FunctionDef("finance", display_name="Finance!", doc_link=""), admin)
     assert updated.display_name == "Finance!" and updated.doc_link == ""
 
 
-def test_create_domain_defaults_owner_to_actor(backend: DuckDBBackend, admin: User):
-    d = backend.create_domain(DomainDef("finance"), admin)
+def test_create_function_defaults_owner_to_actor(backend: DuckDBBackend, admin: User):
+    d = backend.create_function(FunctionDef("finance"), admin)
     assert d.owner == admin.username
     assert d.display_name == "" and d.description == ""
     assert d.title == "Finance"
 
 
-def test_get_domain_not_found(backend: DuckDBBackend):
-    with pytest.raises(NotFoundError, match="Domain 'nope' does not exist"):
-        backend.get_domain("nope")
+def test_get_function_not_found(backend: DuckDBBackend):
+    with pytest.raises(NotFoundError, match="Function 'nope' does not exist"):
+        backend.get_function("nope")
 
 
 @pytest.mark.parametrize("hidden", ["main", "information_schema", META_SCHEMA, "pg_catalog"])
-def test_hidden_schemas_are_not_domains(backend: DuckDBBackend, hidden: str):
+def test_hidden_schemas_are_not_functions(backend: DuckDBBackend, hidden: str):
     with pytest.raises(NotFoundError):
-        backend.get_domain(hidden)
-    assert hidden not in [d.name for d in backend.list_domains()]
+        backend.get_function(hidden)
+    assert hidden not in [d.name for d in backend.list_functions()]
 
 
-def test_create_domain_duplicate_is_conflict(backend: DuckDBBackend, admin: User):
-    backend.create_domain(DomainDef("finance"), admin)
+def test_create_function_duplicate_is_conflict(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
     with pytest.raises(ConflictError, match="already exists"):
-        backend.create_domain(DomainDef("finance"), admin)
+        backend.create_function(FunctionDef("finance"), admin)
 
 
 @pytest.mark.parametrize("name", ["main", "information_schema", "pg_catalog", "temp"])
-def test_create_domain_reserved_names_are_conflicts(backend: DuckDBBackend, admin: User, name: str):
+def test_create_function_reserved_names_are_conflicts(backend: DuckDBBackend, admin: User, name: str):
     with pytest.raises(ConflictError, match="reserved name"):
-        backend.create_domain(DomainDef(name), admin)
+        backend.create_function(FunctionDef(name), admin)
 
 
 @pytest.mark.parametrize("name", ["_rdm_meta", "_private", "Bad Name", "1st"])
-def test_create_domain_invalid_names_fail_validation(backend: DuckDBBackend, admin: User, name: str):
+def test_create_function_invalid_names_fail_validation(backend: DuckDBBackend, admin: User, name: str):
     with pytest.raises(ValueError):
-        backend.create_domain(DomainDef(name), admin)
-    assert backend.list_domains() == []
+        backend.create_function(FunctionDef(name), admin)
+    assert backend.list_functions() == []
 
 
-def test_list_domains_sorted_with_form_counts(backend: DuckDBBackend, admin: User, sample_form: FormDef):
-    backend.create_domain(DomainDef("alpha"), admin)
-    backend.create_domain(DomainDef("zulu"), admin)
-    domains = backend.list_domains()
-    assert [d.name for d in domains] == ["alpha", SAMPLE_DOMAIN, "zulu"]
-    assert {d.name: d.form_count for d in domains} == {"alpha": 0, SAMPLE_DOMAIN: 1, "zulu": 0}
-    assert backend.get_domain(SAMPLE_DOMAIN).form_count == 1
+def test_list_functions_sorted_with_form_counts(backend: DuckDBBackend, admin: User, sample_form: FormDef):
+    backend.create_function(FunctionDef("alpha"), admin)
+    backend.create_function(FunctionDef("zulu"), admin)
+    domains = backend.list_functions()
+    assert [d.name for d in domains] == ["alpha", SAMPLE_FUNCTION, "zulu"]
+    assert {d.name: d.form_count for d in domains} == {"alpha": 0, SAMPLE_FUNCTION: 1, "zulu": 0}
+    assert backend.get_function(SAMPLE_FUNCTION).form_count == 1
 
 
-def test_update_domain(backend: DuckDBBackend, admin: User):
-    backend.create_domain(DomainDef("finance", "Finance", "old", "old@example.org"), admin)
-    updated = backend.update_domain(
-        DomainDef("finance", "Finance & Co", "new text", "new@example.org"), admin
+def test_update_function(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance", "Finance", "old", "old@example.org"), admin)
+    updated = backend.update_function(
+        FunctionDef("finance", "Finance & Co", "new text", "new@example.org"), admin
     )
     assert (updated.display_name, updated.description, updated.owner) == (
         "Finance & Co",
@@ -168,12 +170,12 @@ def test_update_domain(backend: DuckDBBackend, admin: User):
         "new@example.org",
     )
     assert updated.properties["created_by"] == admin.username  # untouched
-    assert backend.get_domain("finance").description == "new text"
+    assert backend.get_function("finance").description == "new text"
 
 
-def test_update_domain_not_found(backend: DuckDBBackend, admin: User):
+def test_update_function_not_found(backend: DuckDBBackend, admin: User):
     with pytest.raises(NotFoundError):
-        backend.update_domain(DomainDef("ghost"), admin)
+        backend.update_function(FunctionDef("ghost"), admin)
 
 
 # ======================================================================================
@@ -196,7 +198,7 @@ def test_create_form_adds_system_columns_in_front(backend: DuckDBBackend, sample
 def test_create_form_persists_comments_properties_tags_and_column_config(
     backend: DuckDBBackend, admin: User, sample_form: FormDef
 ):
-    form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    form = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     assert form.description == "Sample products"
     assert form.display_name == "Products" and form.title == "Products"
     assert form.owner == "owner@example.org"
@@ -227,7 +229,7 @@ def test_create_form_persists_comments_properties_tags_and_column_config(
 
 
 def test_create_form_defaults_owner_to_actor_and_reorders_system_columns(backend: DuckDBBackend, admin: User):
-    backend.create_domain(DomainDef("dom"), admin)
+    backend.create_function(FunctionDef("dom"), admin)
     form = FormDef(
         "dom",
         "frm",
@@ -243,17 +245,17 @@ def test_create_form_defaults_owner_to_actor_and_reorders_system_columns(backend
 
 
 def test_create_form_missing_domain(backend: DuckDBBackend, admin: User):
-    with pytest.raises(NotFoundError, match="Domain 'ghost' does not exist"):
+    with pytest.raises(NotFoundError, match="Function 'ghost' does not exist"):
         backend.create_form(FormDef("ghost", "frm", columns=[ColumnDef("code")]), admin)
 
 
 def test_create_form_duplicate_is_conflict(backend: DuckDBBackend, admin: User, sample_form: FormDef):
     with pytest.raises(ConflictError, match="already exists"):
-        backend.create_form(FormDef(SAMPLE_DOMAIN, SAMPLE_FORM, columns=[ColumnDef("code")]), admin)
+        backend.create_form(FormDef(SAMPLE_FUNCTION, SAMPLE_FORM, columns=[ColumnDef("code")]), admin)
 
 
 def test_create_form_validates_definition(backend: DuckDBBackend, admin: User):
-    backend.create_domain(DomainDef("dom"), admin)
+    backend.create_function(FunctionDef("dom"), admin)
     with pytest.raises(ValueError, match="at least one column"):
         backend.create_form(FormDef("dom", "frm"), admin)
     with pytest.raises(ValueError, match="reserved for system use"):
@@ -264,7 +266,7 @@ def test_create_form_validates_definition(backend: DuckDBBackend, admin: User):
 
 
 def test_create_form_with_bad_rows_rolls_back_table_creation(backend: DuckDBBackend, admin: User):
-    backend.create_domain(DomainDef("dom"), admin)
+    backend.create_function(FunctionDef("dom"), admin)
     form = FormDef("dom", "frm", columns=[ColumnDef("code", nullable=False), ColumnDef("name")])
     rows = pd.DataFrame({"code": ["A", None], "name": ["a", "b"]})
     with pytest.raises(BackendError, match="Import failed"):
@@ -277,7 +279,7 @@ def test_create_form_with_bad_rows_rolls_back_table_creation(backend: DuckDBBack
 
 
 def test_get_form_row_count_and_audit_fields(backend: DuckDBBackend, admin: User, sample_form: FormDef):
-    form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    form = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     assert form.row_count == 4
     assert form.updated_by == admin.username
     rows = backend.read_rows(form)
@@ -286,7 +288,7 @@ def test_get_form_row_count_and_audit_fields(backend: DuckDBBackend, admin: User
 
 
 def test_get_form_not_found(backend: DuckDBBackend, admin: User):
-    backend.create_domain(DomainDef("dom"), admin)
+    backend.create_function(FunctionDef("dom"), admin)
     with pytest.raises(NotFoundError, match="Form 'dom.frm' does not exist"):
         backend.get_form("dom", "frm")
     with pytest.raises(NotFoundError):
@@ -295,9 +297,9 @@ def test_get_form_not_found(backend: DuckDBBackend, admin: User):
 
 def test_list_forms_is_lightweight_and_sorted(backend: DuckDBBackend, admin: User, sample_form: FormDef):
     backend.create_form(
-        FormDef(SAMPLE_DOMAIN, "aardvark", display_name="Aardvarks", columns=[ColumnDef("x")]), admin
+        FormDef(SAMPLE_FUNCTION, "aardvark", display_name="Aardvarks", columns=[ColumnDef("x")]), admin
     )
-    forms = backend.list_forms(SAMPLE_DOMAIN)
+    forms = backend.list_forms(SAMPLE_FUNCTION)
     assert [f.name for f in forms] == ["aardvark", SAMPLE_FORM]
     products = forms[1]
     assert products.columns == []  # no column metadata in the light listing
@@ -310,13 +312,13 @@ def test_list_forms_is_lightweight_and_sorted(backend: DuckDBBackend, admin: Use
     assert forms[0].title == "Aardvarks"
 
 
-def test_list_forms_missing_domain(backend: DuckDBBackend):
+def test_list_forms_missing_function(backend: DuckDBBackend):
     with pytest.raises(NotFoundError):
         backend.list_forms("ghost")
 
 
 def test_external_table_without_system_columns_is_read_only(backend: DuckDBBackend, admin: User):
-    backend.create_domain(DomainDef("dom"), admin)
+    backend.create_function(FunctionDef("dom"), admin)
     backend._conn.execute('CREATE TABLE "dom"."legacy" (k INTEGER, payload STRUCT(a INTEGER), n VARCHAR)')
     backend._conn.execute("INSERT INTO \"dom\".\"legacy\" VALUES (2, {'a': 1}, 'two'), (1, {'a': 2}, 'one')")
     form = backend.get_form("dom", "legacy")
@@ -333,7 +335,7 @@ def test_external_table_without_system_columns_is_read_only(backend: DuckDBBacke
         backend.apply_changes(form, ChangeSet(inserts=[RowInsert({"k": 3})]), admin)
     with pytest.raises(BackendError, match="cannot be edited"):
         backend.append_rows(form, pd.DataFrame({"k": [3]}), admin)
-    assert backend.list_domains()[0].form_count == 1
+    assert backend.list_functions()[0].form_count == 1
 
 
 # ======================================================================================
@@ -368,7 +370,7 @@ def test_read_rows_returns_system_columns_and_normalised_types(
 
 
 def test_read_rows_orders_by_created_at_then_id(backend: DuckDBBackend, admin: User, monkeypatch):
-    backend.create_domain(DomainDef("dom"), admin)
+    backend.create_function(FunctionDef("dom"), admin)
     form = backend.create_form(FormDef("dom", "frm", columns=[ColumnDef("code")]), admin)
     _freeze(monkeypatch, T2, T0, T1)
     for code in ("zulu", "alpha", "mike"):  # created at T2, T0, T1
@@ -518,7 +520,7 @@ def test_apply_changes_update_and_delete_with_matching_token(
     assert int(a2[VERSION_COLUMN]) == 2  # incremented on update
     assert a2[UPDATED_AT_COLUMN] == pd.Timestamp(T2) and a2[UPDATED_BY_COLUMN] == "bob@example.org"
     assert a2[CREATED_AT_COLUMN] == a[CREATED_AT_COLUMN] and a2[CREATED_BY_COLUMN] == admin.username
-    form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    form = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     assert form.row_count == 3 and form.updated_by == "bob@example.org" and form.updated_at == T2
 
 
@@ -763,7 +765,7 @@ def test_get_history_newest_first_with_change_types_and_images(
 
 
 def test_get_history_for_form_without_changes(backend: DuckDBBackend, admin: User):
-    backend.create_domain(DomainDef("dom"), admin)
+    backend.create_function(FunctionDef("dom"), admin)
     form = backend.create_form(FormDef("dom", "frm", columns=[ColumnDef("code")]), admin)
     history = backend.get_history(form)
     assert history.empty
@@ -809,7 +811,7 @@ def test_add_column_errors(backend: DuckDBBackend, admin: User, sample_form: For
         backend.add_column(sample_form, ColumnDef("Bad Name"), admin)
     with pytest.raises(ValueError, match="only supported for text"):
         backend.add_column(sample_form, ColumnDef("n", DataType.INTEGER, options=["1"]), admin)
-    assert len(backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM).columns) == len(sample_form.columns)
+    assert len(backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM).columns) == len(sample_form.columns)
 
 
 def test_drop_column_removes_column_and_config(backend: DuckDBBackend, admin: User, sample_form: FormDef):
@@ -839,7 +841,7 @@ def test_drop_column_missing(backend: DuckDBBackend, admin: User, sample_form: F
 def test_update_form_metadata_persists_descriptions_owner_and_config(
     backend: DuckDBBackend, admin: User, sample_form: FormDef
 ):
-    form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    form = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     form.description = "New description"
     form.display_name = "Product Catalogue"
     form.owner = "new.owner@example.org"
@@ -857,12 +859,12 @@ def test_update_form_metadata_persists_descriptions_owner_and_config(
     assert updated.column("category").options == ["Hardware", "Software"]
     assert [c.name for c in updated.key_columns] == ["category"]
     assert updated.properties["created_by"] == admin.username  # untouched
-    listed = backend.list_forms(SAMPLE_DOMAIN)[0]
+    listed = backend.list_forms(SAMPLE_FUNCTION)[0]
     assert listed.description == "New description" and listed.display_name == "Product Catalogue"
 
 
 def test_update_form_metadata_toggles_not_null(backend: DuckDBBackend, admin: User, sample_form: FormDef):
-    form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    form = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     form.column("code").nullable = True
     relaxed = backend.update_form_metadata(form, admin)
     assert relaxed.column("code").nullable is True
@@ -881,12 +883,12 @@ def test_update_form_metadata_toggles_not_null(backend: DuckDBBackend, admin: Us
 def test_update_form_metadata_not_null_failure_rolls_back_everything(
     backend: DuckDBBackend, admin: User, sample_form: FormDef
 ):
-    form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    form = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     form.description = "should not persist"
     form.column("category").nullable = False  # D004 has no category
     with pytest.raises(BackendError, match="Cannot make 'category' required"):
         backend.update_form_metadata(form, admin)
-    fresh = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    fresh = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     assert fresh.description == "Sample products"
     assert fresh.column("category").nullable is True
 
@@ -898,7 +900,7 @@ def test_update_form_metadata_set_not_null_when_no_nulls(
     backend.apply_changes(
         sample_form, ChangeSet(updates=[RowUpdate(c[ID_COLUMN], {"qty": 30}, _version(c))]), admin
     )
-    form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    form = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     form.column("qty").nullable = False
     updated = backend.update_form_metadata(form, admin)
     assert updated.column("qty").nullable is False and updated.column("qty").required
@@ -907,14 +909,14 @@ def test_update_form_metadata_set_not_null_when_no_nulls(
 
 
 def test_update_form_metadata_errors(backend: DuckDBBackend, admin: User, sample_form: FormDef):
-    form = backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
+    form = backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     form.columns.append(ColumnDef("ghost"))
     with pytest.raises(NotFoundError, match="Column 'ghost' does not exist"):
         backend.update_form_metadata(form, admin)
     with pytest.raises(NotFoundError, match="does not exist"):
-        backend.update_form_metadata(FormDef(SAMPLE_DOMAIN, "missing", columns=[ColumnDef("x")]), admin)
+        backend.update_form_metadata(FormDef(SAMPLE_FUNCTION, "missing", columns=[ColumnDef("x")]), admin)
     with pytest.raises(ValueError):
-        backend.update_form_metadata(FormDef(SAMPLE_DOMAIN, SAMPLE_FORM), admin)
+        backend.update_form_metadata(FormDef(SAMPLE_FUNCTION, SAMPLE_FORM), admin)
 
 
 def test_drop_form_removes_table_metadata_and_history(
@@ -924,16 +926,16 @@ def test_drop_form_removes_table_metadata_and_history(
     assert _meta_count(backend, "change_log", table_name=SAMPLE_FORM) == 4
     backend.drop_form(sample_form, admin)
     with pytest.raises(NotFoundError):
-        backend.get_form(SAMPLE_DOMAIN, SAMPLE_FORM)
-    assert backend.list_forms(SAMPLE_DOMAIN) == []
-    assert backend.get_domain(SAMPLE_DOMAIN).form_count == 0
+        backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
+    assert backend.list_forms(SAMPLE_FUNCTION) == []
+    assert backend.get_function(SAMPLE_FUNCTION).form_count == 0
     assert backend.get_history(sample_form).empty
     assert _meta_count(backend, "object_properties", table_name=SAMPLE_FORM) == 0
     assert _meta_count(backend, "change_log", table_name=SAMPLE_FORM) == 0
     with pytest.raises(NotFoundError):
         backend.drop_form(sample_form, admin)
     # the name can be reused and starts from a clean slate
-    recreated = backend.create_form(FormDef(SAMPLE_DOMAIN, SAMPLE_FORM, columns=[ColumnDef("only")]), admin)
+    recreated = backend.create_form(FormDef(SAMPLE_FUNCTION, SAMPLE_FORM, columns=[ColumnDef("only")]), admin)
     assert (
         recreated.row_count == 0
         and recreated.display_name == ""
@@ -946,38 +948,38 @@ def test_drop_form_removes_table_metadata_and_history(
 # ======================================================================================
 
 
-def _domains(backend: DuckDBBackend, admin: User, *names: str) -> None:
+def _functions(backend: DuckDBBackend, admin: User, *names: str) -> None:
     for n in names:
-        backend.create_domain(DomainDef(n), admin)
+        backend.create_function(FunctionDef(n), admin)
 
 
 def test_get_permissions_without_grants(backend: DuckDBBackend, admin: User):
-    _domains(backend, admin, "a", "b")
+    _functions(backend, admin, "a", "b")
     perms = backend.get_permissions(User("nobody", groups=("strangers",)))
-    assert perms.domain_roles == {"a": Role.NONE, "b": Role.NONE}
-    assert perms.visible_domains == [] and not perms.can_create_domain and not perms.is_admin_anywhere
+    assert perms.function_roles == {"a": Role.NONE, "b": Role.NONE}
+    assert perms.visible_functions == [] and not perms.can_create_function and not perms.is_admin_anywhere
 
 
 def test_get_permissions_catalog_level_grant_applies_to_every_domain(backend: DuckDBBackend, admin: User):
-    _domains(backend, admin, "a", "b")
-    backend.grant_domain_role(CATALOG_LEVEL, "readers", Role.VIEWER, admin)
+    _functions(backend, admin, "a", "b")
+    backend.grant_function_role(CATALOG_LEVEL, "readers", Role.VIEWER, admin)
     perms = backend.get_permissions(User("u", groups=("readers",)))
-    assert perms.domain_roles == {"a": Role.VIEWER, "b": Role.VIEWER}
-    assert not perms.can_create_domain
-    backend.create_domain(DomainDef("c"), admin)
+    assert perms.function_roles == {"a": Role.VIEWER, "b": Role.VIEWER}
+    assert not perms.can_create_function
+    backend.create_function(FunctionDef("c"), admin)
     assert backend.get_permissions(User("u", groups=("readers",))).role_for("c") is Role.VIEWER
-    backend.grant_domain_role(CATALOG_LEVEL, "u", Role.ADMIN, admin)
+    backend.grant_function_role(CATALOG_LEVEL, "u", Role.ADMIN, admin)
     perms = backend.get_permissions(User("u", groups=("readers",)))
-    assert perms.domain_roles == {"a": Role.ADMIN, "b": Role.ADMIN, "c": Role.ADMIN}
-    assert perms.can_create_domain and perms.admin_domains == ["a", "b", "c"]
+    assert perms.function_roles == {"a": Role.ADMIN, "b": Role.ADMIN, "c": Role.ADMIN}
+    assert perms.can_create_function and perms.admin_functions == ["a", "b", "c"]
 
 
 def test_get_permissions_takes_the_max_of_all_matching_grants(backend: DuckDBBackend, admin: User):
-    _domains(backend, admin, "a", "b")
-    backend.grant_domain_role("a", "grp_view", Role.VIEWER, admin)
-    backend.grant_domain_role("a", "grp_edit", Role.EDITOR, admin)
-    backend.grant_domain_role("b", "grp_view", Role.ADMIN, admin)
-    backend.grant_domain_role(CATALOG_LEVEL, "grp_view", Role.VIEWER, admin)
+    _functions(backend, admin, "a", "b")
+    backend.grant_function_role("a", "grp_view", Role.VIEWER, admin)
+    backend.grant_function_role("a", "grp_edit", Role.EDITOR, admin)
+    backend.grant_function_role("b", "grp_view", Role.ADMIN, admin)
+    backend.grant_function_role(CATALOG_LEVEL, "grp_view", Role.VIEWER, admin)
     user = User("u", groups=("grp_view", "grp_edit"))
     perms = backend.get_permissions(user)
     assert (
@@ -986,14 +988,14 @@ def test_get_permissions_takes_the_max_of_all_matching_grants(backend: DuckDBBac
     assert perms.role_for("b") is Role.ADMIN
     assert not perms.is_global_admin
     # a lower domain-level grant never reduces a higher catalog-level one
-    backend.grant_domain_role(CATALOG_LEVEL, "grp_edit", Role.ADMIN, admin)
+    backend.grant_function_role(CATALOG_LEVEL, "grp_edit", Role.ADMIN, admin)
     perms = backend.get_permissions(user)
     assert perms.role_for("a") is Role.ADMIN and perms.is_global_admin
 
 
 def test_get_permissions_matches_username_email_and_groups_separately(backend: DuckDBBackend, admin: User):
     """Grants to individuals cannot be created through the app, but ones that exist still count."""
-    _domains(backend, admin, "a")
+    _functions(backend, admin, "a")
     backend._conn.execute("INSERT INTO _catalog.grants VALUES ('a', 'mail@example.org', 'VIEWER')")
     assert backend.get_permissions(User("someone", email="mail@example.org")).role_for("a") is Role.VIEWER
     assert backend.get_permissions(User("mail@example.org")).role_for("a") is Role.VIEWER
@@ -1003,32 +1005,32 @@ def test_get_permissions_matches_username_email_and_groups_separately(backend: D
 
 
 def test_grant_replace_and_revoke(backend: DuckDBBackend, admin: User):
-    _domains(backend, admin, "a")
-    backend.grant_domain_role("a", "zeta", Role.EDITOR, admin)
-    backend.grant_domain_role("a", "  beta  ", Role.VIEWER, admin)
-    assert backend.list_domain_grants("a") == [("beta", Role.VIEWER), ("zeta", Role.EDITOR)]
+    _functions(backend, admin, "a")
+    backend.grant_function_role("a", "zeta", Role.EDITOR, admin)
+    backend.grant_function_role("a", "  beta  ", Role.VIEWER, admin)
+    assert backend.list_function_grants("a") == [("beta", Role.VIEWER), ("zeta", Role.EDITOR)]
     assert {"beta", "zeta"} <= set(backend.list_groups()) and backend.list_groups("ZET") == ["zeta"]
-    backend.grant_domain_role("a", "zeta", Role.VIEWER, admin)  # replaces
-    assert dict(backend.list_domain_grants("a"))["zeta"] is Role.VIEWER
-    backend.grant_domain_role("a", "zeta", Role.NONE, admin)  # revokes
-    assert [p for p, _ in backend.list_domain_grants("a")] == ["beta"]
+    backend.grant_function_role("a", "zeta", Role.VIEWER, admin)  # replaces
+    assert dict(backend.list_function_grants("a"))["zeta"] is Role.VIEWER
+    backend.grant_function_role("a", "zeta", Role.NONE, admin)  # revokes
+    assert [p for p, _ in backend.list_function_grants("a")] == ["beta"]
     assert backend.get_permissions(User("zeta")).role_for("a") is Role.NONE
-    backend.grant_domain_role("a", "beta", Role.NONE, admin)
-    backend.grant_domain_role("a", "beta", Role.NONE, admin)  # revoking twice is harmless
-    assert backend.list_domain_grants("a") == []
-    assert backend.list_domain_grants("never_granted") == []
+    backend.grant_function_role("a", "beta", Role.NONE, admin)
+    backend.grant_function_role("a", "beta", Role.NONE, admin)  # revoking twice is harmless
+    assert backend.list_function_grants("a") == []
+    assert backend.list_function_grants("never_granted") == []
 
 
 def test_grant_errors(backend: DuckDBBackend, admin: User):
-    with pytest.raises(NotFoundError, match="Domain 'ghost' does not exist"):
-        backend.grant_domain_role("ghost", "grp", Role.VIEWER, admin)
-    _domains(backend, admin, "a")
+    with pytest.raises(NotFoundError, match="Function 'ghost' does not exist"):
+        backend.grant_function_role("ghost", "grp", Role.VIEWER, admin)
+    _functions(backend, admin, "a")
     for bad in ("", "   "):
         with pytest.raises(BackendError, match="group is required"):
-            backend.grant_domain_role("a", bad, Role.VIEWER, admin)
+            backend.grant_function_role("a", bad, Role.VIEWER, admin)
     with pytest.raises(BackendError, match="groups only"):
-        backend.grant_domain_role("a", "someone@example.org", Role.VIEWER, admin)
-    assert backend.list_domain_grants("a") == []
+        backend.grant_function_role("a", "someone@example.org", Role.VIEWER, admin)
+    assert backend.list_function_grants("a") == []
 
 
 def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
@@ -1036,11 +1038,11 @@ def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
     b = DuckDBBackend(str(path))
     try:
         assert path.exists() and b.describe() == f"DuckDB ({path})"
-        b.create_domain(DomainDef("dom", display_name="Dom", description="persisted"), admin)
+        b.create_function(FunctionDef("dom", display_name="Dom", description="persisted"), admin)
         form = b.create_form(
             FormDef("dom", "frm", display_name="Frm", columns=sample_columns()), admin, sample_rows()
         )
-        b.grant_domain_role("dom", "readers", Role.VIEWER, admin)
+        b.grant_function_role("dom", "readers", Role.VIEWER, admin)
         row = _row(b.read_rows(form), "A001")
         b.apply_changes(
             form, ChangeSet(updates=[RowUpdate(row[ID_COLUMN], {"qty": 12}, _version(row))]), admin
@@ -1050,8 +1052,8 @@ def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
 
     reopened = DuckDBBackend(str(path))
     try:
-        assert [d.name for d in reopened.list_domains()] == ["dom"]
-        domain = reopened.get_domain("dom")
+        assert [d.name for d in reopened.list_functions()] == ["dom"]
+        domain = reopened.get_function("dom")
         assert domain.display_name == "Dom" and domain.description == "persisted" and domain.form_count == 1
         form = reopened.get_form("dom", "frm")
         assert form.row_count == 4 and form.display_name == "Frm"
@@ -1065,7 +1067,7 @@ def test_file_backend_persists_across_close_and_reopen(tmp_path, admin: User):
         assert int(_row(df, "A001")["qty"]) == 12
         history = reopened.get_history(form)
         assert history["change_type"].tolist() == ["update", "insert", "insert", "insert", "insert"]
-        assert reopened.list_domain_grants("dom") == [("readers", Role.VIEWER)]
+        assert reopened.list_function_grants("dom") == [("readers", Role.VIEWER)]
         assert reopened.get_permissions(User("x", groups=("readers",))).role_for("dom") is Role.VIEWER
         # the meta schema is created idempotently
         assert (
@@ -1083,14 +1085,32 @@ def test_close_is_idempotent(backend: DuckDBBackend):
 
 def test_seeded_backend_contains_demo_content(seeded_backend: DuckDBBackend):
     domains = {d.name: d for d in seeded_backend.list_domains()}
-    assert set(domains) == {
+    assert {n: d.function_count for n, d in domains.items()} == {
+        "finance": 1,
+        "people": 1,
+        "research": 0,
+        "student": 1,
+    }
+    functions = {f.name: f for f in seeded_backend.list_functions()}
+    assert set(functions) == {
         "student__survey_service_improvement",
         "finance__cost_management",
         "hr__reference",
     }
-    assert domains["finance__cost_management"].form_count == 2
-    assert domains["hr__reference"].display_name == "HR Reference"
-    forms = {(f.domain, f.name): f for d in domains for f in seeded_backend.list_forms(d)}
+    assert functions["finance__cost_management"].form_count == 2
+    assert functions["finance__cost_management"].file_count == 2
+    files = {f.name: f for f in seeded_backend.list_files("finance__cost_management")}
+    assert files["gl_transactions.csv"].row_count == 2000 and files["gl_transactions.csv"].registered
+    assert files["fx_rates.parquet"].row_count == 366 and files["fx_rates.parquet"].title == "FX Rates"
+    assert seeded_backend.preview_file(files["fx_rates.parquet"], limit=3).columns.tolist() == [
+        "rate_date",
+        "currency",
+        "rate_to_gbp",
+    ]
+    assert functions["finance__cost_management"].domain == "finance"
+    assert functions["hr__reference"].display_name == "HR Reference"
+    assert functions["hr__reference"].domain == "people"
+    forms = {(f.function, f.name): f for d in functions for f in seeded_backend.list_forms(d)}
     assert set(forms) == {
         ("student__survey_service_improvement", "survey_questions"),
         ("student__survey_service_improvement", "service_areas"),
@@ -1108,6 +1128,318 @@ def test_seeded_backend_contains_demo_content(seeded_backend: DuckDBBackend):
         "Overall",
     ]
     assert [c.name for c in questions.key_columns] == ["question_code"]
-    grants = dict(seeded_backend.list_domain_grants("finance__cost_management"))
+    grants = dict(seeded_backend.list_function_grants("finance__cost_management"))
     assert grants["finance_stewards"] is Role.EDITOR and grants["finance_readers"] is Role.VIEWER
-    assert dict(seeded_backend.list_domain_grants(CATALOG_LEVEL)) == {"rdm_admins": Role.ADMIN}
+    assert grants["finance_admins"] is Role.ADMIN
+    assert dict(seeded_backend.list_function_grants(CATALOG_LEVEL)) == {"rdm_admins": Role.ADMIN}
+
+
+# ======================================================================================
+# Domains (classifier), drop_function, per-row history, meta migration
+# ======================================================================================
+
+
+def test_domain_crud_and_function_assignment(backend: DuckDBBackend, admin: User):
+    assert backend.list_domains() == []
+    created = backend.create_domain(DomainDef("student", "Student", "Student data", ""), admin)
+    assert (created.name, created.display_name, created.description, created.function_count) == (
+        "student",
+        "Student",
+        "Student data",
+        0,
+    )
+    assert created.owner == admin.username  # defaults to the actor
+    backend.create_domain(DomainDef("finance", "Finance"), admin)
+    assert [d.name for d in backend.list_domains()] == ["finance", "student"]
+    with pytest.raises(ConflictError, match="already exists"):
+        backend.create_domain(DomainDef("student"), admin)
+    with pytest.raises(ValueError):
+        backend.create_domain(DomainDef("Bad Name"), admin)
+    with pytest.raises(NotFoundError, match="Domain 'ghost' does not exist"):
+        backend.get_domain("ghost")
+    with pytest.raises(NotFoundError):
+        backend.update_domain(DomainDef("ghost"), admin)
+    updated = backend.update_domain(
+        DomainDef("student", "Students", "All student lists", "s@example.org"), admin
+    )
+    assert (updated.display_name, updated.description, updated.owner) == (
+        "Students",
+        "All student lists",
+        "s@example.org",
+    )
+    # assigning a function to a domain
+    with pytest.raises(NotFoundError, match="Domain 'ghost' does not exist"):
+        backend.create_function(FunctionDef("survey", domain="ghost"), admin)
+    f = backend.create_function(FunctionDef("survey", domain="student"), admin)
+    assert f.domain == "student" and f.properties["rdm.domain"] == "student"
+    assert backend.get_domain("student").function_count == 1
+    assert _meta_count(backend, "functions", name="survey", domain_name="student") == 1
+    with pytest.raises(ConflictError, match="still has 1 function"):
+        backend.delete_domain("student", admin)
+    f = backend.update_function(FunctionDef("survey", domain="finance"), admin)
+    assert f.domain == "finance"
+    assert {d.name: d.function_count for d in backend.list_domains()} == {"finance": 1, "student": 0}
+    backend.delete_domain("student", admin)
+    assert [d.name for d in backend.list_domains()] == ["finance"]
+    with pytest.raises(NotFoundError):
+        backend.delete_domain("student", admin)
+    # clearing the assignment
+    assert backend.update_function(FunctionDef("survey", domain=""), admin).domain == ""
+    assert backend.get_domain("finance").function_count == 0
+
+
+def test_drop_function_requires_an_empty_schema_and_cleans_up(
+    backend: DuckDBBackend, admin: User, sample_form: FormDef
+):
+    function = backend.get_function(SAMPLE_FUNCTION)
+    backend.grant_function_role(SAMPLE_FUNCTION, "readers", Role.VIEWER, admin)
+    with pytest.raises(ConflictError, match="still has 1 form"):
+        backend.drop_function(function, admin)
+    backend.drop_form(sample_form, admin)
+    backend.drop_function(function, admin)
+    with pytest.raises(NotFoundError):
+        backend.get_function(SAMPLE_FUNCTION)
+    assert backend.list_functions() == []
+    assert backend.list_function_grants(SAMPLE_FUNCTION) == []
+    assert _meta_count(backend, "functions", name=SAMPLE_FUNCTION) == 0
+    assert _meta_count(backend, "object_properties", schema_name=SAMPLE_FUNCTION) == 0
+    with pytest.raises(NotFoundError):
+        backend.drop_function(function, admin)
+    assert backend.get_permissions(User("x", groups=("readers",))).function_roles == {}
+
+
+def test_get_history_for_one_row(backend: DuckDBBackend, admin: User, sample_form: FormDef, monkeypatch):
+    df = backend.read_rows(sample_form)
+    a, b = _row(df, "A001"), _row(df, "B002")
+    _freeze(monkeypatch, T1, T2)
+    backend.apply_changes(
+        sample_form, ChangeSet(updates=[RowUpdate(a[ID_COLUMN], {"qty": 11}, _version(a))]), User("upd")
+    )
+    backend.apply_changes(sample_form, ChangeSet(deletes=[RowDelete(b[ID_COLUMN], _version(b))]), User("del"))
+    history = backend.get_history(sample_form, row_id=a[ID_COLUMN])
+    assert history["change_type"].tolist() == ["update", "insert"]
+    assert history[ID_COLUMN].tolist() == [a[ID_COLUMN]] * 2
+    assert history["qty"].tolist() == [11, 10]
+    assert len(backend.get_history(sample_form, limit=1, row_id=a[ID_COLUMN])) == 1
+    deleted = backend.get_history(sample_form, row_id=b[ID_COLUMN])
+    assert deleted["change_type"].tolist() == ["delete", "insert"] and deleted.iloc[0]["code"] == "B002"
+    assert backend.get_history(sample_form, row_id="no-such-row").empty
+    assert len(backend.get_history(sample_form)) == 6
+
+
+def test_meta_migration_from_pre_function_layout(tmp_path, admin: User):
+    """A local database from before domains and functions were split is upgraded on open."""
+    path = tmp_path / "old.duckdb"
+    conn = duckdb.connect(str(path))
+    conn.execute('CREATE SCHEMA "_catalog"')
+    conn.execute(
+        'CREATE TABLE "_catalog"."domains" (name VARCHAR PRIMARY KEY, display_name VARCHAR, description VARCHAR, '
+        "owner VARCHAR, doc_link VARCHAR, created_at TIMESTAMP, created_by VARCHAR, updated_at TIMESTAMP, updated_by VARCHAR)"
+    )
+    conn.execute(
+        'CREATE TABLE "_catalog"."forms" (domain VARCHAR NOT NULL, name VARCHAR NOT NULL, display_name VARCHAR, '
+        "description VARCHAR, owner VARCHAR, created_at TIMESTAMP, created_by VARCHAR, updated_at TIMESTAMP, "
+        "updated_by VARCHAR, PRIMARY KEY (domain, name))"
+    )
+    conn.execute(
+        "INSERT INTO \"_catalog\".\"domains\" VALUES ('finance', 'Finance', 'd', 'o', 'https://x', now(), 'a', now(), 'a')"
+    )
+    conn.execute(
+        "INSERT INTO \"_catalog\".\"forms\" VALUES ('finance', 'frm', 'Frm', '', '', now(), 'a', now(), 'a')"
+    )
+    conn.execute('CREATE SCHEMA "finance"')
+    conn.close()
+    b = DuckDBBackend(str(path))
+    try:
+        assert _meta_count(b, "functions", name="finance") == 1
+        assert _meta_count(b, "forms", function_name="finance", name="frm") == 1
+        assert b.list_domains() == []  # the new domain list starts empty
+        d = b.create_domain(DomainDef("fin", "Finance"), admin)
+        assert d.function_count == 0
+        assert b.update_function(FunctionDef("finance", domain="fin"), admin).domain == "fin"
+    finally:
+        b.close()
+
+
+# ======================================================================================
+# Files (CSV / Parquet in the function's files directory)
+# ======================================================================================
+
+CSV = b"code,amount,when\nA,1.5,2024-01-01\nB,2.25,2024-02-01\n"
+
+
+def _parquet(rows: int = 3) -> bytes:
+    import io
+
+    buffer = io.BytesIO()
+    pd.DataFrame({"x": range(rows), "y": ["v"] * rows}).to_parquet(buffer, index=False)
+    return buffer.getvalue()
+
+
+def test_put_file_stores_registers_and_logs(backend: DuckDBBackend, admin: User, monkeypatch):
+    backend.create_function(FunctionDef("finance"), admin)
+    assert backend.list_files("finance") == [] and backend.get_function("finance").file_count == 0
+    _freeze(monkeypatch, T1)
+    f = backend.put_file(FileDef("finance", "gl.csv", display_name="GL", description="d"), CSV, admin)
+    assert (f.name, f.format, f.size_bytes, f.row_count) == ("gl.csv", "csv", len(CSV), 2)
+    assert f.display_name == "GL" and f.owner == admin.username and f.registered
+    assert f.created_by == admin.username and f.created_at == T1 and f.updated_at == T1
+    assert f.path.endswith("finance/gl.csv") and backend.read_file(f) == CSV
+    assert backend.get_function("finance").file_count == 1
+    assert _meta_count(backend, "files", function_name="finance", name="gl.csv") == 1
+    history = backend.file_history(f)
+    assert history["change_type"].tolist() == ["upload"] and history["row_count"].tolist() == [2]
+    assert history["size_bytes"].tolist() == [len(CSV)] and history["changed_by"].tolist() == [admin.username]
+    with pytest.raises(ConflictError, match="already exists"):
+        backend.put_file(FileDef("finance", "gl.csv"), CSV, admin)
+    with pytest.raises(NotFoundError, match="does not exist"):
+        backend.put_file(FileDef("finance", "other.csv"), CSV, admin, replace=True)
+    with pytest.raises(NotFoundError, match="Function 'ghost' does not exist"):
+        backend.put_file(FileDef("ghost", "gl.csv"), CSV, admin)
+    with pytest.raises(ValueError):
+        backend.put_file(FileDef("finance", "bad name.csv"), CSV, admin)
+
+
+def test_preview_columns_and_parquet(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    csv = backend.put_file(FileDef("finance", "gl.csv"), CSV, admin)
+    preview = backend.preview_file(csv, limit=1)
+    assert preview.columns.tolist() == ["code", "amount", "when"] and len(preview) == 1
+    assert [(c.name, c.data_type) for c in backend.file_columns(csv)] == [
+        ("code", DataType.STRING),
+        ("amount", DataType.DOUBLE),
+        ("when", DataType.DATE),
+    ]
+    pq = backend.put_file(FileDef("finance", "rates.parquet"), _parquet(5), admin)
+    assert pq.row_count == 5 and pq.format == "parquet"
+    assert len(backend.preview_file(pq, limit=10)) == 5
+    assert [c.native_type for c in backend.file_columns(pq)] == ["BIGINT", "VARCHAR"]
+    assert [f.name for f in backend.list_files("finance")] == ["gl.csv", "rates.parquet"]
+
+
+def test_replace_file_keeps_metadata_and_history(backend: DuckDBBackend, admin: User, monkeypatch):
+    backend.create_function(FunctionDef("finance"), admin)
+    _freeze(monkeypatch, T1, T2)
+    backend.put_file(
+        FileDef("finance", "gl.csv", display_name="GL", description="d", owner="o@x"), CSV, admin
+    )
+    new = CSV + b"C,3,2024-03-01\n"
+    replaced = backend.put_file(FileDef("finance", "gl.csv"), new, User("bob"), replace=True)
+    assert (replaced.row_count, replaced.size_bytes) == (3, len(new))
+    assert (replaced.display_name, replaced.description, replaced.owner) == ("GL", "d", "o@x")
+    assert replaced.created_by == admin.username and replaced.updated_by == "bob"
+    assert backend.read_file(replaced) == new
+    history = backend.file_history(replaced)
+    assert history["change_type"].tolist() == ["replace", "upload"]
+    assert history["row_count"].tolist() == [3, 2] and history["changed_by"].tolist() == [
+        "bob",
+        admin.username,
+    ]
+    assert len(backend.file_history(replaced, limit=1)) == 1
+
+
+def test_unreadable_upload_is_rejected_and_previous_content_kept(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    with pytest.raises(BackendError, match="cannot be read as PARQUET"):
+        backend.put_file(FileDef("finance", "bad.parquet"), b"garbage", admin)
+    assert backend.list_files("finance") == []
+    assert _meta_count(backend, "files", function_name="finance") == 0
+    backend.put_file(FileDef("finance", "ok.parquet"), _parquet(), admin)
+    with pytest.raises(BackendError, match="cannot be read"):
+        backend.put_file(FileDef("finance", "ok.parquet"), b"garbage", admin, replace=True)
+    assert backend.get_file("finance", "ok.parquet").row_count == 3
+    assert backend.file_history(FileDef("finance", "ok.parquet"))["change_type"].tolist() == ["upload"]
+
+
+def test_update_file_metadata_and_unregistered_files(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    f = backend.put_file(FileDef("finance", "gl.csv"), CSV, admin)
+    f.display_name, f.description, f.owner = "General Ledger", "postings", "fin@x"
+    updated = backend.update_file_metadata(f, User("bob"))
+    assert (updated.display_name, updated.description, updated.owner) == (
+        "General Ledger",
+        "postings",
+        "fin@x",
+    )
+    assert updated.updated_by == "bob" and updated.row_count == 2  # counts untouched
+    # a file landed outside the app (pipeline / CLI) shows up unregistered, other types are ignored
+    folder = backend.files_dir / "finance"
+    (folder / "landed.parquet").write_bytes(_parquet(4))
+    (folder / "notes.txt").write_text("ignored")
+    names = {x.name: x for x in backend.list_files("finance")}
+    assert set(names) == {"gl.csv", "landed.parquet"}
+    landed = names["landed.parquet"]
+    assert not landed.registered and landed.row_count is None and landed.size_bytes == len(_parquet(4))
+    assert backend.get_function("finance").file_count == 2
+    assert len(backend.preview_file(landed)) == 4
+    landed.description = "from the pipeline"
+    assert backend.update_file_metadata(landed, admin).registered
+    with pytest.raises(NotFoundError):
+        backend.get_file("finance", "missing.csv")
+    with pytest.raises(NotFoundError):
+        backend.update_file_metadata(FileDef("finance", "missing.csv"), admin)
+    with pytest.raises(NotFoundError):
+        backend.list_files("ghost")
+
+
+def test_drop_file_and_drop_function_guard(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    f = backend.put_file(FileDef("finance", "gl.csv"), CSV, admin)
+    function = backend.get_function("finance")
+    with pytest.raises(ConflictError, match="still has 1 file"):
+        backend.drop_function(function, admin)
+    backend.drop_file(f, User("del"))
+    assert backend.list_files("finance") == []
+    assert _meta_count(backend, "files", function_name="finance") == 0
+    history = backend.file_history(f)
+    assert history["change_type"].tolist() == ["delete", "upload"]
+    assert history.iloc[0]["changed_by"] == "del" and history.iloc[0]["row_count"] == 2
+    with pytest.raises(NotFoundError):
+        backend.drop_file(f, admin)
+    with pytest.raises(NotFoundError):
+        backend.read_file(f)
+    backend.drop_function(function, admin)
+    assert not (backend.files_dir / "finance").exists()
+
+
+def test_drop_function_never_deletes_unknown_content_in_the_files_folder(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    folder = backend.files_dir / "finance"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "notes.txt").write_text("not managed by the app")
+    (folder / "archive").mkdir()
+    assert backend.list_files("finance") == []  # ignored by the app ...
+    with pytest.raises(ConflictError, match="still has 2 file\\(s\\) or folder"):
+        backend.drop_function(backend.get_function("finance"), admin)  # ... but never deleted by it
+    assert (folder / "notes.txt").read_text() == "not managed by the app"
+    assert backend.get_function("finance").name == "finance"
+    (folder / "notes.txt").unlink()
+    (folder / "archive").rmdir()
+    backend.drop_function(backend.get_function("finance"), admin)
+    assert not folder.exists()
+
+
+def test_files_persist_next_to_the_database(tmp_path, admin: User):
+    path = tmp_path / "db" / "rdm.duckdb"
+    b = DuckDBBackend(str(path))
+    try:
+        assert b.files_dir == tmp_path / "db" / "files"
+        b.create_function(FunctionDef("fin"), admin)
+        b.put_file(FileDef("fin", "gl.csv", display_name="GL"), CSV, admin)
+    finally:
+        b.close()
+    assert (tmp_path / "db" / "files" / "fin" / "gl.csv").read_bytes() == CSV
+    reopened = DuckDBBackend(str(path))
+    try:
+        [f] = reopened.list_files("fin")
+        assert f.display_name == "GL" and f.row_count == 2 and f.registered
+    finally:
+        reopened.close()
+    custom = DuckDBBackend(files_dir=str(tmp_path / "elsewhere"))
+    try:
+        custom.create_function(FunctionDef("fin"), admin)
+        custom.put_file(FileDef("fin", "gl.csv"), CSV, admin)
+        assert (tmp_path / "elsewhere" / "fin" / "gl.csv").exists()
+    finally:
+        custom.close()
+    assert (tmp_path / "elsewhere" / "fin" / "gl.csv").exists()  # only temp dirs are removed on close

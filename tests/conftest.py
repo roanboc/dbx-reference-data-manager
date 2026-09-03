@@ -17,9 +17,9 @@ import pytest
 from rdm import demo
 from rdm.auth import PERSONAS
 from rdm.backend.duckdb_backend import DuckDBBackend
-from rdm.models import ColumnDef, DataType, DomainDef, FormDef, User
+from rdm.models import ColumnDef, DataType, FormDef, FunctionDef, User
 
-SAMPLE_DOMAIN = "test_domain"
+SAMPLE_FUNCTION = "test_function"
 SAMPLE_FORM = "products"
 SAMPLE_OPTIONS = ["Hardware", "Software", "Service"]
 
@@ -89,6 +89,11 @@ def admin() -> User:
 
 
 @pytest.fixture
+def function_admin() -> User:
+    return PERSONAS["function_admin"].user
+
+
+@pytest.fixture
 def editor() -> User:
     return PERSONAS["editor"].user
 
@@ -100,9 +105,12 @@ def viewer() -> User:
 
 @pytest.fixture
 def sample_form(backend: DuckDBBackend, admin: User) -> FormDef:
-    backend.create_domain(
-        DomainDef(
-            SAMPLE_DOMAIN, display_name="Test Domain", description="Fixture domain", owner="owner@example.org"
+    backend.create_function(
+        FunctionDef(
+            SAMPLE_FUNCTION,
+            display_name="Test Function",
+            description="Fixture function",
+            owner="owner@example.org",
         ),
         admin,
     )
@@ -112,7 +120,7 @@ def sample_form(backend: DuckDBBackend, admin: User) -> FormDef:
         mp.setattr("rdm.backend.duckdb_backend.new_row_id", lambda: f"row-{next(counter):04d}")
         return backend.create_form(
             FormDef(
-                SAMPLE_DOMAIN,
+                SAMPLE_FUNCTION,
                 SAMPLE_FORM,
                 display_name="Products",
                 description="Sample products",

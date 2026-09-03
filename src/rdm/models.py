@@ -1,7 +1,10 @@
 """Domain model shared by the UI, the services and every backend.
 
-Nothing in this module knows about SQL or Streamlit. Backends translate these objects
-into their own DDL/DML; the UI renders them.
+Nothing in this module knows about SQL or Dash. The hierarchy is *domain* (a business
+classifier maintained by global admins) > *function* (a Unity Catalog schema) > *form* (a
+Delta table) or *file* (a CSV/Parquet file in the function's volume, for lists too large to
+manage in a grid). Backends translate these objects into their own DDL/DML; the UI renders
+them.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from typing import Any
 # Naming rules
 # --------------------------------------------------------------------------------------
 
-#: Identifiers (domains, forms, columns) are lower_snake_case, max 63 chars. This is the
+#: Identifiers (domains, functions, forms, columns) are lower_snake_case, max 63 chars. This is the
 #: intersection of what Unity Catalog and DuckDB accept without quoting surprises.
 IDENTIFIER_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 MAX_IDENTIFIER_LENGTH = 63
@@ -133,7 +136,7 @@ def validate_identifier(name: str, kind: str = "identifier", allow_leading_under
     """Return ``name`` if it is a safe identifier, else raise ``ValueError``.
 
     Leading underscores are reserved for system objects (``_id``, ``_catalog``, the
-    ``_forms`` catalog); user-created names must start with a letter.
+    ``_reference_data`` catalog); user-created names must start with a letter.
     """
     if not isinstance(name, str) or not IDENTIFIER_RE.match(name):
         raise ValueError(
@@ -153,7 +156,7 @@ def sanitize_identifier(raw: Any, fallback: str = "column") -> str:
     text = "" if raw is None else str(raw)
     text = text.strip().lower()
     text = re.sub(r"[^a-z0-9_]+", "_", text)
-    # keep deliberate double underscores (domain convention <function>__<area>), fold longer runs
+    # keep deliberate double underscores (function convention <domain>__<area>), fold longer runs
     text = re.sub(r"_{3,}", "__", text).strip("_")
     if not text:
         text = fallback
@@ -163,6 +166,56 @@ def sanitize_identifier(raw: Any, fallback: str = "column") -> str:
     if text in RESERVED_WORDS:
         text = f"{text[: MAX_IDENTIFIER_LENGTH - 1]}_"
     return text
+
+
+#: File formats accepted for files (large reference datasets kept as files, not as forms).
+FILE_FORMATS: tuple[str, ...] = ("csv", "parquet")
+#: Managed volume the app creates in every function schema for its files.
+FILES_VOLUME = "_files"
+
+
+def qualified_name(*parts: str) -> str:
+    r"""Back-quoted Databricks name, e.g. ``qualified_name(catalog, function, form)`` -> ``\`c\`.\`f\`.\`t\```.
+
+    Every part is validated first, so the result can be pasted into a query as is.
+    """
+    return ".".join(f"`{validate_identifier(p)}`" for p in parts)
+
+
+def volume_file_path(catalog: str, function: str, name: str) -> str:
+    """Path of a file in the function's volume: ``/Volumes/<catalog>/<function>/_files/<name>``."""
+    validate_identifier(catalog, "catalog name")
+    validate_identifier(function, "function name", allow_leading_underscore=False)
+    validate_file_name(name)
+    return f"/Volumes/{catalog}/{function}/{FILES_VOLUME}/{name}"
+
+
+def split_file_name(name: str) -> tuple[str, str]:
+    """``"gl_transactions.csv"`` -> ``("gl_transactions", "csv")``; no extension -> ``("...", "")``."""
+    stem, _, ext = (name or "").rpartition(".")
+    if not stem:
+        return ext, ""
+    return stem, ext.lower()
+
+
+def sanitize_file_name(raw: Any, fallback: str = "file") -> str:
+    """Turn an uploaded file name into ``<identifier>.<format>`` (``"GL Transactions 2024.CSV"`` -> ``"gl_transactions_2024.csv"``)."""
+    text = "" if raw is None else str(raw)
+    base = text.replace("\\", "/").rsplit("/", 1)[-1]
+    stem, ext = split_file_name(base)
+    stem = sanitize_identifier(stem, fallback=fallback)
+    return f"{stem}.{ext}" if ext else stem
+
+
+def validate_file_name(name: str) -> str:
+    """A file name is ``<identifier>.<format>`` with a supported format."""
+    stem, ext = split_file_name(name)
+    if ext not in FILE_FORMATS:
+        raise ValueError(
+            f"Invalid file name {name!r}: the extension must be one of {', '.join(FILE_FORMATS)}."
+        )
+    validate_identifier(stem, "file name", allow_leading_underscore=False)
+    return name
 
 
 def humanize(name: str) -> str:
@@ -225,7 +278,7 @@ DEFAULT_DECIMAL_SCALE = 4
 
 
 class Role(enum.IntEnum):
-    """Access tier for a domain. Ordered so that ``role >= Role.EDITOR`` reads naturally."""
+    """Access tier for a function (schema). Ordered so that ``role >= Role.EDITOR`` reads naturally."""
 
     NONE = 0
     VIEWER = 1
@@ -238,7 +291,7 @@ class Role(enum.IntEnum):
             Role.NONE: "No access",
             Role.VIEWER: "Viewer",
             Role.EDITOR: "Editor",
-            Role.ADMIN: "Domain admin",
+            Role.ADMIN: "Function admin",
         }[self]
 
     @property
@@ -283,47 +336,58 @@ GLOBAL_ADMIN_LABEL = "Global admin"
 class Permissions:
     """Effective access of one user, as resolved by the backend.
 
-    * ``domain_roles`` - role per domain (schema). ``Role.ADMIN`` is a *domain admin*: creates
-      and administers forms inside that domain.
-    * ``is_global_admin`` - catalog-level rights (create domains, grant access, see the
-      technical documentation). In Unity Catalog this is CREATE SCHEMA / MANAGE on the catalog.
+    * ``function_roles`` - role per function (schema). ``Role.ADMIN`` is a *function admin*:
+      creates and administers forms inside that function and grants roles on it.
+    * ``is_global_admin`` - catalog-level rights: create and delete functions, delete forms,
+      administer the domain list, see the technical documentation. In Unity Catalog this is
+      CREATE SCHEMA / MANAGE on the catalog (or catalog ownership).
     """
 
-    domain_roles: dict[str, Role] = field(default_factory=dict)
+    function_roles: dict[str, Role] = field(default_factory=dict)
     is_global_admin: bool = False
 
     @property
-    def can_create_domain(self) -> bool:
+    def can_create_function(self) -> bool:
         return self.is_global_admin
 
-    def role_for(self, domain: str) -> Role:
-        return self.domain_roles.get(domain, Role.NONE)
+    @property
+    def can_manage_domains(self) -> bool:
+        """Only global admins maintain the list of domains (the classifier above functions)."""
+        return self.is_global_admin
 
     @property
-    def visible_domains(self) -> list[str]:
-        return sorted(d for d, r in self.domain_roles.items() if r.can_view)
+    def can_delete(self) -> bool:
+        """Deleting functions (schemas) and forms (tables) is reserved to global admins."""
+        return self.is_global_admin
+
+    def role_for(self, function: str) -> Role:
+        return self.function_roles.get(function, Role.NONE)
 
     @property
-    def admin_domains(self) -> list[str]:
-        return sorted(d for d, r in self.domain_roles.items() if r.can_admin)
+    def visible_functions(self) -> list[str]:
+        return sorted(f for f, r in self.function_roles.items() if r.can_view)
+
+    @property
+    def admin_functions(self) -> list[str]:
+        return sorted(f for f, r in self.function_roles.items() if r.can_admin)
 
     @property
     def is_admin_anywhere(self) -> bool:
-        return self.is_global_admin or any(r.can_admin for r in self.domain_roles.values())
+        return self.is_global_admin or any(r.can_admin for r in self.function_roles.values())
 
     @property
     def summary(self) -> str:
-        """Short human description, e.g. 'Global admin' or 'Domain admin of 2, editor of 1'."""
+        """Short human description, e.g. 'Global admin' or 'Function admin of 2, editor of 1'."""
         if self.is_global_admin:
             return GLOBAL_ADMIN_LABEL
         counts = {}
-        for r in self.domain_roles.values():
+        for r in self.function_roles.values():
             if r.can_view:
                 counts[r] = counts.get(r, 0) + 1
         if not counts:
             return "No access yet"
         parts = [
-            f"{r.label.lower()} of {n} domain{'s' if n != 1 else ''}"
+            f"{r.label.lower()} of {n} function{'s' if n != 1 else ''}"
             for r, n in sorted(counts.items(), key=lambda x: -x[0])
         ]
         return ", ".join(parts).capitalize()
@@ -400,15 +464,23 @@ def system_columns() -> list[ColumnDef]:
     ]
 
 
+#: Functions that have not been assigned to a domain are grouped under this label.
+UNASSIGNED_DOMAIN_LABEL = "Unassigned"
+
+
 @dataclass
 class DomainDef:
+    """A domain: the top of the hierarchy, a business classifier that groups functions.
+
+    Domains mirror the organisation's data domains (the Databricks domain classification);
+    they are a registry entry maintained by global admins, not a Unity Catalog securable.
+    """
+
     name: str
     display_name: str = ""
     description: str = ""
     owner: str = ""
-    doc_link: str = ""  # project documentation URL
-    form_count: int | None = None
-    properties: dict[str, str] = field(default_factory=dict)
+    function_count: int | None = None
 
     @property
     def title(self) -> str:
@@ -416,6 +488,35 @@ class DomainDef:
 
     def validate(self) -> DomainDef:
         validate_identifier(self.name, "domain name", allow_leading_underscore=False)
+        return self
+
+
+@dataclass
+class FunctionDef:
+    """A function: one Unity Catalog schema holding the forms of a business function.
+
+    Every function belongs to at most one domain (``domain`` is the domain name, empty when
+    the function has not been assigned yet).
+    """
+
+    name: str
+    display_name: str = ""
+    description: str = ""
+    owner: str = ""
+    doc_link: str = ""  # project documentation URL
+    domain: str = ""  # name of the domain the function is assigned to
+    form_count: int | None = None
+    file_count: int | None = None
+    properties: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def title(self) -> str:
+        return self.display_name or humanize(self.name)
+
+    def validate(self) -> FunctionDef:
+        validate_identifier(self.name, "function name", allow_leading_underscore=False)
+        if self.domain:
+            validate_identifier(self.domain, "domain name", allow_leading_underscore=False)
         if self.doc_link and not self.doc_link.lower().startswith(("http://", "https://")):
             raise ValueError("The documentation link must start with http:// or https://")
         return self
@@ -427,14 +528,16 @@ PROP_DISPLAY_NAME = "rdm.display_name"
 PROP_OWNER = "rdm.owner"
 PROP_COLUMN_CONFIG = "rdm.column_config"
 PROP_DOC_LINK = "rdm.doc_link"
+PROP_DOMAIN = "rdm.domain"
 TAG_DISPLAY_NAME = "rdm_display_name"
 TAG_OWNER = "rdm_owner"
 TAG_FORM = "rdm_form"
+TAG_DOMAIN = "rdm_domain"
 
 
 @dataclass
 class FormDef:
-    domain: str
+    function: str  # the function (schema) the form lives in
     name: str
     display_name: str = ""
     description: str = ""
@@ -449,7 +552,7 @@ class FormDef:
 
     @property
     def full_name(self) -> str:
-        return f"{self.domain}.{self.name}"
+        return f"{self.function}.{self.name}"
 
     @property
     def title(self) -> str:
@@ -480,7 +583,7 @@ class FormDef:
         return None
 
     def validate(self) -> FormDef:
-        validate_identifier(self.domain, "domain name", allow_leading_underscore=False)
+        validate_identifier(self.function, "function name", allow_leading_underscore=False)
         validate_identifier(self.name, "form name", allow_leading_underscore=False)
         seen: set[str] = set()
         for c in self.columns:
@@ -526,6 +629,55 @@ class FormDef:
             if isinstance(opts, list):
                 c.options = [str(o) for o in opts]
             c.is_key = bool(entry.get("key", False))
+
+
+@dataclass
+class FileDef:
+    """A file: a CSV or Parquet dataset in a function's volume, for lists too large for a grid.
+
+    Files share the function's access rules and metadata (display name, description, owner,
+    registry entry, history of uploads) but are not edited row by row: they are uploaded,
+    previewed, downloaded and replaced as a whole.
+    """
+
+    function: str
+    name: str  # ``<identifier>.<csv|parquet>``, the file name in the volume
+    display_name: str = ""
+    description: str = ""
+    owner: str = ""
+    size_bytes: int | None = None
+    row_count: int | None = None
+    path: str = ""  # where the backend stores it (volume path or local path), informative
+    registered: bool = True  # False for a file found in storage without a registry entry
+    created_at: datetime | None = None
+    created_by: str = ""
+    updated_at: datetime | None = None
+    updated_by: str = ""
+
+    @property
+    def stem(self) -> str:
+        return split_file_name(self.name)[0]
+
+    @property
+    def format(self) -> str:
+        return split_file_name(self.name)[1]
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.function}/{self.name}"
+
+    @property
+    def title(self) -> str:
+        return self.display_name or humanize(self.stem)
+
+    def validate(self) -> FileDef:
+        validate_identifier(self.function, "function name", allow_leading_underscore=False)
+        validate_file_name(self.name)
+        return self
+
+
+#: Change types recorded for files in the audit trail.
+FILE_CHANGE_TYPES: tuple[str, ...] = ("upload", "replace", "delete")
 
 
 # --------------------------------------------------------------------------------------
