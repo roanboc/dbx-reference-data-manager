@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - Local (DuckDB, persona switcher)
+        - Databricks App (SQL warehouse, user authorization)
+        - Databricks App (service principal, no user authorization)
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Role of the user
+      options: [Viewer, Editor, Function admin, Global admin]
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: 1. Open form ... 2. Edit ... 3. Save
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: App logs (`<app URL>/logz` on Databricks, the terminal locally) and a screenshot if relevant. Remove anything confidential.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit

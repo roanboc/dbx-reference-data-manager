@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question about deploying on Databricks
+    url: https://github.com/roanboc/dbx-reference-data-manager/blob/main/docs/DEPLOYMENT.md
+    about: Read the deployment guide first; open an issue if it does not answer your question.

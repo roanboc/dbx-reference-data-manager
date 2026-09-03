@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose a change to the app or its governance model
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What business or stewardship need is not covered today? Who is affected (which role)?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How should the app behave? Mention the Unity Catalog objects or privileges involved if you know them.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including keeping the process outside the app (see "Out of scope" in docs/FUNCTIONAL_DESIGN.md).
