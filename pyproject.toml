@@ -5,9 +5,6 @@ description = "Databricks Reference Data Manager (SCD Manager) - Dash data stewa
 requires-python = ">=3.11"
 readme = "README.md"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]

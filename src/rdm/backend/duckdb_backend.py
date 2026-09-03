@@ -32,23 +32,27 @@ import duckdb
 import pandas as pd
 
 from rdm.backend.base import BackendError, ConflictError, DatabaseBackend, NotFoundError
-from rdm.backend.sql_utils import escape_literal_duckdb as lit
 from rdm.backend.sql_utils import (
+    conflict_message,
+    file_history_frame,
+    history_frame,
     native_type_duckdb,
     normalise_frame,
+    order_clause,
     parse_native_type,
     qualified,
     quote_ident,
+    search_pattern,
     to_db_scalar,
     validate_identifier,
 )
+from rdm.backend.sql_utils import escape_literal_duckdb as lit
 from rdm.coercion import CoercionError, coerce_value
 from rdm.models import (
     CREATED_AT_COLUMN,
     CREATED_BY_COLUMN,
     FILE_CHANGE_TYPES,
     FILE_FORMATS,
-    HISTORY_COLUMNS,
     ID_COLUMN,
     PROP_COLUMN_CONFIG,
     PROP_DISPLAY_NAME,
@@ -57,6 +61,9 @@ from rdm.models import (
     PROP_FORM,
     PROP_OWNER,
     SYSTEM_COLUMNS,
+    TAG_DISPLAY_NAME,
+    TAG_FORM,
+    TAG_OWNER,
     UPDATED_AT_COLUMN,
     UPDATED_BY_COLUMN,
     VERSION_COLUMN,
@@ -576,6 +583,15 @@ class DuckDBBackend(DatabaseBackend):
             p.name for p in folder.iterdir() if p.is_file() and split_file_name(p.name)[1] in FILE_FORMATS
         )
 
+    @staticmethod
+    def _registered_file_count(cur, function: str) -> int:
+        return int(
+            cur.execute(
+                f"SELECT count(*) FROM {qualified([META_SCHEMA, 'files'])} WHERE function_name = ?",
+                [function],
+            ).fetchone()[0]
+        )
+
     def _function_from(self, cur, name: str, form_count: int | None) -> FunctionDef:
         props = self._get_props(cur, "schema", name)
         return FunctionDef(
@@ -586,7 +602,7 @@ class DuckDBBackend(DatabaseBackend):
             doc_link=props.get(PROP_DOC_LINK, ""),
             domain=props.get(PROP_DOMAIN, ""),
             form_count=form_count,
-            file_count=len(self._stored_file_names(name)),
+            file_count=self._registered_file_count(cur, name),
             properties=props,
         )
 
@@ -733,7 +749,7 @@ class DuckDBBackend(DatabaseBackend):
             [function, name],
         ).fetchall()
         cols = []
-        for i, (cname, dtype, nullable, comment, _idx) in enumerate(rows):
+        for cname, dtype, nullable, comment, _idx in rows:
             t, p, s = parse_native_type(dtype)
             cols.append(
                 ColumnDef(
@@ -744,7 +760,6 @@ class DuckDBBackend(DatabaseBackend):
                     precision=p,
                     scale=s,
                     native_type=dtype,
-                    position=i,
                 )
             )
         return cols
@@ -832,9 +847,9 @@ class DuckDBBackend(DatabaseBackend):
                 form.function,
                 form.name,
                 {
-                    "rdm_form": "true",
-                    "rdm_display_name": form.display_name,
-                    "rdm_owner": form.owner or actor.username,
+                    TAG_FORM: "true",
+                    TAG_DISPLAY_NAME: form.display_name,
+                    TAG_OWNER: form.owner or actor.username,
                 },
             )
             self._register_form(cur, form, actor)
@@ -886,7 +901,7 @@ class DuckDBBackend(DatabaseBackend):
                 "table_tag",
                 form.function,
                 form.name,
-                {"rdm_display_name": form.display_name, "rdm_owner": form.owner},
+                {TAG_DISPLAY_NAME: form.display_name, TAG_OWNER: form.owner},
             )
             self._register_form(cur, form, actor)
         return self.get_form(form.function, form.name)
@@ -934,15 +949,11 @@ class DuckDBBackend(DatabaseBackend):
             cur.execute(f"DROP TABLE {self._t(form)}")
             self._delete_props(cur, form.function, form.name)
             self._unregister_form(cur, form.function, form.name)
-            cur.execute(
-                f"DELETE FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ?",
-                [form.function, form.name],
-            )
 
     # -- rows --------------------------------------------------------------------------------
 
     def _select_columns(self, form: FormDef) -> list[str]:
-        return [c.name for c in form.columns] if form.columns else []
+        return [c.name for c in form.columns]
 
     def read_rows(
         self,
@@ -953,31 +964,15 @@ class DuckDBBackend(DatabaseBackend):
         descending: bool = False,
     ) -> pd.DataFrame:
         cols = self._select_columns(form)
-        select = ", ".join(quote_ident(c) for c in cols) if cols else "*"
+        select = ", ".join(quote_ident(c) for c in cols)
         params: list[Any] = []
         where = ""
         if search:
-            pattern = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            search_cols = [c.name for c in form.columns if not c.is_system] or cols
+            search_cols = [c.name for c in form.user_columns] or cols
             clauses = [f"CAST({quote_ident(c)} AS VARCHAR) ILIKE ? ESCAPE '\\'" for c in search_cols]
             where = " WHERE " + " OR ".join(clauses)
-            params.extend([pattern] * len(clauses))
-        direction = "DESC" if descending else "ASC"
-        if order_by and order_by in cols:
-            order = f" ORDER BY {quote_ident(order_by)} {direction} NULLS LAST"
-            if form.has_system_columns:
-                order += f", {quote_ident(ID_COLUMN)}"
-        elif form.key_columns:
-            keys = ", ".join(f"{quote_ident(k.name)} {direction} NULLS LAST" for k in form.key_columns)
-            order = f" ORDER BY {keys}, {quote_ident(ID_COLUMN)}"
-        elif form.has_system_columns:
-            order = (
-                f" ORDER BY {quote_ident(CREATED_AT_COLUMN)} {direction} NULLS LAST, {quote_ident(ID_COLUMN)}"
-            )
-        elif cols:
-            order = f" ORDER BY {quote_ident(cols[0])} {direction}"
-        else:
-            order = ""
+            params.extend([search_pattern(search)] * len(clauses))
+        order = order_clause(form, order_by, descending, '"')
         params.append(int(limit))
         with self._cursor() as cur:
             df = cur.execute(f"SELECT {select} FROM {self._t(form)}{where}{order} LIMIT ?", params).df()
@@ -1079,7 +1074,7 @@ class DuckDBBackend(DatabaseBackend):
                     params,
                 ).fetchone()[0]
                 if n == 0:
-                    result.conflicts.append(self._conflict_message(upd.label or upd.row_id, before))
+                    result.conflicts.append(conflict_message(upd.label or upd.row_id, before))
                     continue
                 after = self._fetch_row(cur, form, upd.row_id)
                 self._log(cur, form, upd.row_id, "update", actor, batch, before, after, now)
@@ -1092,20 +1087,11 @@ class DuckDBBackend(DatabaseBackend):
                     [dele.row_id, to_db_scalar(dele.expected_version)],
                 ).fetchone()[0]
                 if n == 0:
-                    result.conflicts.append(self._conflict_message(dele.label or dele.row_id, before))
+                    result.conflicts.append(conflict_message(dele.label or dele.row_id, before))
                     continue
                 self._log(cur, form, dele.row_id, "delete", actor, batch, before, None, now)
                 result.deleted += 1
         return result
-
-    @staticmethod
-    def _conflict_message(label: str, current: dict[str, Any] | None) -> str:
-        if current is None:
-            return f"{label}: the row was deleted by someone else."
-        who = current.get(UPDATED_BY_COLUMN) or "someone else"
-        when = current.get(UPDATED_AT_COLUMN)
-        when_txt = f" at {when:%Y-%m-%d %H:%M:%S} UTC" if isinstance(when, datetime) else ""
-        return f"{label}: modified by {who}{when_txt} after you loaded it."
 
     def append_rows(self, form: FormDef, rows: pd.DataFrame, actor: User) -> int:
         if not form.is_editable:
@@ -1164,26 +1150,7 @@ class DuckDBBackend(DatabaseBackend):
                 f"{row_filter} ORDER BY id DESC LIMIT ?",
                 params,
             ).fetchall()
-        user_cols = [c.name for c in form.user_columns]
-        records = []
-        for version, changed_at, changed_by, change_type, rid, before_json, after_json in rows:
-            before = json.loads(before_json) if before_json else {}
-            after = json.loads(after_json) if after_json else {}
-            snapshot = after if change_type != "delete" else before
-            changed = [c for c in user_cols if change_type == "update" and before.get(c) != after.get(c)]
-            rec = {
-                "version": version,
-                "changed_at": changed_at,
-                "changed_by": changed_by,
-                "change_type": change_type,
-                "changed_fields": ", ".join(changed),
-                ID_COLUMN: rid,
-            }
-            for c in user_cols:
-                rec[c] = snapshot.get(c)
-            records.append(rec)
-        columns = [*HISTORY_COLUMNS, "changed_fields", ID_COLUMN, *user_cols]
-        return pd.DataFrame.from_records(records, columns=columns)
+        return history_frame(rows, [c.name for c in form.user_columns])
 
     # -- files -------------------------------------------------------------------------------
 
@@ -1333,12 +1300,10 @@ class DuckDBBackend(DatabaseBackend):
             except duckdb.Error as exc:
                 raise BackendError(f"The file cannot be read as {file.format.upper()}: {exc}") from exc
         cols = []
-        for i, row in enumerate(rows):
+        for row in rows:
             cname, dtype = str(row[0]), str(row[1])
             t, p, s = parse_native_type(dtype)
-            cols.append(
-                ColumnDef(name=cname, data_type=t, precision=p, scale=s, native_type=dtype, position=i)
-            )
+            cols.append(ColumnDef(name=cname, data_type=t, precision=p, scale=s, native_type=dtype))
         return cols
 
     def file_history(self, file: FileDef, limit: int = 200) -> pd.DataFrame:
@@ -1350,24 +1315,7 @@ class DuckDBBackend(DatabaseBackend):
                 f"AND change_type IN ({placeholders}) ORDER BY id DESC LIMIT ?",
                 [file.function, file.name, *FILE_CHANGE_TYPES, int(limit)],
             ).fetchall()
-        records = []
-        for version, changed_at, changed_by, change_type, before_json, after_json in rows:
-            snapshot = (
-                json.loads(after_json) if after_json else (json.loads(before_json) if before_json else {})
-            )
-            records.append(
-                {
-                    "version": version,
-                    "changed_at": changed_at,
-                    "changed_by": changed_by,
-                    "change_type": change_type,
-                    "size_bytes": snapshot.get("size_bytes"),
-                    "row_count": snapshot.get("row_count"),
-                }
-            )
-        return pd.DataFrame.from_records(
-            records, columns=["version", "changed_at", "changed_by", "change_type", "size_bytes", "row_count"]
-        )
+        return file_history_frame(rows)
 
     def drop_file(self, file: FileDef, actor: User) -> None:
         path = self._file_path(file.function, file.name)

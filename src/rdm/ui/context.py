@@ -95,7 +95,7 @@ def get_context(persona: str | None = None) -> AppContext:
         backend=backend,
         user=user,
         permissions=permissions,
-        catalog=CatalogService(backend, user, permissions),
+        catalog=CatalogService(backend, permissions),
         forms=FormService(backend, user, permissions),
     )
 

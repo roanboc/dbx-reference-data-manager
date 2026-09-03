@@ -59,7 +59,7 @@ def serve() -> None:
 
 
 if __name__ == "__main__":
-    if "--dev" in sys.argv or os.environ.get("RDM_DEV") == "1":
+    if "--dev" in sys.argv:
         app.run(host="0.0.0.0", port=_port(), debug=True)
     else:
         serve()

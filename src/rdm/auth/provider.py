@@ -3,7 +3,7 @@
 * :class:`MockAuthProvider` - four local personas (Global admin, Function admin, Editor,
   Viewer) selected in the header or through ``RDM_PERSONA``.
 * :class:`DatabricksAuthProvider` - reads the identity headers Databricks Apps injects
-  (``X-Forwarded-Email``, ``X-Forwarded-Preferred-Username``, ``X-Forwarded-User``) and,
+  (``X-Forwarded-Email``, ``X-Forwarded-Preferred-Username``) and,
   when user authorization is enabled, the user's access token
   (``X-Forwarded-Access-Token``) so that SQL runs on behalf of the user.
 
@@ -25,7 +25,6 @@ log = logging.getLogger(__name__)
 
 HEADER_EMAIL = "X-Forwarded-Email"
 HEADER_USERNAME = "X-Forwarded-Preferred-Username"
-HEADER_USER_ID = "X-Forwarded-User"
 HEADER_ACCESS_TOKEN = "X-Forwarded-Access-Token"
 
 
@@ -88,8 +87,6 @@ PERSONAS: dict[str, Persona] = {
 class AuthProvider(ABC):
     """Resolves the signed-in user for the current request."""
 
-    name: str = "abstract"
-
     @abstractmethod
     def current_user(self, persona: str | None = None) -> User:
         """Return the current user. ``persona`` is only meaningful for the mock provider."""
@@ -107,8 +104,6 @@ class AuthProvider(ABC):
 
 
 class MockAuthProvider(AuthProvider):
-    name = "mock"
-
     def __init__(self, default_persona: str = "admin") -> None:
         self.default_persona = default_persona if default_persona in PERSONAS else "admin"
 
@@ -132,8 +127,6 @@ class DatabricksAuthProvider(AuthProvider):
     authorization is enabled (default scope ``iam.current-user:read``), otherwise with the
     app service principal (needs permission to read users). Results are cached briefly.
     """
-
-    name = "databricks"
 
     def __init__(self, headers_getter, group_cache_ttl: int = 300) -> None:
         self._headers_getter = headers_getter

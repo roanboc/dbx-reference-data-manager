@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from rdm.coercion import FALSE_WORDS, TRUE_WORDS, CoercionError, coerce_value, is_missing, rule_violation
 from rdm.models import (
     DEFAULT_DECIMAL_PRECISION,
     DEFAULT_DECIMAL_SCALE,
@@ -18,7 +19,6 @@ from rdm.models import (
     ValidationIssue,
     sanitize_identifier,
 )
-from rdm.services.form_service import FALSE_WORDS, TRUE_WORDS, CoercionError, coerce_value, is_missing
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_IMPORT_ROWS = 100_000
@@ -47,7 +47,12 @@ class ParsedSheet:
 
 
 def _is_excel(filename: str) -> bool:
-    return filename.lower().endswith((".xlsx", ".xlsm", ".xls"))
+    return filename.lower().endswith((".xlsx", ".xlsm"))
+
+
+#: What the upload controls accept; ``.txt`` is read as CSV as well but not advertised.
+IMPORT_EXTENSIONS = (".xlsx", ".xlsm", ".csv", ".tsv")
+IMPORT_ACCEPT = ",".join(IMPORT_EXTENSIONS)
 
 
 def list_sheets(data: bytes, filename: str) -> list[str]:
@@ -83,7 +88,9 @@ def read_table(data: bytes, filename: str, sheet: str | None = None, header_row:
             na_values=[""],
         )
     else:
-        raise ImportError_("Unsupported file type. Upload .xlsx, .xls or .csv.")
+        raise ImportError_(
+            f"Unsupported file type. Upload {', '.join(IMPORT_EXTENSIONS[:-1])} or {IMPORT_EXTENSIONS[-1]}."
+        )
     df = df.dropna(how="all")
     df = df.loc[:, [c for c in df.columns if not str(c).startswith("Unnamed:") or df[c].notna().any()]]
     if len(df) > MAX_IMPORT_ROWS:
@@ -128,9 +135,7 @@ def infer_columns(df: pd.DataFrame) -> tuple[list[ColumnDef], dict[str, str]]:
             k += 1
         used.add(name)
         dtype, precision, scale = infer_type(df[header])
-        columns.append(
-            ColumnDef(name=name, data_type=dtype, precision=precision, scale=scale, nullable=True, position=i)
-        )
+        columns.append(ColumnDef(name=name, data_type=dtype, precision=precision, scale=scale, nullable=True))
         source[name] = str(header)
     return columns, source
 
@@ -227,18 +232,17 @@ def coerce_frame(
             continue
         values = []
         for idx, v in enumerate(raw[src].tolist()):
+            problems = []
             try:
                 cv = coerce_value(col, v)
             except CoercionError as exc:
                 cv = None
+                problems.append(str(exc))
+            if problem := rule_violation(col, cv):
+                problems.append(problem)
+            for problem in problems:
                 if len(issues) < max_issues:
-                    issues.append(ValidationIssue(f"Row {idx + 2}", col.name, str(exc)))
-            if cv is None and col.required and len(issues) < max_issues:
-                issues.append(ValidationIssue(f"Row {idx + 2}", col.name, "is required"))
-            if cv is not None and col.options and str(cv) not in col.options and len(issues) < max_issues:
-                issues.append(
-                    ValidationIssue(f"Row {idx + 2}", col.name, f"must be one of: {', '.join(col.options)}")
-                )
+                    issues.append(ValidationIssue(f"Row {idx + 2}", col.name, problem))
             values.append(cv)
         out[col.name] = values
     df = pd.DataFrame(out, columns=[c.name for c in columns])

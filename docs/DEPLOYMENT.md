@@ -2,7 +2,7 @@
 
 This guide takes the app from the local DuckDB sandbox to a Databricks App managed by a
 Databricks Asset Bundle (DAB). Everything the app needs in a workspace - the Unity Catalog
-catalog, the domain schemas with their grants, the SQL-warehouse binding and the app itself
+catalog, the function schemas with their grants, the SQL-warehouse binding and the app itself
 - is declared in `databricks.yml` and `resources/*.yml`.
 
 > Status: this scaffolding has been checked for YAML syntax and internal consistency only.
@@ -22,7 +22,7 @@ How the pieces fit at runtime:
 
 ```
 browser --> Databricks Apps proxy --> python app.py (gunicorn, listens on DATABRICKS_APP_PORT)
-             adds X-Forwarded-Email / -Preferred-Username / -User
+             adds X-Forwarded-Email / -Preferred-Username
              adds X-Forwarded-Access-Token   (user authorization, scope `sql`)
                                                   |
                        DatabricksAuthProvider  <--+  (RDM_AUTH=databricks)

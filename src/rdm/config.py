@@ -10,13 +10,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-try:  # optional locally, present in requirements
-    from dotenv import load_dotenv
-except ImportError:  # pragma: no cover
-    load_dotenv = None  # type: ignore[assignment]
+from dotenv import load_dotenv
 
 APP_TITLE = "Reference Data Manager"
-APP_ICON = ":material/table_edit:"
 
 
 @dataclass(frozen=True)
@@ -49,8 +45,7 @@ class Settings:
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Settings:
         if env is None:
-            if load_dotenv is not None:
-                load_dotenv(Path(".env"), override=False)
+            load_dotenv(Path(".env"), override=False)
             env = dict(os.environ)
         backend = env.get("RDM_BACKEND", "duckdb").strip().lower()
         auth = env.get("RDM_AUTH", "databricks" if backend == "databricks" else "mock").strip().lower()

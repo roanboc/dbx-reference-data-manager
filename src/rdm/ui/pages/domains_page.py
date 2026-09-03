@@ -49,7 +49,7 @@ def render(ctx_: AppContext) -> dmc.Stack:
                             [
                                 dmc.Group(
                                     [
-                                        dmc.Title(CREATE_TITLE, order=4, id=ids.DOMAIN_FORM_TITLE),
+                                        dmc.Title("Domains", order=4),
                                         dmc.TextInput(
                                             id=ids.DOMAINS_FILTER,
                                             placeholder="Filter domains",

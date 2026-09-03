@@ -35,7 +35,14 @@ from rdm.models import (
 )
 from rdm.services import Draft, build_changeset_from_draft, describe_row
 from rdm.services.draft import bulk_value, invalid_cells, is_temp_id, json_safe, restore_row, same_value
-from rdm.services.excel_import import ImportError_, coerce_frame, list_sheets, map_frame_to_form, read_table
+from rdm.services.excel_import import (
+    IMPORT_ACCEPT,
+    ImportError_,
+    coerce_frame,
+    list_sheets,
+    map_frame_to_form,
+    read_table,
+)
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
 from rdm.ui.components import (
@@ -47,6 +54,7 @@ from rdm.ui.components import (
     icon,
     info_alert,
     issues_list,
+    meta_line,
     notify,
     page_title,
     role_badge,
@@ -81,7 +89,7 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
         right=dmc.Stack(
             [
                 dmc.Group([role_badge(role)], justify="flex-end"),
-                dmc.Text(_meta(form), size="xs", c="dimmed", ta="right"),
+                dmc.Text(meta_line(form), size="xs", c="dimmed", ta="right"),
                 dmc.Group([copy_code(table_path)], justify="flex-end"),
             ],
             gap=4,
@@ -128,12 +136,6 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
         ],
         gap="xs",
     )
-
-
-def _meta(form: FormDef) -> str:
-    from rdm.ui.components import form_meta
-
-    return form_meta(form)
 
 
 def _data_tab(ctx_: AppContext, form: FormDef, role: Role, editable: bool) -> dmc.Stack:
@@ -530,7 +532,7 @@ def _import_modal(form: FormDef) -> dmc.Modal:
                     ),
                     className="rdm-dropzone",
                     multiple=False,
-                    accept=".xlsx,.xls,.csv,.tsv",
+                    accept=IMPORT_ACCEPT,
                 ),
                 dmc.Select(
                     id=ids.IMPORT_SHEET,
@@ -686,7 +688,7 @@ def _item_modal() -> dmc.Modal:
 
 def _history_records(df: pd.DataFrame, form: FormDef) -> list[dict[str, Any]]:
     """History rows as JSON-safe dicts (stored in the browser for restore)."""
-    return g.rows_to_records(df, form)
+    return g.rows_to_records(df)
 
 
 def item_body(form: FormDef, row: dict[str, Any], history: list[dict[str, Any]], editable: bool) -> dmc.Stack:
@@ -873,7 +875,7 @@ def history_panel(ctx_: AppContext, form: FormDef, editable: bool) -> Any:
             "No changes yet", "Every save is recorded here with who changed what and when.", "tabler:history"
         )
     df = df.assign(change_type=df["change_type"].map(CHANGE_LABELS).fillna(df["change_type"]))
-    rows = g.rows_to_records(df, form)
+    rows = g.rows_to_records(df)
     note = (
         "Backed by the audit table in the catalog (Change Data Feed as fallback)."
         if ctx_.settings.is_databricks
@@ -1126,7 +1128,7 @@ def register(app) -> None:
             df = c.forms.load_rows(form, search=search or None, limit=c.settings.max_rows)
         except (BackendError, PermissionDenied) as exc:
             return [], [], f"Could not load rows: {exc}", None, True
-        rows = g.rows_to_records(df, form)
+        rows = g.rows_to_records(df)
         draft = Draft.from_dict(draft_raw)
         rows = draft.apply_to_rows(rows, form)
         pending, save_disabled, invalid = _pending_bar(form, rows, draft)
@@ -1947,7 +1949,7 @@ def register(app) -> None:
         extra = [h for h in raw.columns if h not in mapping.values()]
         if extra:
             blocks.append(dmc.Text("Ignored columns in the file: " + ", ".join(extra), size="xs", c="dimmed"))
-        preview_rows = g.rows_to_records(frame.head(15), form)
+        preview_rows = g.rows_to_records(frame.head(15))
         blocks.append(
             dag.AgGrid(
                 rowData=preview_rows,

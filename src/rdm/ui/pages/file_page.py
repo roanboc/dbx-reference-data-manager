@@ -28,6 +28,7 @@ from rdm.ui.components import (
     error_alert,
     icon,
     info_alert,
+    meta_line,
     notify,
     page_title,
     role_badge,
@@ -62,7 +63,7 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
                     justify="flex-end",
                     gap="xs",
                 ),
-                dmc.Text(_meta(file), size="xs", c="dimmed", ta="right"),
+                dmc.Text(meta_line(file), size="xs", c="dimmed", ta="right"),
                 dmc.Group([copy_code(dbx_path)], justify="flex-end"),
             ],
             gap=4,
@@ -130,18 +131,6 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
         ],
         gap="xs",
     )
-
-
-def _meta(file: FileDef) -> str:
-    bits = [human_size(file.size_bytes)]
-    if file.row_count is not None:
-        bits.append(f"{file.row_count:,} rows")
-    if file.owner:
-        bits.append(f"owner {file.owner}")
-    if file.updated_at is not None:
-        who = f" by {file.updated_by}" if file.updated_by else ""
-        bits.append(f"updated {file.updated_at:%Y-%m-%d %H:%M}{who}")
-    return " · ".join(bits)
 
 
 def preview_panel(ctx_: AppContext, file: FileDef) -> Any:

@@ -1,7 +1,7 @@
 # Databricks Asset Bundle for the Reference Data Manager.
 #
 # Declares everything the app needs in a workspace: the Unity Catalog catalog
-# (resources/catalog.yml), the domain schemas with their grants (resources/schemas.yml) and
+# (resources/catalog.yml), the function schemas with their grants (resources/schemas.yml) and
 # the Databricks App itself (resources/app.yml). See docs/DEPLOYMENT.md for the workflow.
 #
 #   databricks bundle validate -t dev --var="warehouse_id=<id>"
@@ -17,8 +17,8 @@ include:
 variables:
   catalog:
     description: >-
-      Unity Catalog catalog that holds the reference-data domains (schemas) and forms
-      (tables). Created by resources/catalog.yml; the app reads it as RDM_CATALOG.
+      Unity Catalog catalog that holds the reference-data functions (schemas), forms
+      (tables) and files (volumes). Created by resources/catalog.yml; the app reads it as RDM_CATALOG.
     default: _reference_data
 
   warehouse_id:

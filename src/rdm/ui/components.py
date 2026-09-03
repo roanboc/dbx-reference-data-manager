@@ -9,7 +9,8 @@ import dash_mantine_components as dmc
 from dash import dcc, html
 
 from rdm.backend.base import BackendError
-from rdm.models import GLOBAL_ADMIN_LABEL, DataType, FormDef, Role, ValidationIssue
+from rdm.models import GLOBAL_ADMIN_LABEL, DataType, FileDef, FormDef, Role, ValidationIssue
+from rdm.services.files import human_size
 
 ROLE_COLORS = {Role.ADMIN: "grape", Role.EDITOR: "teal", Role.VIEWER: "blue", Role.NONE: "gray"}
 ROLE_ICONS = {
@@ -185,15 +186,16 @@ def empty_state(title: str, body: str, icon_name: str = "tabler:inbox") -> dmc.P
     )
 
 
-def form_meta(form: FormDef) -> str:
-    bits = []
-    if form.row_count is not None:
-        bits.append(f"{form.row_count:,} rows")
-    if form.owner:
-        bits.append(f"owner {form.owner}")
-    if form.updated_at is not None:
-        who = f" by {form.updated_by}" if form.updated_by else ""
-        bits.append(f"updated {form.updated_at:%Y-%m-%d %H:%M}{who}")
+def meta_line(obj: FormDef | FileDef) -> str:
+    """Size (files), row count, owner and last change of a form or file, for page headers."""
+    bits = [human_size(obj.size_bytes)] if isinstance(obj, FileDef) else []
+    if obj.row_count is not None:
+        bits.append(f"{obj.row_count:,} rows")
+    if obj.owner:
+        bits.append(f"owner {obj.owner}")
+    if obj.updated_at is not None:
+        who = f" by {obj.updated_by}" if obj.updated_by else ""
+        bits.append(f"updated {obj.updated_at:%Y-%m-%d %H:%M}{who}")
     return " · ".join(bits)
 
 

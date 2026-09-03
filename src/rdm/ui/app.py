@@ -33,8 +33,9 @@ ASSETS = Path(__file__).resolve().parents[3] / "assets"
 
 
 def parse_path(pathname: str | None) -> tuple[str, str | None, str | None]:
-    """``/`` -> home, ``/fn/<function>``, ``/f/<function>/<form>``, ``/file/<function>/<file>``,
-    ``/new-form[/<function>]``, ``/new-file[/<function>]``, ``/new-function``, ``/domains``, ``/help``."""
+    """``/`` -> home, ``/dm/<domain>``, ``/fn/<function>``, ``/f/<function>/<form>``,
+    ``/file/<function>/<file>``, ``/new-form[/<function>]``, ``/new-file[/<function>]``,
+    ``/new-function``, ``/domains``, ``/help``."""
     parts = [unquote(p) for p in (pathname or "/").split("/") if p]
     if not parts:
         return "home", None, None
@@ -93,7 +94,7 @@ def register_shell_callbacks(app: dash.Dash) -> None:
     def switch_persona(value):
         return value
 
-    @app.callback(Output("header-content", "children"), Input(ids.PERSONA, "data"))
+    @app.callback(Output(ids.HEADER, "children"), Input(ids.PERSONA, "data"))
     def render_header(persona):
         try:
             return layout.header(get_context(persona), persona)

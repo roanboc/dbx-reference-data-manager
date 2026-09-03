@@ -41,26 +41,10 @@ def test_dependencies_list_callbacks(client):
     assert any("draft-store.data" in o for o in outputs)
 
 
-def test_page_callback_renders_home_for_admin(client):
-    body = {
-        "output": "page-content.children",
-        "outputs": {"id": "page-content", "property": "children"},
-        "inputs": [
-            {"id": "url", "property": "pathname", "value": "/"},
-            {"id": "persona-store", "property": "data", "value": "admin"},
-            {"id": "nav-version", "property": "data", "value": 0},
-        ],
-        "changedPropIds": ["url.pathname"],
-        "state": [],
-    }
-    resp = client.post("/_dash-update-component", data=json.dumps(body), content_type="application/json")
-    assert resp.status_code == 200
-    assert "Reference data" in json.dumps(resp.get_json())
-
-
 @pytest.mark.parametrize(
     ("pathname", "persona", "expected"),
     [
+        ("/", "admin", "Reference data"),
         ("/domains", "admin", "Business domains group the functions"),
         ("/domains", "editor", "Global admins only"),
         ("/new-function", "admin", "New function"),

@@ -40,11 +40,6 @@ def csv_bytes(df: pd.DataFrame, sep: str = ",") -> bytes:
     return df.to_csv(index=False, sep=sep).encode()
 
 
-def types_of(df: pd.DataFrame) -> dict[str, DataType]:
-    columns, _ = infer_columns(df)
-    return {c.name: c.data_type for c in columns}
-
-
 # --------------------------------------------------------------------------------------
 # infer_type
 # --------------------------------------------------------------------------------------
@@ -151,7 +146,6 @@ def test_infer_columns_sanitises_and_deduplicates_headers():
         "column_7": "!!!",
         "cost_centre_gbp_2": "cost_centre_gbp",
     }
-    assert [c.position for c in columns] == list(range(8))
     assert all(c.nullable for c in columns)
     assert columns[3].data_type is DataType.DECIMAL and (columns[3].precision, columns[3].scale) == (18, 4)
     assert columns[4].data_type is DataType.INTEGER

@@ -49,7 +49,7 @@ class ConflictError(BackendError):
 class DatabaseBackend(ABC):
     """Abstract repository over a catalog of functions (schemas) and forms (tables)."""
 
-    #: Short backend identifier shown in the UI ("duckdb", "databricks").
+    #: Short backend identifier ("duckdb", "databricks"), shown as a badge in the header.
     name: str = "abstract"
 
     # -- lifecycle -------------------------------------------------------------------------
@@ -58,7 +58,7 @@ class DatabaseBackend(ABC):
         """Release connections. Safe to call more than once."""
 
     def describe(self) -> str:
-        """One-line human description of the connection target (shown in the sidebar)."""
+        """One-line human description of the connection target (tooltip of the header badge)."""
         return self.name
 
     # -- domains (classifier above functions) -------------------------------------------
@@ -87,7 +87,7 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def list_functions(self) -> list[FunctionDef]:
-        """All functions in the catalog (regardless of the caller's access)."""
+        """Every function (schema) with its counts; ``file_count`` counts the registered files."""
 
     @abstractmethod
     def get_function(self, name: str) -> FunctionDef:
@@ -133,7 +133,7 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def drop_form(self, form: FormDef, actor: User) -> None:
-        """Delete the table and its metadata."""
+        """Drop the table and its metadata; the audit entries are kept (like ``drop_file``)."""
 
     # -- rows --------------------------------------------------------------------------------
 

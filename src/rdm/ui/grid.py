@@ -19,6 +19,7 @@ from rdm.models import (
     FormDef,
     humanize,
 )
+from rdm.services.draft import NEW_FLAG
 
 AUDIT_LABELS = {
     "_created_at": "Created",
@@ -30,7 +31,6 @@ GRID_CLASS = "rdm-grid"  # CSS hook for the app's grid tweaks (assets/styles.css
 INVALID_CLASS = "rdm-invalid"
 NEW_ROW_CLASS = "rdm-new-row"
 INVALID_PREFIX = "_bad_"  # per-column boolean flags on a row: simple expressions the grid can evaluate
-NEW_FLAG = "_new"
 
 
 def to_json_value(value: Any) -> Any:
@@ -65,7 +65,7 @@ def flag_invalid(row: dict[str, Any], columns: list[str] | None) -> None:
         row[f"{INVALID_PREFIX}{col}"] = True
 
 
-def rows_to_records(df: pd.DataFrame, form: FormDef) -> list[dict[str, Any]]:
+def rows_to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
     """Serialise a ``read_rows`` frame for ``AgGrid.rowData`` (keeps ``_id`` and ``_version``)."""
     records = []
     for rec in df.to_dict("records"):
@@ -85,9 +85,7 @@ def frame_column_defs(df: pd.DataFrame) -> list[dict[str, Any]]:
     return [{"field": str(c), "headerName": str(c), "minWidth": 120} for c in df.columns]
 
 
-def column_defs(
-    form: FormDef, editable: bool, show_audit: bool, invalid_expr: bool = True
-) -> list[dict[str, Any]]:
+def column_defs(form: FormDef, editable: bool, show_audit: bool) -> list[dict[str, Any]]:
     """AG Grid ``columnDefs`` for a form. Types drive editors; descriptions become tooltips."""
     defs: list[dict[str, Any]] = []
     for c in form.columns:

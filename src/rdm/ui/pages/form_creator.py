@@ -11,7 +11,14 @@ from dash import Input, Output, State, ctx, dcc, html, no_update
 
 from rdm.backend.base import BackendError, PermissionDenied
 from rdm.models import ColumnDef, DataType, FormDef, humanize, sanitize_identifier
-from rdm.services.excel_import import ImportError_, ParsedSheet, coerce_frame, list_sheets, parse_file
+from rdm.services.excel_import import (
+    IMPORT_ACCEPT,
+    ImportError_,
+    ParsedSheet,
+    coerce_frame,
+    list_sheets,
+    parse_file,
+)
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
 from rdm.ui.components import error_alert, icon, info_alert, issues_list, notify, page_title
@@ -240,7 +247,7 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
                 ),
                 className="rdm-dropzone",
                 multiple=False,
-                accept=".xlsx,.xls,.csv,.tsv",
+                accept=IMPORT_ACCEPT,
             ),
             dmc.Group(
                 [
@@ -271,6 +278,7 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
             mode,
             upload_block,
             scratch_block,
+            html.Div(id=ids.WIZ_ERRORS),
             _nav_buttons(back=False),
             _stubs(
                 state,
@@ -279,6 +287,7 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
                     ids.WIZ_UPLOAD,
                     ids.WIZ_SHEET,
                     ids.WIZ_HEADER_ROW,
+                    ids.WIZ_ERRORS,
                     ids.WIZ_NEXT,
                     ids.WIZ_CANCEL,
                 },
@@ -583,7 +592,6 @@ def build_columns(rows: list[dict[str, Any]]) -> tuple[list[ColumnDef], list[str
             nullable=not bool(r.get("required")),
             options=list(dict.fromkeys(opts)),
             is_key=bool(r.get("key")),
-            position=i,
         )
         try:
             col.validate()
@@ -698,7 +706,7 @@ def step_review(state: dict[str, Any]) -> dmc.Stack:
             )
         blocks.append(
             dag.AgGrid(
-                rowData=g.rows_to_records(frame.head(10), form),
+                rowData=g.rows_to_records(frame.head(10)),
                 columnDefs=[{"field": c.name, "headerName": humanize(c.name)} for c in columns],
                 defaultColDef={"resizable": True},
                 columnSize="autoSize",

@@ -117,7 +117,7 @@ def test_validate_identifier_rejects_non_strings(value):
 
 def test_validate_identifier_leading_underscore_is_reserved_for_system_names():
     assert validate_identifier("_id") == "_id"
-    assert validate_identifier("_rdm_meta", allow_leading_underscore=True) == "_rdm_meta"
+    assert validate_identifier("_catalog", allow_leading_underscore=True) == "_catalog"
     with pytest.raises(ValueError, match="reserved for system use"):
         validate_identifier("_id", "column name", allow_leading_underscore=False)
 
@@ -176,15 +176,8 @@ def test_new_row_id_is_a_unique_uuid4():
         (DataType.OTHER, "Other (read-only)"),
     ],
 )
-def test_datatype_labels_round_trip(data_type, label):
+def test_datatype_labels(data_type, label):
     assert data_type.label == label
-    assert DataType.from_label(label) is data_type
-    assert DataType.from_label(data_type.value) is data_type
-
-
-def test_datatype_from_label_unknown():
-    with pytest.raises(ValueError, match="Unknown data type label"):
-        DataType.from_label("Blob")
 
 
 def test_datatype_editable_types_exclude_other():
@@ -290,7 +283,7 @@ def test_column_validate_returns_self_for_valid_definitions():
 
 @pytest.mark.parametrize(
     ("precision", "scale"),
-    [(39, 2), (10, 11), (10, -1), (0, 0) if False else (5, 6)],
+    [(39, 2), (10, 11), (10, -1), (5, 6)],  # precision 0 falls back to the default precision
 )
 def test_column_validate_decimal_bounds(precision, scale):
     with pytest.raises(ValueError, match="DECIMAL precision must be 1-38"):
@@ -336,7 +329,7 @@ def test_function_title_and_validate():
     assert FunctionDef("finance").validate().name == "finance"
     assert FunctionDef("finance", domain="people").validate().domain == "people"
     with pytest.raises(ValueError, match="reserved for system use"):
-        FunctionDef("_rdm_meta").validate()
+        FunctionDef("_catalog").validate()
     with pytest.raises(ValueError, match="Invalid function name"):
         FunctionDef("Finance Dept").validate()
     with pytest.raises(ValueError, match="Invalid domain name"):
@@ -489,12 +482,6 @@ def test_apply_column_config_ignores_garbage(raw):
     assert target.column("code").is_key
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AttributeError,
-    reason="BUG rdm/models.py FormDef.apply_column_config: a non-dict 'columns' value (str/list/None) "
-    "reaches cols.get() outside the try block and raises AttributeError instead of being ignored.",
-)
 @pytest.mark.parametrize(
     "raw", [{"columns": "abc"}, {"columns": None}, {"columns": [1]}, '{"columns": "abc"}']
 )
@@ -519,38 +506,38 @@ def test_apply_column_config_options_not_a_list_leaves_options_alone():
 
 def test_changeset_empty():
     cs = ChangeSet()
-    assert cs.is_empty and cs.total == 0
+    assert cs.is_empty
     assert cs.summary() == "no changes"
 
 
-def test_changeset_summary_and_total():
+def test_changeset_summary():
     cs = ChangeSet(
         inserts=[RowInsert({"a": 1})],
         updates=[RowUpdate("r1", {"a": 2}), RowUpdate("r2", {"a": 3})],
         deletes=[RowDelete("r3"), RowDelete("r4"), RowDelete("r5")],
     )
-    assert not cs.is_empty and cs.total == 6
+    assert not cs.is_empty
     assert cs.summary() == "1 added, 2 edited, 3 deleted"
     assert ChangeSet(updates=[RowUpdate("r", {})]).summary() == "1 edited"
 
 
 def test_save_result_defaults():
     r = SaveResult()
-    assert r.ok and r.applied == 0
+    assert not r.conflicts and not r.warnings and r.applied == 0
     assert r.summary() == "nothing changed"
 
 
 def test_save_result_summary_counts():
     r = SaveResult(inserted=2, updated=1, deleted=3)
-    assert r.ok and r.applied == 6
+    assert r.applied == 6
     assert r.summary() == "2 added, 1 updated, 3 deleted"
 
 
-def test_save_result_conflicts_and_errors():
+def test_save_result_conflicts_and_warnings():
     r = SaveResult(inserted=1, conflicts=["Row code=A: modified by bob"])
-    assert not r.ok and r.applied == 1
+    assert r.applied == 1
     assert r.summary() == "1 added; 1 row(s) skipped because they were changed by someone else"
-    assert not SaveResult(errors=["boom"]).ok
+    assert SaveResult(inserted=1, warnings=["history not written"]).summary() == "1 added"
     assert SaveResult(conflicts=["x", "y"]).summary().startswith("nothing changed; 2 row(s) skipped")
 
 

@@ -1,4 +1,4 @@
-"""Demo content for local development: domains, functions and realistic reference lists.
+"""Demo content for local development: domains, functions, realistic reference lists and files.
 
 Hierarchy: domain (business classifier) > function (schema) > form (table). The demo domains
 are placeholders for the organisation's own list, which global admins maintain in the app.

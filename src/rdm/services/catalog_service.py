@@ -4,17 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from rdm.backend.base import DatabaseBackend, PermissionDenied
-from rdm.models import (
-    UNASSIGNED_DOMAIN_LABEL,
-    DomainDef,
-    FileDef,
-    FormDef,
-    FunctionDef,
-    Permissions,
-    Role,
-    User,
-)
+from rdm.backend.base import DatabaseBackend
+from rdm.models import UNASSIGNED_DOMAIN_LABEL, DomainDef, FileDef, FormDef, FunctionDef, Permissions, Role
 
 
 @dataclass
@@ -49,9 +40,11 @@ def _matches(text: str, *fields: str) -> bool:
 
 
 class CatalogService:
-    def __init__(self, backend: DatabaseBackend, user: User, permissions: Permissions) -> None:
+    """The functions, forms and files the signed-in user may see (single objects go through
+    :class:`~rdm.services.form_service.FormService`)."""
+
+    def __init__(self, backend: DatabaseBackend, permissions: Permissions) -> None:
         self.backend = backend
-        self.user = user
         self.permissions = permissions
 
     def visible_functions(self) -> list[NavFunction]:
@@ -82,11 +75,6 @@ class CatalogService:
                 filtered.append(item)
         return filtered
 
-    def get_file(self, function: str, name: str) -> FileDef:
-        if not self.permissions.role_for(function).can_view:
-            raise PermissionDenied(f"You do not have access to function '{function}'.")
-        return self.backend.get_file(function, name)
-
     def grouped(self, items: list[NavFunction]) -> list[NavDomain]:
         """Group navigation items by domain, in domain order; unassigned functions come last."""
         domains = {d.name: d for d in self.backend.list_domains()}
@@ -101,8 +89,3 @@ class CatalogService:
         if "" in groups:
             ordered.append(groups[""])
         return ordered
-
-    def get_form(self, function: str, name: str) -> FormDef:
-        if not self.permissions.role_for(function).can_view:
-            raise PermissionDenied(f"You do not have access to function '{function}'.")
-        return self.backend.get_form(function, name)

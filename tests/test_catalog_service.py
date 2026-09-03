@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from rdm.backend.base import NotFoundError, PermissionDenied
 from rdm.backend.duckdb_backend import DuckDBBackend
 from rdm.models import FunctionDef, Permissions, Role, User
 from rdm.services.catalog_service import CatalogService, NavFunction
@@ -15,7 +14,7 @@ HR = "hr__reference"
 
 
 def service(backend: DuckDBBackend, user: User) -> CatalogService:
-    return CatalogService(backend, user, backend.get_permissions(user))
+    return CatalogService(backend, backend.get_permissions(user))
 
 
 def _nav(items: list[NavFunction]) -> dict[str, tuple[Role, list[str]]]:
@@ -148,29 +147,9 @@ def test_search_results_do_not_mutate_the_full_listing(seeded_backend, admin):
     assert _nav(full)[STUDENT][1] == ["service_areas", "survey_questions"]
 
 
-def test_get_form_respects_visibility(seeded_backend, viewer):
-    svc = service(seeded_backend, viewer)
-    form = svc.get_form(STUDENT, "survey_questions")
-    assert form.row_count == 6 and form.column("question_code").is_key
-    with pytest.raises(
-        PermissionDenied, match="You do not have access to function 'finance__cost_management'"
-    ):
-        svc.get_form(FINANCE, "cost_centres")
-    with pytest.raises(NotFoundError):
-        svc.get_form(STUDENT, "no_such_form")
-
-
-def test_get_form_on_unknown_function_is_permission_denied(seeded_backend, admin):
-    svc = CatalogService(seeded_backend, admin, Permissions({STUDENT: Role.VIEWER}))
-    with pytest.raises(PermissionDenied):
-        svc.get_form("ghost_function", "x")
-    with pytest.raises(PermissionDenied):
-        svc.get_form(HR, "employment_types")
-
-
 def test_navigation_reflects_new_grants_when_permissions_are_refreshed(seeded_backend, viewer):
     seeded_backend.grant_function_role(FINANCE, "hr_readers", Role.EDITOR, User("seed"))
-    stale = CatalogService(seeded_backend, viewer, Permissions({STUDENT: Role.VIEWER}))
+    stale = CatalogService(seeded_backend, Permissions({STUDENT: Role.VIEWER}))
     assert set(_nav(stale.navigation())) == {STUDENT}
     fresh = service(seeded_backend, viewer)
     assert _nav(fresh.navigation())[FINANCE][0] is Role.EDITOR
@@ -185,7 +164,3 @@ def test_navigation_includes_files_and_search_matches_them(seeded_backend, admin
     assert [f.name for f in hit[0].files] == ["fx_rates.parquet"] and hit[0].forms == []
     # the viewer cannot see finance files
     assert service(seeded_backend, viewer).navigation("fx rates") == []
-    svc = service(seeded_backend, viewer)
-    with pytest.raises(PermissionDenied):
-        svc.get_file(FINANCE, "fx_rates.parquet")
-    assert service(seeded_backend, admin).get_file(FINANCE, "fx_rates.parquet").row_count == 366

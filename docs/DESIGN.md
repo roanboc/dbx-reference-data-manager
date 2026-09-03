@@ -49,8 +49,8 @@ src/rdm/
   backend/sql_utils.py      Identifier quoting, literal escaping, type maps, frame normalisation
   auth/provider.py          MockAuthProvider (personas), DatabricksAuthProvider (headers)
   services/catalog_service.py   Navigation: visible functions/forms, search, grouping by domain
-  services/form_service.py      Role guards, positional change-set builder, validation
-  services/draft.py             Row-id keyed draft -> ChangeSet; bulk update and restore helpers
+  services/form_service.py      Role guards in front of every backend call
+  services/draft.py             Row-id keyed draft -> validated ChangeSet (row labels, business keys); bulk update and restore
   services/files.py             Upload checks and local preview for files
   services/excel_import.py      Excel/CSV parsing, type inference, column sanitising
   ui/                       Dash shell, routing, pages, AG Grid configuration, in-app help
@@ -151,10 +151,9 @@ Design rules:
 ## 5. Authentication and authorisation
 
 * `AuthProvider.current_user() -> User(username, display_name, groups)`.
-  * Local: `MockAuthProvider` with three personas (header switcher or `RDM_PERSONA`).
+  * Local: `MockAuthProvider` with four personas, one per role (header switcher or `RDM_PERSONA`).
   * Databricks: `DatabricksAuthProvider` reads the request headers Databricks Apps injects
-    (`X-Forwarded-Email`, `X-Forwarded-Preferred-Username`, `X-Forwarded-User`,
-    `X-Forwarded-Access-Token`). Dash callbacks are plain Flask requests, so identity is
+    (`X-Forwarded-Email`, `X-Forwarded-Preferred-Username`, `X-Forwarded-Access-Token`). Dash callbacks are plain Flask requests, so identity is
     request-scoped; SQL connections are cached per user token (15 min).
 * **Recommended production mode: user authorization (on-behalf-of-user) with the `sql`
   scope.** Every statement runs as the signed-in user, so Unity Catalog is the enforcement

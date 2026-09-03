@@ -11,6 +11,7 @@ from rdm.services.draft import (
     Draft,
     build_changeset_from_draft,
     bulk_value,
+    describe_row,
     invalid_cells,
     is_temp_id,
     json_safe,
@@ -131,7 +132,7 @@ def test_build_changeset_flags_required_options_and_duplicates():
     empty = d.add_row({})
     _changes, issues = build_changeset_from_draft(form(), rows(), d)
     messages = [str(i) for i in issues]
-    assert "Row code=, column 'code': is required" in messages[0] or any("is required" in m for m in messages)
+    assert "Row code=, column 'code': is required" in messages
     assert any("must be one of: A, B" in m for m in messages)
     assert any(m.startswith("New row 1") and "duplicates" in m for m in messages)
     assert any(m.startswith("New row 2") and "is empty" in m for m in messages)
@@ -244,3 +245,123 @@ def test_restore_row_without_current_row_recreates_it_as_a_new_row():
     changes, issues = build_changeset_from_draft(form(), rows(), d)
     assert not issues and changes.inserts[0].values["price"] == Decimal("3.00")
     assert restore_row(d, form(), {ID_COLUMN: None}, snapshot)[0] != tid  # a row without id counts as absent
+
+
+# --------------------------------------------------------------------------------------
+# Row labels and business-key uniqueness (check_unique_keys through build_changeset_from_draft)
+# --------------------------------------------------------------------------------------
+
+
+def keyed_form(columns: list[ColumnDef] | None = None) -> FormDef:
+    cols = columns if columns is not None else [ColumnDef("code", is_key=True), ColumnDef("category")]
+    return FormDef("dom", "frm", columns=system_columns() + cols)
+
+
+def keyed_rows(form: FormDef, values: list[dict]) -> list[dict]:
+    out = []
+    for i, v in enumerate(values, 1):
+        row = {c.name: v.get(c.name) for c in form.user_columns}
+        row.update({ID_COLUMN: f"row-{i:04d}", VERSION_COLUMN: 1})
+        out.append(row)
+    return out
+
+
+THREE = [{"code": "A001"}, {"code": "B002"}, {"code": "C003"}]
+
+
+def issue_texts(form: FormDef, rows: list[dict], draft: Draft) -> list[str]:
+    _changes, issues = build_changeset_from_draft(form, rows, draft)
+    return [str(i) for i in issues]
+
+
+def test_describe_row_uses_business_keys():
+    form = keyed_form()
+    assert describe_row(form, {"code": "A001", "category": "Hardware"}) == "Row code=A001"
+    assert describe_row(form, {"code": None}) == "Row code="
+    two_keys = keyed_form([ColumnDef("a", is_key=True), ColumnDef("b", is_key=True)])
+    assert describe_row(two_keys, {"a": 1, "b": "x"}) == "Row a=1, b=x"
+
+
+def test_describe_row_without_keys_falls_back_to_text_then_id_then_fallback():
+    form = keyed_form([ColumnDef("n", DataType.INTEGER), ColumnDef("name"), ColumnDef("other")])
+    assert describe_row(form, {"n": 1, "name": "Widget", "other": "x"}) == "Row 'Widget'"
+    assert describe_row(form, {"n": 1, "name": "", "other": "Second"}) == "Row 'Second'"
+    assert describe_row(form, {"n": 1, ID_COLUMN: "abcdef01-2345"}) == "row abcdef01"
+    assert describe_row(form, {"n": 1, ID_COLUMN: "abcdef01"}, fallback="row 7") == "row 7 abcdef01"
+    assert describe_row(form, {"n": 1}, fallback="row 7") == "row 7"
+
+
+def test_describe_row_truncates_long_values():
+    assert describe_row(keyed_form(), {"code": "x" * 100}) == "Row code=" + "x" * 39 + "…"
+
+
+def test_duplicate_keys_among_inserts_are_case_and_space_insensitive():
+    form = keyed_form()
+    d = Draft()
+    for code in ("X1", " x1 ", "X2"):
+        d.add_row({"code": code})
+    assert issue_texts(form, keyed_rows(form, THREE), d) == ["New row 2, column 'code': duplicates New row 1"]
+
+
+def test_insert_duplicating_an_existing_row_is_reported():
+    form = keyed_form()
+    d = Draft()
+    d.add_row({"code": "a001"})
+    assert issue_texts(form, keyed_rows(form, THREE), d) == [
+        "New row 1, column 'code': duplicates Row code=A001"
+    ]
+
+
+def test_edited_row_duplicating_another_row_is_reported_whatever_the_order():
+    form = keyed_form()
+    rows = keyed_rows(form, THREE)
+    earlier = Draft()
+    earlier.set_cell("row-0002", "code", "A001", 1)
+    assert issue_texts(form, rows, earlier) == [
+        "Row code=A001, column 'code': duplicates existing Row code=A001"
+    ]
+    later = Draft()  # the duplicated row comes after the edited one in the loaded order
+    later.set_cell("row-0001", "code", "B002", 1)
+    assert issue_texts(form, rows, later) == [
+        "Row code=B002, column 'code': duplicates existing Row code=B002"
+    ]
+
+
+def test_delete_frees_the_key_and_an_update_can_change_it():
+    form = keyed_form()
+    d = Draft()
+    d.mark_deleted("row-0001", 1)
+    d.add_row({"code": "A001"})
+    d.set_cell("row-0002", "code", "B999", 1)
+    changes, issues = build_changeset_from_draft(form, keyed_rows(form, THREE), d)
+    assert issues == [] and changes.summary() == "1 added, 1 edited, 1 deleted"
+
+
+def test_composite_keys_and_rows_without_key_values_are_skipped():
+    form = keyed_form(
+        [ColumnDef("a", is_key=True), ColumnDef("b", DataType.INTEGER, is_key=True), ColumnDef("txt")]
+    )
+    rows = keyed_rows(form, [{"a": "x", "b": 1}, {"a": "x", "b": 2}])
+    d = Draft()
+    for values in ({"a": "X", "b": "1.0"}, {"a": "X", "b": 3}, {"txt": "no key"}):
+        d.add_row(values)
+    assert issue_texts(form, rows, d) == ["New row 1, column 'a, b': duplicates Row a=x, b=1"]
+
+
+def test_without_key_columns_uniqueness_is_not_checked():
+    form = keyed_form([ColumnDef("name"), ColumnDef("n", DataType.INTEGER)])
+    d = Draft()
+    d.add_row({"name": "dup"})
+    d.add_row({"name": "dup"})
+    assert issue_texts(form, keyed_rows(form, [{"name": "dup", "n": 1}]), d) == []
+
+
+def test_inserts_on_an_empty_form_are_checked_against_each_other():
+    form = keyed_form()
+    d = Draft()
+    d.add_row({"code": "A"})
+    d.add_row({"code": "a"})
+    d.set_cell("row-9999", "category", "x", 1)  # a row that is not loaded is ignored
+    changes, issues = build_changeset_from_draft(form, [], d)
+    assert changes.updates == [] and len(changes.inserts) == 2
+    assert [str(i) for i in issues] == ["New row 2, column 'code': duplicates New row 1"]

@@ -6,16 +6,23 @@ cannot take parameters (identifiers, and DDL clauses such as COMMENT / TBLPROPER
 
 from __future__ import annotations
 
+import json
 import re
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import pandas as pd
 
+from rdm.coercion import is_missing, to_naive_utc
 from rdm.models import (
+    CREATED_AT_COLUMN,
     DEFAULT_DECIMAL_PRECISION,
     DEFAULT_DECIMAL_SCALE,
+    HISTORY_COLUMNS,
+    ID_COLUMN,
+    UPDATED_AT_COLUMN,
+    UPDATED_BY_COLUMN,
     ColumnDef,
     DataType,
     FormDef,
@@ -31,6 +38,85 @@ def quote_ident(name: str, quote: str = '"') -> str:
 
 def qualified(parts: list[str], quote: str = '"') -> str:
     return ".".join(quote_ident(p, quote) for p in parts)
+
+
+def search_pattern(text: str) -> str:
+    """``LIKE`` pattern for a free-text search (wildcards in the text are escaped with ``\\``)."""
+    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def order_clause(form: FormDef, order_by: str | None, descending: bool, quote: str) -> str:
+    """``ORDER BY`` for ``read_rows``: the requested column, else the business keys, else
+    creation order; ``_id`` is the tie-breaker so paging is stable."""
+    q = quote  # noqa: E741 - local alias
+    direction = "DESC" if descending else "ASC"
+    cols = [c.name for c in form.columns]
+    if order_by and order_by in cols:
+        order = f" ORDER BY {quote_ident(order_by, q)} {direction} NULLS LAST"
+        return order + (f", {quote_ident(ID_COLUMN, q)}" if form.has_system_columns else "")
+    if form.key_columns:
+        keys = ", ".join(f"{quote_ident(k.name, q)} {direction} NULLS LAST" for k in form.key_columns)
+        return f" ORDER BY {keys}, {quote_ident(ID_COLUMN, q)}"
+    if form.has_system_columns:
+        return f" ORDER BY {quote_ident(CREATED_AT_COLUMN, q)} {direction} NULLS LAST, {quote_ident(ID_COLUMN, q)}"
+    return f" ORDER BY {quote_ident(cols[0], q)} {direction}" if cols else ""
+
+
+def conflict_message(label: str, current: dict[str, Any] | None) -> str:
+    """Why a row was skipped by a version-checked write (shown to the user as a conflict)."""
+    if current is None:
+        return f"{label}: the row was deleted by someone else."
+    who = current.get(UPDATED_BY_COLUMN) or "someone else"
+    when = to_db_scalar(current.get(UPDATED_AT_COLUMN))
+    when_txt = f" at {when:%Y-%m-%d %H:%M:%S} UTC" if isinstance(when, datetime) else ""
+    return f"{label}: modified by {who}{when_txt} after you loaded it."
+
+
+def history_frame(rows: list[tuple], user_cols: list[str]) -> pd.DataFrame:
+    """Decode audit rows ``(version, changed_at, changed_by, change_type, row_id, before_json,
+    after_json)`` into the history frame both backends return (``get_history``)."""
+    records = []
+    for version, changed_at, changed_by, change_type, rid, before_json, after_json in rows:
+        before = json.loads(before_json) if before_json else {}
+        after = json.loads(after_json) if after_json else {}
+        snapshot = after if change_type != "delete" else before
+        changed = [c for c in user_cols if change_type == "update" and before.get(c) != after.get(c)]
+        rec = {
+            "version": version,
+            "changed_at": to_db_scalar(changed_at),
+            "changed_by": changed_by,
+            "change_type": change_type,
+            "changed_fields": ", ".join(changed),
+            ID_COLUMN: rid,
+        }
+        for c in user_cols:
+            rec[c] = snapshot.get(c)
+        records.append(rec)
+    return pd.DataFrame.from_records(
+        records, columns=[*HISTORY_COLUMNS, "changed_fields", ID_COLUMN, *user_cols]
+    )
+
+
+FILE_HISTORY_COLUMNS = ["version", "changed_at", "changed_by", "change_type", "size_bytes", "row_count"]
+
+
+def file_history_frame(rows: list[tuple]) -> pd.DataFrame:
+    """Decode audit rows ``(version, changed_at, changed_by, change_type, before_json, after_json)``
+    of a file into the frame both backends return (``file_history``)."""
+    records = []
+    for version, changed_at, changed_by, change_type, before_json, after_json in rows:
+        snapshot = json.loads(after_json) if after_json else (json.loads(before_json) if before_json else {})
+        records.append(
+            {
+                "version": version,
+                "changed_at": to_db_scalar(changed_at),
+                "changed_by": changed_by,
+                "change_type": change_type,
+                "size_bytes": snapshot.get("size_bytes"),
+                "row_count": snapshot.get("row_count"),
+            }
+        )
+    return pd.DataFrame.from_records(records, columns=FILE_HISTORY_COLUMNS)
 
 
 def escape_literal_duckdb(text: str) -> str:
@@ -141,22 +227,14 @@ def to_db_scalar(value: Any) -> Any:
     ``None``/``pd.NA``/``NaT``/float NaN become ``None`` (a real NULL, never the string
     ``'nan'``); numpy scalars become Python scalars; timestamps become naive datetimes.
     """
-    if value is None:
-        return None
     if isinstance(value, str | bytes | bool | int | Decimal):
         return value
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
+    if is_missing(value):
+        return None
     if isinstance(value, pd.Timestamp):
-        ts = value.tz_convert("UTC").tz_localize(None) if value.tzinfo is not None else value
-        return ts.to_pydatetime()
+        value = value.to_pydatetime()
     if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            value = value.astimezone(UTC).replace(tzinfo=None)
-        return value
+        return to_naive_utc(value)
     if hasattr(value, "item"):
         return value.item()
     return value

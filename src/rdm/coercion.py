@@ -31,10 +31,24 @@ def is_missing(value: Any) -> bool:
         return False
 
 
-def _to_naive_utc(dt: datetime) -> datetime:
+def to_naive_utc(dt: datetime) -> datetime:
+    """Timestamps are stored as naive UTC (docs/DESIGN.md §3.1)."""
     if dt.tzinfo is not None:
         dt = dt.astimezone(UTC).replace(tzinfo=None)
     return dt
+
+
+def rule_violation(col: ColumnDef, value: Any) -> str | None:
+    """The column rule a coerced value breaks (required, allowed values), or ``None``.
+
+    One rule set for the grid, the bulk update, the item form and the import
+    (docs/FUNCTIONAL_DESIGN.md §7.4).
+    """
+    if value is None:
+        return "is required" if col.required else None
+    if col.options and str(value) not in col.options:
+        return f"must be one of: {', '.join(col.options)}"
+    return None
 
 
 def coerce_value(col: ColumnDef, value: Any) -> Any:
@@ -60,14 +74,17 @@ def coerce_value(col: ColumnDef, value: Any) -> Any:
             if isinstance(value, int):
                 return value
             if isinstance(value, float | Decimal):
-                if float(value) != int(value):
+                if value != int(value):
                     raise CoercionError("must be a whole number")
                 return int(value)
             s = str(value).strip().replace(",", "").replace(" ", "")
-            f = float(s)
-            if not f.is_integer():
-                raise CoercionError("must be a whole number")
-            return int(f)
+            try:
+                return int(s)  # exact: BIGINT values above 2**53 must not go through float()
+            except ValueError:
+                f = float(s)  # "12.0", "1e3"
+                if not f.is_integer():
+                    raise CoercionError("must be a whole number") from None
+                return int(f)
         if t is DataType.DECIMAL:
             precision, scale = col.decimal_params
             if isinstance(value, bool):
@@ -111,12 +128,12 @@ def coerce_value(col: ColumnDef, value: Any) -> Any:
             return ts.date()
         if t is DataType.TIMESTAMP:
             if isinstance(value, pd.Timestamp):
-                return _to_naive_utc(value.to_pydatetime())
+                return to_naive_utc(value.to_pydatetime())
             if isinstance(value, datetime):
-                return _to_naive_utc(value)
+                return to_naive_utc(value)
             if isinstance(value, date):
                 return datetime(value.year, value.month, value.day)
-            return _to_naive_utc(pd.Timestamp(str(value).strip()).to_pydatetime())
+            return to_naive_utc(pd.Timestamp(str(value).strip()).to_pydatetime())
     except CoercionError:
         raise
     except (ValueError, TypeError, InvalidOperation, OverflowError) as exc:

@@ -220,8 +220,7 @@ def validate_file_name(name: str) -> str:
 
 def humanize(name: str) -> str:
     """``cost_centre_code`` -> ``Cost Centre Code``; ``student__survey`` -> ``Student / Survey``."""
-    parts = [p for p in name.split("__")]
-    words = [" ".join(w.capitalize() for w in p.split("_") if w) for p in parts]
+    words = [" ".join(w.capitalize() for w in p.split("_") if w) for p in name.split("__")]
     return " / ".join(w for w in words if w) or name
 
 
@@ -253,13 +252,6 @@ class DataType(enum.StrEnum):
     @classmethod
     def editable_types(cls) -> list[DataType]:
         return [t for t in cls if t is not cls.OTHER]
-
-    @classmethod
-    def from_label(cls, label: str) -> DataType:
-        for t, lbl in _TYPE_LABELS.items():
-            if lbl == label or t.value == label:
-                return t
-        raise ValueError(f"Unknown data type label {label!r}")
 
 
 _TYPE_LABELS = {
@@ -409,7 +401,6 @@ class ColumnDef:
     options: list[str] = field(default_factory=list)  # allowed values (renders as a dropdown)
     is_key: bool = False  # business key: combination must be unique
     native_type: str = ""  # type text reported by the backend, informative only
-    position: int = 0
 
     @property
     def is_system(self) -> bool:
@@ -445,6 +436,11 @@ class ColumnDef:
         if self.options and self.data_type is not DataType.STRING:
             raise ValueError(f"Column {self.name!r}: allowed values are only supported for text columns.")
         return self
+
+
+def parse_options(raw: str | None) -> list[str]:
+    """Allowed values as typed by an admin: comma-separated, trimmed, de-duplicated."""
+    return list(dict.fromkeys(o.strip() for o in (raw or "").split(",") if o.strip()))
 
 
 def system_columns() -> list[ColumnDef]:
@@ -618,8 +614,10 @@ class FormDef:
             return
         try:
             cfg = json.loads(raw) if isinstance(raw, str) else raw
-            cols = cfg.get("columns", {}) if isinstance(cfg, dict) else {}
-        except (ValueError, AttributeError):
+        except ValueError:
+            return
+        cols = cfg.get("columns") if isinstance(cfg, dict) else None
+        if not isinstance(cols, dict):
             return
         for c in self.columns:
             entry = cols.get(c.name)
@@ -716,10 +714,6 @@ class ChangeSet:
     def is_empty(self) -> bool:
         return not (self.inserts or self.updates or self.deletes)
 
-    @property
-    def total(self) -> int:
-        return len(self.inserts) + len(self.updates) + len(self.deletes)
-
     def summary(self) -> str:
         parts = []
         if self.inserts:
@@ -749,11 +743,7 @@ class SaveResult:
     updated: int = 0
     deleted: int = 0
     conflicts: list[str] = field(default_factory=list)  # labels of rows changed by someone else
-    errors: list[str] = field(default_factory=list)
-
-    @property
-    def ok(self) -> bool:
-        return not self.errors and not self.conflicts
+    warnings: list[str] = field(default_factory=list)  # the data was written, but something else was not
 
     @property
     def applied(self) -> int:

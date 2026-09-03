@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from datetime import datetime
@@ -88,7 +89,7 @@ class FakeMeta:
 
 class FakeDownload:
     def __init__(self, data):
-        self.contents = __import__("io").BytesIO(data)
+        self.contents = io.BytesIO(data)
 
 
 class FakeFiles:
@@ -370,7 +371,7 @@ def test_drop_function_refuses_non_empty_schema_then_drops_and_unregisters():
     assert params == {"name": "finance__cost"}
 
 
-def test_grant_domain_role_revokes_then_grants_group_privileges():
+def test_grant_function_role_revokes_then_grants_group_privileges():
     b, conn = make_backend()
     b.grant_function_role("finance__cost", "finance stewards", Role.EDITOR, ADMIN)
     [(revoke, _)] = statements(conn, r"^REVOKE")

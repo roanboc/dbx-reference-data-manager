@@ -42,7 +42,8 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
@@ -50,14 +51,22 @@ from typing import Any
 import pandas as pd
 
 from rdm.backend.base import BackendError, ConflictError, DatabaseBackend, NotFoundError
-from rdm.backend.sql_utils import escape_literal_databricks as lit
 from rdm.backend.sql_utils import (
+    FILE_HISTORY_COLUMNS,
+    conflict_message,
+    file_history_frame,
+    history_frame,
     native_type_databricks,
     normalise_frame,
+    order_clause,
     parse_native_type,
+    qualified,
+    quote_ident,
+    search_pattern,
     to_db_scalar,
     validate_identifier,
 )
+from rdm.backend.sql_utils import escape_literal_databricks as lit
 from rdm.models import (
     CREATED_AT_COLUMN,
     CREATED_BY_COLUMN,
@@ -125,7 +134,6 @@ FORM_TABLE_PROPERTIES = {
     "delta.enableDeletionVectors": "true",
 }
 
-#: Databricks SQL types used in ``from_json`` struct schemas and DDL.
 JSON_ROWS_CHUNK = 500  # rows per MERGE/INSERT payload (keeps parameters well under 1 MB)
 TS_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSSSSS"
 
@@ -186,8 +194,7 @@ def _json_value(col: ColumnDef, value: Any) -> Any:
 
 
 def _q(name: str) -> str:
-    validate_identifier(name)
-    return f"`{name}`"
+    return quote_ident(name, "`")
 
 
 class DatabricksBackend(DatabaseBackend):
@@ -200,16 +207,13 @@ class DatabricksBackend(DatabaseBackend):
         host: str | None = None,
         access_token: str | None = None,
         connection_factory: Callable[[], Any] | None = None,
-        meta_schema: str = META_SCHEMA,
         files_client_factory: Callable[[], Any] | None = None,
     ) -> None:
         validate_identifier(catalog, "catalog name")
-        validate_identifier(meta_schema, "schema name")
         self.catalog = catalog
         self.http_path = http_path
         self.host = host
         self.access_token = access_token
-        self.meta_schema = meta_schema
         self._connection_factory = connection_factory or self._connect
         self._files_client_factory = files_client_factory or self._files_client
         self._conn: Any = None
@@ -264,20 +268,19 @@ class DatabricksBackend(DatabaseBackend):
                 finally:
                     self._conn = None
 
-    def _run(
-        self, statement: str, params: dict[str, Any] | list[Any] | None = None
-    ) -> tuple[list[tuple], list[str]]:
-        """Execute one statement; returns (rows, column names). Serialised per backend instance."""
+    @contextmanager
+    def _execute(self, statement: str, params: dict[str, Any] | list[Any] | None) -> Iterator[Any]:
+        """Run one statement (confinement-checked, serialised per backend instance) and yield the
+        cursor; driver errors become :class:`NotFoundError` / :class:`ConflictError` / :class:`BackendError`."""
         self._assert_confined(statement)
         with self._lock:
             conn = self._connection()
             try:
                 with conn.cursor() as cur:
                     cur.execute(statement, params or None)
-                    if cur.description:
-                        cols = [d[0] for d in cur.description]
-                        return list(cur.fetchall()), cols
-                    return [], []
+                    yield cur
+            except BackendError:
+                raise
             except Exception as exc:  # noqa: BLE001 - wrap driver errors for the UI
                 message = str(exc)
                 log.warning("Databricks statement failed: %s\n%s", message[:500], statement[:500])
@@ -288,24 +291,25 @@ class DatabricksBackend(DatabaseBackend):
                     raise ConflictError(message) from exc
                 raise BackendError(message) from exc
 
+    def _run(
+        self, statement: str, params: dict[str, Any] | list[Any] | None = None
+    ) -> tuple[list[tuple], list[str]]:
+        """Execute one statement; returns (rows, column names)."""
+        with self._execute(statement, params) as cur:
+            if cur.description:
+                return list(cur.fetchall()), [d[0] for d in cur.description]
+            return [], []
+
     def _run_df(self, statement: str, params: dict[str, Any] | list[Any] | None = None) -> pd.DataFrame:
-        self._assert_confined(statement)
-        with self._lock:
-            conn = self._connection()
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(statement, params or None)
-                    if hasattr(cur, "fetchall_arrow"):
-                        try:
-                            return cur.fetchall_arrow().to_pandas()
-                        except Exception:  # noqa: BLE001 - fall back to row tuples
-                            pass
-                    cols = [d[0] for d in cur.description] if cur.description else []
-                    return pd.DataFrame.from_records(list(cur.fetchall()), columns=cols)
-            except BackendError:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                raise BackendError(str(exc)) from exc
+        """Execute one query and return its result as a frame (Arrow when the driver offers it)."""
+        with self._execute(statement, params) as cur:
+            if hasattr(cur, "fetchall_arrow"):
+                try:
+                    return cur.fetchall_arrow().to_pandas()
+                except Exception:  # noqa: BLE001 - fall back to row tuples
+                    pass
+            cols = [d[0] for d in cur.description] if cur.description else []
+            return pd.DataFrame.from_records(list(cur.fetchall()), columns=cols)
 
     # -- confinement ---------------------------------------------------------------------------
 
@@ -347,16 +351,16 @@ class DatabricksBackend(DatabaseBackend):
     # -- naming ------------------------------------------------------------------------------
 
     def _t(self, form: FormDef) -> str:
-        return f"{_q(self.catalog)}.{_q(form.function)}.{_q(form.name)}"
+        return qualified([self.catalog, form.function, form.name], "`")
 
     def _s(self, function: str) -> str:
-        return f"{_q(self.catalog)}.{_q(function)}"
+        return qualified([self.catalog, function], "`")
 
     def _info(self, view: str) -> str:
         return f"{_q(self.catalog)}.`information_schema`.`{view}`"
 
     def _audit(self) -> str:
-        return f"{_q(self.catalog)}.{_q(self.meta_schema)}.{_q(AUDIT_TABLE)}"
+        return qualified([self.catalog, META_SCHEMA, AUDIT_TABLE], "`")
 
     # -- domains (classifier, registry only) ----------------------------------------------
 
@@ -481,7 +485,7 @@ class DatabricksBackend(DatabaseBackend):
         return {r[0]: dict(zip(cols, r, strict=True)) for r in rows}
 
     def _reg(self, table: str) -> str:
-        return f"{_q(self.catalog)}.{_q(self.meta_schema)}.{_q(table)}"
+        return qualified([self.catalog, META_SCHEMA, table], "`")
 
     def get_function(self, name: str) -> FunctionDef:
         for f in self.list_functions():
@@ -569,10 +573,11 @@ class DatabricksBackend(DatabaseBackend):
         self._run(f"DROP VOLUME IF EXISTS {self._s(function.name)}.{_q(FILES_VOLUME)}")
         self._volumes_ready.discard(function.name)
         self._run(f"DROP SCHEMA {self._s(function.name)} RESTRICT")
-        try:
-            self._run(f"DELETE FROM {self._reg('functions')} WHERE `name` = :name", {"name": function.name})
-        except BackendError as exc:
-            log.warning("Registry delete for %s failed: %s", function.name, exc)
+        for table, column in (("functions", "name"), ("files", "function_name")):
+            try:
+                self._run(f"DELETE FROM {self._reg(table)} WHERE `{column}` = :name", {"name": function.name})
+            except BackendError as exc:
+                log.warning("Registry delete (%s) for %s failed: %s", table, function.name, exc)
 
     # -- registry tables ---------------------------------------------------------------------
 
@@ -796,7 +801,7 @@ class DatabricksBackend(DatabaseBackend):
             {"catalog": self.catalog, "schema": function, "table": name},
         )
         cols = []
-        for i, (cname, dtype, nullable, comment, _pos) in enumerate(rows):
+        for cname, dtype, nullable, comment, _pos in rows:
             t, p, s = parse_native_type(dtype)
             cols.append(
                 ColumnDef(
@@ -807,16 +812,14 @@ class DatabricksBackend(DatabaseBackend):
                     precision=p,
                     scale=s,
                     native_type=str(dtype).upper() if dtype else "",
-                    position=i,
                 )
             )
         return cols
 
     def _properties(self, form: FormDef) -> dict[str, str]:
-        try:
-            rows, cols = self._run(f"SHOW TBLPROPERTIES {self._t(form)}")
-        except BackendError:
-            return {}
+        # Never swallowed: an empty result would be persisted as the column configuration by the
+        # next metadata save.
+        rows, _ = self._run(f"SHOW TBLPROPERTIES {self._t(form)}")
         return {str(r[0]): ("" if r[1] is None else str(r[1])) for r in rows}
 
     def get_form(self, function: str, name: str) -> FormDef:
@@ -961,29 +964,15 @@ class DatabricksBackend(DatabaseBackend):
         descending: bool = False,
     ) -> pd.DataFrame:
         cols = self._select_columns(form)
-        select = ", ".join(_q(c) for c in cols) if cols else "*"
+        select = ", ".join(_q(c) for c in cols)
         params: dict[str, Any] = {}
         where = ""
         if search:
-            pattern = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             search_cols = [c.name for c in form.user_columns] or cols
             clauses = [f"CAST({_q(c)} AS STRING) ILIKE :pattern ESCAPE '\\\\'" for c in search_cols]
             where = " WHERE " + " OR ".join(clauses)
-            params["pattern"] = pattern
-        direction = "DESC" if descending else "ASC"
-        if order_by and order_by in cols:
-            order = f" ORDER BY {_q(order_by)} {direction} NULLS LAST"
-            if form.has_system_columns:
-                order += f", {_q(ID_COLUMN)}"
-        elif form.key_columns:
-            keys = ", ".join(f"{_q(k.name)} {direction} NULLS LAST" for k in form.key_columns)
-            order = f" ORDER BY {keys}, {_q(ID_COLUMN)}"
-        elif form.has_system_columns:
-            order = f" ORDER BY {_q(CREATED_AT_COLUMN)} {direction} NULLS LAST, {_q(ID_COLUMN)}"
-        elif cols:
-            order = f" ORDER BY {_q(cols[0])} {direction}"
-        else:
-            order = ""
+            params["pattern"] = search_pattern(search)
+        order = order_clause(form, order_by, descending, "`")
         df = self._run_df(
             f"SELECT {select} FROM {self._t(form)}{where}{order} LIMIT {int(limit)}", params or None
         )
@@ -1053,7 +1042,7 @@ class DatabricksBackend(DatabaseBackend):
             if before is None or (
                 upd.expected_version is not None and int(before[VERSION_COLUMN]) != int(upd.expected_version)
             ):
-                result.conflicts.append(self._conflict_message(upd.label or upd.row_id, before))
+                result.conflicts.append(conflict_message(upd.label or upd.row_id, before))
                 continue
             merged = {
                 c.name: _json_value(c, upd.changes[c.name] if c.name in upd.changes else before.get(c.name))
@@ -1083,7 +1072,7 @@ class DatabricksBackend(DatabaseBackend):
                 dele.expected_version is not None
                 and int(before[VERSION_COLUMN]) != int(dele.expected_version)
             ):
-                result.conflicts.append(self._conflict_message(dele.label or dele.row_id, before))
+                result.conflicts.append(conflict_message(dele.label or dele.row_id, before))
                 continue
             ops.append({"_op": "D", ID_COLUMN: dele.row_id, VERSION_COLUMN: int(before[VERSION_COLUMN])})
             audit.append(
@@ -1152,10 +1141,12 @@ class DatabricksBackend(DatabaseBackend):
                     o["_op"] == "U"
                     and int(after.get(o[ID_COLUMN], {}).get(VERSION_COLUMN, -1)) != o[VERSION_COLUMN] + 1
                 ):
-                    result.conflicts.append(self._conflict_message(o[ID_COLUMN], after.get(o[ID_COLUMN])))
+                    result.conflicts.append(conflict_message(o[ID_COLUMN], after.get(o[ID_COLUMN])))
                 if o["_op"] == "D" and o[ID_COLUMN] in after:
-                    result.conflicts.append(self._conflict_message(o[ID_COLUMN], after.get(o[ID_COLUMN])))
-        self._write_audit(audit)
+                    result.conflicts.append(conflict_message(o[ID_COLUMN], after.get(o[ID_COLUMN])))
+        problem = self._write_audit(audit)
+        if problem:
+            result.warnings.append(problem)
         return result
 
     @staticmethod
@@ -1164,15 +1155,6 @@ class DatabricksBackend(DatabaseBackend):
         for c in columns:
             out[c.name] = _json_value(c, row.get(c.name))
         return out
-
-    @staticmethod
-    def _conflict_message(label: str, current: dict[str, Any] | None) -> str:
-        if current is None:
-            return f"{label}: the row was deleted by someone else."
-        who = current.get(UPDATED_BY_COLUMN) or "someone else"
-        when = to_db_scalar(current.get(UPDATED_AT_COLUMN))
-        when_txt = f" at {when:%Y-%m-%d %H:%M:%S} UTC" if isinstance(when, datetime) else ""
-        return f"{label}: modified by {who}{when_txt} after you loaded it."
 
     def append_rows(self, form: FormDef, rows: pd.DataFrame, actor: User) -> int:
         if not form.is_editable:
@@ -1261,8 +1243,8 @@ class DatabricksBackend(DatabaseBackend):
         "changed_at:TIMESTAMP_NTZ,changed_by:STRING,batch_id:STRING,before_json:STRING,after_json:STRING>>"
     )
 
-    def audit_table_ddl(self) -> str:
-        """DDL for the audit table (also created by the bundle's setup job)."""
+    def _audit_table_ddl(self) -> str:
+        """DDL for the audit table, created on first write (the bundle only provisions ``_catalog``)."""
         return (
             f"CREATE TABLE IF NOT EXISTS {self._audit()} (\n"
             "  id STRING NOT NULL, seq BIGINT, schema_name STRING NOT NULL, table_name STRING NOT NULL, row_id STRING,\n"
@@ -1272,9 +1254,11 @@ class DatabricksBackend(DatabaseBackend):
             "TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')"
         )
 
-    def _write_audit(self, rows: list[dict[str, Any]]) -> None:
+    def _write_audit(self, rows: list[dict[str, Any]]) -> str | None:
+        """Append audit rows. The data change they describe is already committed, so a failure
+        never undoes it: it is logged and returned as a warning for the caller to surface."""
         if not rows:
-            return
+            return None
         statement = (
             f"INSERT INTO {self._audit()} (id, seq, schema_name, table_name, row_id, change_type, changed_at, changed_by, "
             f"batch_id, before_json, after_json)\nSELECT id, seq, schema_name, table_name, row_id, change_type, changed_at, "
@@ -1287,16 +1271,17 @@ class DatabricksBackend(DatabaseBackend):
                 self._audit_ready = True
             except NotFoundError:
                 try:
-                    self._run(self.audit_table_ddl())
+                    self._run(self._audit_table_ddl())
                     self._run(statement, {"payload": payload})
                     self._audit_ready = True
                 except BackendError as exc:
                     self._audit_ready = False
-                    log.warning("Audit log unavailable (%s); history falls back to Change Data Feed", exc)
-                    return
+                    log.error("Audit log unavailable (%s); history falls back to Change Data Feed", exc)
+                    return f"The change was saved, but the history could not be written ({exc})."
             except BackendError as exc:
-                log.warning("Audit log write failed: %s", exc)
-                return
+                log.error("Audit log write failed: %s", exc)
+                return f"The change was saved, but the history could not be written ({exc})."
+        return None
 
     def get_history(self, form: FormDef, limit: int = 200, row_id: str | None = None) -> pd.DataFrame:
         user_cols = [c.name for c in form.user_columns]
@@ -1315,27 +1300,8 @@ class DatabricksBackend(DatabaseBackend):
                     params,
                 )
                 self._audit_ready = True
-                records = []
                 n = len(rows)
-                for i, (changed_at, changed_by, change_type, rid, before_json, after_json) in enumerate(rows):
-                    before = json.loads(before_json) if before_json else {}
-                    after = json.loads(after_json) if after_json else {}
-                    snapshot = after if change_type != "delete" else before
-                    changed = [
-                        c for c in user_cols if change_type == "update" and before.get(c) != after.get(c)
-                    ]
-                    rec = {
-                        "version": n - i,
-                        "changed_at": to_db_scalar(changed_at),
-                        "changed_by": changed_by,
-                        "change_type": change_type,
-                        "changed_fields": ", ".join(changed),
-                        ID_COLUMN: rid,
-                    }
-                    for c in user_cols:
-                        rec[c] = snapshot.get(c)
-                    records.append(rec)
-                return pd.DataFrame.from_records(records, columns=columns)
+                return history_frame([(n - i, *r) for i, r in enumerate(rows)], user_cols)
             except NotFoundError:
                 self._audit_ready = False
         return self._history_from_cdf(form, limit, columns, row_id)
@@ -1562,18 +1528,13 @@ class DatabricksBackend(DatabaseBackend):
     def file_columns(self, file: FileDef) -> list[ColumnDef]:
         rows, _ = self._run(f"DESCRIBE QUERY SELECT * FROM {self._reader(file)}")
         cols = []
-        for i, row in enumerate(rows):
+        for row in rows:
             cname, dtype = str(row[0]), str(row[1])
             t, p, s = parse_native_type(dtype)
-            cols.append(
-                ColumnDef(
-                    name=cname, data_type=t, precision=p, scale=s, native_type=dtype.upper(), position=i
-                )
-            )
+            cols.append(ColumnDef(name=cname, data_type=t, precision=p, scale=s, native_type=dtype.upper()))
         return cols
 
     def file_history(self, file: FileDef, limit: int = 200) -> pd.DataFrame:
-        columns = ["version", "changed_at", "changed_by", "change_type", "size_bytes", "row_count"]
         kinds = ", ".join(lit(k) for k in FILE_CHANGE_TYPES)
         try:
             rows, _ = self._run(
@@ -1583,24 +1544,9 @@ class DatabricksBackend(DatabaseBackend):
                 {"schema": file.function, "table": file.name},
             )
         except NotFoundError:
-            return pd.DataFrame(columns=columns)
-        records = []
+            return pd.DataFrame(columns=FILE_HISTORY_COLUMNS)
         n = len(rows)
-        for i, (changed_at, changed_by, change_type, before_json, after_json) in enumerate(rows):
-            snapshot = (
-                json.loads(after_json) if after_json else (json.loads(before_json) if before_json else {})
-            )
-            records.append(
-                {
-                    "version": n - i,
-                    "changed_at": to_db_scalar(changed_at),
-                    "changed_by": changed_by,
-                    "change_type": change_type,
-                    "size_bytes": snapshot.get("size_bytes"),
-                    "row_count": snapshot.get("row_count"),
-                }
-            )
-        return pd.DataFrame.from_records(records, columns=columns)
+        return file_history_frame([(n - i, *r) for i, r in enumerate(rows)])
 
     def drop_file(self, file: FileDef, actor: User) -> None:
         current = self.get_file(file.function, file.name)

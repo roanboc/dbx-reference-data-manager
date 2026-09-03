@@ -36,7 +36,7 @@ def test_quote_ident_rejects_bad_identifiers(bad):
 
 def test_qualified_quotes_every_part():
     assert qualified(["dom", "frm"]) == '"dom"."frm"'
-    assert qualified(["_rdm_meta", "grants"], "`") == "`_rdm_meta`.`grants`"
+    assert qualified(["_catalog", "grants"], "`") == "`_catalog`.`grants`"
     with pytest.raises(ValueError):
         qualified(["dom", "bad name"])
 

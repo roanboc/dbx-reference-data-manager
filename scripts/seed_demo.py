@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Create (or recreate with --reset) the local DuckDB database with demo domains, functions and forms.
+"""Create (or recreate with --reset) the local DuckDB database with demo domains, functions, forms and files.
 
 Usage: python scripts/seed_demo.py [--reset] [--path data/rdm.duckdb]
 """

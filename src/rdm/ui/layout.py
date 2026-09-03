@@ -48,11 +48,6 @@ def new_form_href(function: str | None = None) -> str:
     return f"{NEW_FORM_HREF}/{quote(function)}" if function else NEW_FORM_HREF
 
 
-def new_file_href(function: str | None = None) -> str:
-    """The new-file page, with the function pre-selected when given."""
-    return f"{NEW_FILE_HREF}/{quote(function)}" if function else NEW_FILE_HREF
-
-
 COLOR_SCHEMES = [
     ("auto", "System", "tabler:device-desktop"),
     ("light", "Light", "tabler:sun"),
@@ -97,7 +92,7 @@ def shell() -> dmc.MantineProvider:
                     dmc.AppShellHeader(
                         dmc.Group(
                             [
-                                html.Div(id="header-content", style={"flex": 1, "minWidth": 0}),
+                                html.Div(id=ids.HEADER, style={"flex": 1, "minWidth": 0}),
                                 color_scheme_control(),
                             ],
                             gap="sm",
@@ -106,7 +101,6 @@ def shell() -> dmc.MantineProvider:
                         px="md",
                     ),
                     dmc.AppShellNavbar(
-                        id="navbar",
                         children=[
                             dmc.Stack(
                                 [
@@ -326,7 +320,6 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
                     ),
                 ],
                 gap=4,
-                className="rdm-domain-group",
             )
         )
     if sections:

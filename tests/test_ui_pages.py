@@ -7,16 +7,18 @@ from typing import Any
 import pytest
 
 from rdm.auth.provider import PERSONAS, MockAuthProvider
+from rdm.backend.base import PermissionDenied
 from rdm.config import Settings
 from rdm.models import Role
 from rdm.services import CatalogService, FormService
 from rdm.ui import ids
-from rdm.ui.context import AppContext
+from rdm.ui.context import AppContext, grouped_navigation
 from rdm.ui.pages import (
     domain_page,
     domains_page,
     file_page,
     form_creator,
+    form_page,
     function_page,
     help_page,
     home_page,
@@ -32,7 +34,7 @@ def make_ctx(backend, persona: str) -> AppContext:
         backend=backend,
         user=user,
         permissions=perms,
-        catalog=CatalogService(backend, user, perms),
+        catalog=CatalogService(backend, perms),
         forms=FormService(backend, user, perms),
     )
 
@@ -81,7 +83,6 @@ def test_home_renders_for_every_persona_grouped_by_domain(seeded_backend, person
     assert "Student" in text  # the domain heading of the student function
     assert "People" in text if persona in ("admin", "viewer") else "People" not in text
     # the filter narrows the cards
-    from rdm.ui.context import grouped_navigation
 
     assert (
         "GL Account Mappings" in texts_in(home_page.cards(grouped_navigation(ctx, None), "gl account"))
@@ -226,7 +227,6 @@ def test_new_function_page_requires_global_admin(seeded_backend):
 
 
 def test_new_file_page_and_function_page_entry_points(seeded_backend):
-    from rdm.ui.pages import form_creator
 
     admin = make_ctx(seeded_backend, "admin")
     tree = function_page.render_new_file(admin, "finance__cost_management")
@@ -273,7 +273,6 @@ def test_domains_page_is_for_global_admins_only(seeded_backend):
 
 
 def test_form_page_settings_delete_zone_only_for_global_admins(seeded_backend):
-    from rdm.ui.pages import form_page
 
     admin_tree = form_page.render(
         make_ctx(seeded_backend, "admin"), "finance__cost_management", "cost_centres"
@@ -293,7 +292,6 @@ def test_form_page_settings_delete_zone_only_for_global_admins(seeded_backend):
 
 
 def test_form_and_file_pages_show_the_databricks_path_to_copy(seeded_backend):
-    from rdm.ui.pages import form_page
 
     table = "`_reference_data`.`finance__cost_management`.`cost_centres`"
     # every reader gets the copy chip in the header ...
@@ -326,7 +324,6 @@ def test_domain_overview_lists_the_functions_the_user_can_open(seeded_backend, p
     found, text = ids_in(tree), texts_in(tree)
     assert {ids.DOMAIN_KEY, ids.DOMAIN_FUNCTIONS, ids.DOMAIN_FUNCTIONS_FILTER} <= found
     assert "Finance" in text and "Functions you can open" in text
-    from rdm.ui.context import grouped_navigation
 
     visible = [g for g in grouped_navigation(ctx, None) if g.domain.name == "finance"]
     n_visible = sum(len(g.functions) for g in visible)
@@ -353,7 +350,6 @@ def test_domain_overview_filter_matches_functions_forms_and_files(seeded_backend
 
 
 def test_item_body_lists_fields_and_row_history(seeded_backend):
-    from rdm.ui.pages import form_page
 
     ctx = make_ctx(seeded_backend, "editor")
     form = ctx.forms.get_form("student__survey_service_improvement", "service_areas")
@@ -446,7 +442,6 @@ def test_file_page_renders_per_role(seeded_backend, persona):
 
 
 def test_file_page_denies_viewer_without_access(seeded_backend):
-    from rdm.backend.base import PermissionDenied
 
     with pytest.raises(PermissionDenied):
         file_page.render(

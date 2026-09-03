@@ -54,7 +54,7 @@ def render(ctx_: AppContext, function_name: str) -> dmc.Stack:
     except NotFoundError as exc:
         return dmc.Stack([error_alert(str(exc), "Not found")])
     forms = ctx_.backend.list_forms(function.name)
-    files = ctx_.backend.list_files(function.name)
+    files = ctx_.forms.list_files(function.name)
     right = [role_badge(role)]
     if ctx_.permissions.is_global_admin:
         right.insert(0, dmc.Badge("Global admin", color="orange", variant="light", size="sm"))
@@ -151,7 +151,7 @@ def render(ctx_: AppContext, function_name: str) -> dmc.Stack:
     if role.can_admin:
         blocks += [dmc.Divider(my="md"), _admin(ctx_, function)]
     if ctx_.permissions.can_delete:
-        blocks.append(_danger_zone(function, len(forms) + len(files)))
+        blocks.append(_danger_zone(function, len(forms), len(files)))
     return dmc.Stack(blocks, gap="md")
 
 
@@ -549,8 +549,9 @@ def _admin(ctx_: AppContext, function: FunctionDef) -> dmc.Stack:
     return dmc.Stack([form_block, grants_block], gap="md")
 
 
-def _danger_zone(function: FunctionDef, n_forms: int) -> dmc.Paper:
+def _danger_zone(function: FunctionDef, n_forms: int, n_files: int) -> dmc.Paper:
     """Deleting a function (dropping its schema) is a global-admin action and needs an empty function."""
+    n_objects = n_forms + n_files
     return dmc.Paper(
         dmc.Stack(
             [
@@ -558,8 +559,8 @@ def _danger_zone(function: FunctionDef, n_forms: int) -> dmc.Paper:
                 dmc.Text(
                     f"Delete the function '{function.title}' (schema {function.name}). "
                     + (
-                        f"It still holds {n_forms} form(s): delete or migrate them first."
-                        if n_forms
+                        f"It still holds {n_forms} form(s) and {n_files} file(s): delete or migrate them first."
+                        if n_objects
                         else "Its grants and registry entry are removed as well. This cannot be undone."
                     ),
                     size="sm",
@@ -575,7 +576,7 @@ def _danger_zone(function: FunctionDef, n_forms: int) -> dmc.Paper:
                             "Delete function",
                             id=ids.DROP_FUNCTION_SUBMIT,
                             color="red",
-                            disabled=bool(n_forms),
+                            disabled=bool(n_objects),
                             leftSection=icon("tabler:trash-x"),
                         ),
                     ],
@@ -733,7 +734,7 @@ def register(app) -> None:
         role = c.role_of(function)
         return (
             form_cards(function, c.backend.list_forms(function), text, role),
-            file_cards(function, c.backend.list_files(function), text, role),
+            file_cards(function, c.forms.list_files(function), text, role),
         )
 
     @app.callback(
