@@ -36,7 +36,9 @@ Streamlit implementation is kept in git history).
 ```
 app.py                      Dash entrypoint: gunicorn in production, dev server with --dev
 app.yaml                    Databricks Apps runtime config
-databricks.yml, resources/  Databricks Asset Bundle (catalog, domain schemas + grants, app)
+databricks.yml, resources/  Databricks Asset Bundle (catalog, function schemas + grants, app)
+assets/                     styles.css, color_scheme.js, navbar_resize.js, vendored Tabler icons (icons/, icons.css)
+scripts/                    seed_demo.py (local demo), vendor_icons.py, screenshots.py
 src/rdm/
   config.py                 Settings from environment (.env for local)
   models.py                 DataType, ColumnDef, FormDef, FunctionDef, DomainDef, User, Role, ChangeSet, ...
@@ -51,8 +53,8 @@ src/rdm/
   services/draft.py             Row-id keyed draft -> ChangeSet; bulk update and restore helpers
   services/files.py             Upload checks and local preview for files
   services/excel_import.py      Excel/CSV parsing, type inference, column sanitising
-  ui/                       Dash shell, routing, pages, AG Grid configuration
-tests/                      Unit, backend contract and Dash server tests
+  ui/                       Dash shell, routing, pages, AG Grid configuration, in-app help
+tests/                      Unit, backend contract, Dash server and browser tests
 ```
 
 ## 3. Domain model
@@ -200,6 +202,8 @@ Design rules:
    conflicts as an alert; the grid reloads.
 5. Viewers get the same grid read-only; editor controls are rendered hidden for them (Dash
    callbacks need their components present) and the service layer enforces the role again.
+   Row selection uses AG Grid's object API (`rowSelection` in `grid.grid_options`): editors
+   get `multiRow` with a header checkbox, viewers `singleRow` (to open a row), never on click.
 
 6. **Bulk update** (FR-22): the selected rows and one column/value pair go through
    `bulk_value` (coercion, required, allowed values) and `Draft.set_many`; the grid is patched
@@ -261,7 +265,7 @@ DuckDB is the local *runtime* backend; it is deliberately not the only truth:
 | Unit | models, coercion, draft/change-set building, validation, type inference, identifier rules, Databricks SQL generation against a fake connection | every commit, milliseconds |
 | Contract | `DatabaseBackend` behaviour against DuckDB (create/alter, read, save, conflicts, history, permissions) | every commit |
 | Server | Dash app boots, layout and callbacks resolve (Flask test client) | every commit |
-| Browser | Playwright: edit/add/delete/save, bulk update, item form + restore, tab round trip, function and domains pages, persona switch | on demand (`scripts` in the session; add to CI when a browser is available) |
+| Browser | Playwright + Chromium (`tests/test_browser.py`): colour scheme follows the system and the header control, icons render from local files, editor multi-row selection and staged delete, viewer single selection and read-only item form | every commit (CI installs Chromium; the tests skip when no browser is available) |
 | Real | `databricks apps run-local` against a dev workspace; the contract suite against a dev catalog with `RDM_TEST_DATABRICKS=1` (to be wired when a workspace is available) | before release |
 
 Known DuckDB/Databricks divergences (covered by the Databricks SQL-generation tests rather
@@ -280,6 +284,14 @@ timestamp semantics (naive vs session-zone), MERGE metrics, tags/properties, CDF
 * Catalog confinement and no-cascade deletes enforced in the backend itself (§11).
 * Serverless SQL warehouse recommended (cold-start latency dominates UX otherwise).
 * Everything (catalog, schemas, grants, app) is declared in the bundle.
+* No runtime dependency on the public internet from the browser: Mantine and AG Grid assets
+  are bundled by their Dash packages and icons are vendored Tabler SVGs (`assets/icons/`,
+  `scripts/vendor_icons.py`), so the app renders fully inside locked-down networks.
+* Colour scheme: the `MantineProvider` runs with `defaultColorScheme="auto"`; the header
+  control (System / Light / Dark) is persisted by Dash and applied by
+  `assets/color_scheme.js`, which sets `forceColorScheme` on the provider and
+  `data-ag-theme-mode` on `<html>` for the AG Grid theme. Custom styles use Mantine tokens
+  or carry an explicit dark variant.
 
 ## 11. Security review: deletions and catalog confinement
 

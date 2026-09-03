@@ -8,7 +8,7 @@ from urllib.parse import unquote
 
 import dash
 import dash_mantine_components as dmc
-from dash import Input, Output, ctx, no_update
+from dash import ClientsideFunction, Input, Output, ctx, no_update
 
 from rdm.backend.base import BackendError, PermissionDenied
 from rdm.config import APP_TITLE
@@ -81,6 +81,14 @@ def create_app() -> dash.Dash:
 
 
 def register_shell_callbacks(app: dash.Dash) -> None:
+    # System / Light / Dark: the browser applies the choice (assets/color_scheme.js) and tells the
+    # MantineProvider whether a scheme is forced (None = follow the system).
+    app.clientside_callback(
+        ClientsideFunction(namespace="rdm", function_name="applyColorScheme"),
+        Output(ids.THEME_PROVIDER, "forceColorScheme"),
+        Input(ids.COLOR_SCHEME, "value"),
+    )
+
     @app.callback(Output(ids.PERSONA, "data"), Input(ids.PERSONA_SELECT, "value"), prevent_initial_call=True)
     def switch_persona(value):
         return value

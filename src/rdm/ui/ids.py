@@ -2,6 +2,8 @@
 
 # shell
 URL = "url"
+THEME_PROVIDER = "mantine-provider"
+COLOR_SCHEME = "color-scheme"  # System / Light / Dark control (assets/color_scheme.js)
 PERSONA = "persona-store"
 PERSONA_SELECT = "persona-select"
 NAV_VERSION = "nav-version"

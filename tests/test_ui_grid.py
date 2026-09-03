@@ -31,10 +31,30 @@ def form() -> FormDef:
     )
 
 
-def test_history_column_defs_selectable():
-    defs = grid.history_column_defs(form(), selectable=True)
-    assert defs[0]["field"] == "version" and defs[0]["checkboxSelection"] is True
-    assert not grid.history_column_defs(form())[0]["checkboxSelection"]
+def test_history_grid_options_selectable_only_for_editors():
+    editor = grid.history_grid_options(selectable=True)
+    assert editor["rowSelection"] == {
+        "mode": "singleRow",
+        "checkboxes": True,
+        "headerCheckbox": False,
+        "enableClickSelection": False,
+    }
+    assert "rowSelection" not in grid.history_grid_options(selectable=False)
+    assert grid.history_grid_options(selectable=False, quick_filter="abc")["quickFilterText"] == "abc"
+    assert grid.history_column_defs(form())[0]["field"] == "version"
+
+
+def test_grid_options_selection_per_role():
+    # editors tick many rows (and all at once); viewers tick one row to open it
+    assert grid.grid_options(True)["rowSelection"] == {
+        "mode": "multiRow",
+        "checkboxes": True,
+        "headerCheckbox": True,
+        "enableClickSelection": False,
+    }
+    assert grid.grid_options(False)["rowSelection"]["mode"] == "singleRow"
+    assert grid.grid_options(False)["rowSelection"]["headerCheckbox"] is False
+    assert grid.grid_options(False)["enableCellTextSelection"]
 
 
 def test_column_defs_types_editors_and_hidden_columns():
@@ -44,11 +64,7 @@ def test_column_defs_types_editors_and_hidden_columns():
     assert fields[:4] == ["_created_at", "_created_by", "_updated_at", "_updated_by"]
     assert all(d["hide"] and not d["editable"] for d in defs[:4])
     by = {d["field"]: d for d in defs}
-    assert (
-        by["code"]["pinned"] == "left"
-        and by["code"]["checkboxSelection"]
-        and by["code"]["headerCheckboxSelection"]
-    )
+    assert by["code"]["pinned"] == "left" and by["code"]["headerClass"] == "rdm-key-header"
     assert by["category"]["cellEditor"] == "agSelectCellEditor" and by["category"]["cellEditorParams"][
         "values"
     ] == ["A", "B"]
@@ -67,10 +83,6 @@ def test_column_defs_types_editors_and_hidden_columns():
 def test_column_defs_read_only_and_audit_visible():
     defs = grid.column_defs(form(), editable=False, show_audit=True)
     assert all(not d["editable"] for d in defs)
-    by = {d["field"]: d for d in defs}
-    # viewers can still tick one row to open it in the item form, but not select all
-    assert by["code"]["checkboxSelection"] and not by["code"]["headerCheckboxSelection"]
-    assert sum(1 for d in defs if d.get("checkboxSelection")) == 1
     assert not any(d.get("hide") for d in defs if d["field"].startswith("_"))
 
 

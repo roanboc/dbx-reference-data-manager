@@ -10,6 +10,8 @@
 * Click a **domain** heading (sidebar or home page) for the domain overview: its functions
   with their forms and files, and who owns what.
 * Long names? Drag the right edge of the sidebar to widen it (double-click the edge to reset).
+* Prefer a dark screen? The control at the top right switches between **System** (follows
+  your operating system), **Light** and **Dark**; the choice is remembered in your browser.
 * Every form and file has its own address, so you can bookmark it or paste the link in an
   email. The **Databricks path** next to the title (and the query snippets in **Settings**)
   copy with one click for use in notebooks and SQL queries.

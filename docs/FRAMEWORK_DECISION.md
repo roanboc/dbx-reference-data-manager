@@ -53,4 +53,5 @@ Consequences:
 * The app runs under gunicorn (`app.yaml`), which allows several workers because no
   server-side widget state is kept between requests; caches are per process.
 * Local development keeps DuckDB and the persona switcher; callbacks are unit-tested by
-  calling them directly, and Playwright drives the browser for smoke tests.
+  calling them directly, and Playwright drives Chromium for the smoke tests in
+  `tests/test_browser.py`.

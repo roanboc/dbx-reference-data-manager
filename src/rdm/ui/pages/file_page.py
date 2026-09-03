@@ -36,7 +36,6 @@ from rdm.ui.context import AppContext, get_context, invalidate_metadata
 from rdm.ui.layout import function_href
 
 log = logging.getLogger(__name__)
-GRID_THEME = "ag-theme-quartz"
 PREVIEW_LIMIT = 200
 CHANGE_LABELS = {"upload": "Uploaded", "replace": "Replaced", "delete": "Deleted"}
 
@@ -168,7 +167,7 @@ def preview_panel(ctx_: AppContext, file: FileDef) -> Any:
                 defaultColDef={"sortable": True, "filter": True, "resizable": True},
                 dashGridOptions={"rowHeight": 32, "enableCellTextSelection": True, "ensureDomOrder": True},
                 columnSize="autoSize",
-                className=GRID_THEME,
+                className=g.GRID_CLASS,
                 style={"height": "58vh", "width": "100%"},
             ),
         ],
@@ -385,7 +384,7 @@ def _settings_tab(file: FileDef, can_delete: bool, dbx_path: str, settings) -> d
                 withBorder=True,
                 p="md",
                 radius="md",
-                style={"borderColor": "#fa5252"},
+                style={"borderColor": "var(--mantine-color-red-filled)"},
             )
         )
     else:
@@ -526,7 +525,7 @@ def register(app) -> None:
                     columnDefs=g.frame_column_defs(frame),
                     defaultColDef={"resizable": True},
                     columnSize="autoSize",
-                    className=GRID_THEME,
+                    className=g.GRID_CLASS,
                     style={"height": "240px"},
                 ),
             ],

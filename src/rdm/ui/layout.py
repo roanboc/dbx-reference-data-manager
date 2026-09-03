@@ -53,9 +53,39 @@ def new_file_href(function: str | None = None) -> str:
     return f"{NEW_FILE_HREF}/{quote(function)}" if function else NEW_FILE_HREF
 
 
+COLOR_SCHEMES = [
+    ("auto", "System", "tabler:device-desktop"),
+    ("light", "Light", "tabler:sun"),
+    ("dark", "Dark", "tabler:moon"),
+]
+
+
+def color_scheme_control() -> dmc.SegmentedControl:
+    """System / Light / Dark. Remembered per browser; applied by assets/color_scheme.js."""
+    return dmc.SegmentedControl(
+        id=ids.COLOR_SCHEME,
+        value="auto",
+        data=[
+            {
+                "value": value,
+                "label": dmc.Tooltip(
+                    dmc.Center(icon(name, 16)), label=f"{label} colour scheme", withArrow=True
+                ),
+            }
+            for value, label, name in COLOR_SCHEMES
+        ],
+        size="xs",
+        persistence=True,
+        persistence_type="local",
+        **{"aria-label": "Colour scheme"},
+    )
+
+
 def shell() -> dmc.MantineProvider:
     return dmc.MantineProvider(
+        id=ids.THEME_PROVIDER,
         theme=THEME,
+        defaultColorScheme="auto",
         children=[
             dcc.Location(id=ids.URL, refresh=False),
             dcc.Store(id=ids.PERSONA, storage_type="session"),
@@ -64,7 +94,17 @@ def shell() -> dmc.MantineProvider:
             dmc.NotificationContainer(id=ids.NOTIFY, position="top-right"),
             dmc.AppShell(
                 [
-                    dmc.AppShellHeader(html.Div(id="header-content"), px="md"),
+                    dmc.AppShellHeader(
+                        dmc.Group(
+                            [
+                                html.Div(id="header-content", style={"flex": 1, "minWidth": 0}),
+                                color_scheme_control(),
+                            ],
+                            gap="sm",
+                            wrap="nowrap",
+                        ),
+                        px="md",
+                    ),
                     dmc.AppShellNavbar(
                         id="navbar",
                         children=[
@@ -115,9 +155,14 @@ def header(ctx: AppContext, persona: str | None) -> dmc.Group:
         [
             dmc.ThemeIcon(icon("tabler:table-options", 20), size="lg", radius="md", variant="light"),
             dmc.Title(APP_TITLE, order=4),
-            dmc.Badge(ctx.backend.describe(), variant="outline", color="gray", size="sm"),
+            dmc.Tooltip(
+                dmc.Badge(ctx.backend.name, variant="outline", color="gray", size="sm"),
+                label=ctx.backend.describe(),
+                withArrow=True,
+            ),
         ],
         gap="sm",
+        wrap="nowrap",
     )
     help_button = link_button(
         "Help", "/help", variant="subtle", size="sm", leftSection=icon("tabler:help-circle")
@@ -142,6 +187,7 @@ def header(ctx: AppContext, persona: str | None) -> dmc.Group:
                 ),
             ],
             gap="xs",
+            wrap="nowrap",
         )
     else:
         mode = "queries run as you" if ctx.auth.access_token() else "queries run as the app service principal"
@@ -156,8 +202,9 @@ def header(ctx: AppContext, persona: str | None) -> dmc.Group:
                 ),
             ],
             gap="xs",
+            wrap="nowrap",
         )
-    return dmc.Group([left, right], justify="space-between", h=56)
+    return dmc.Group([left, right], justify="space-between", wrap="nowrap", h=56)
 
 
 def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str | None) -> dmc.Stack:

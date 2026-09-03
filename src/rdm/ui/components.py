@@ -7,7 +7,6 @@ from typing import Any
 
 import dash_mantine_components as dmc
 from dash import dcc, html
-from dash_iconify import DashIconify
 
 from rdm.backend.base import BackendError
 from rdm.models import GLOBAL_ADMIN_LABEL, DataType, FormDef, Role, ValidationIssue
@@ -31,8 +30,19 @@ TYPE_ICONS = {
 }
 
 
-def icon(name: str, size: int = 16, **kwargs: Any) -> DashIconify:
-    return DashIconify(icon=name, width=size, height=size, **kwargs)
+def icon(name: str, size: int = 16, color: str | None = None) -> html.Span:
+    """A Tabler icon (``tabler:<name>``) rendered from the vendored SVG in ``assets/icons/``.
+
+    Icons are painted with ``currentColor`` through a CSS mask (``assets/styles.css``), so they
+    follow the surrounding text and the colour scheme; ``color`` names a Mantine colour.
+    Add new names with ``scripts/vendor_icons.py``; ``tests/test_ui_icons.py`` checks the set.
+    """
+    style: dict[str, Any] = {"width": f"{size}px", "height": f"{size}px"}
+    if color:
+        style["color"] = f"var(--mantine-color-{color}-filled)"
+    return html.Span(
+        className=f"rdm-icon rdm-icon-{name.removeprefix('tabler:')}", style=style, **{"aria-hidden": "true"}
+    )
 
 
 def role_badge(role: Role, size: str = "sm") -> dmc.Badge:

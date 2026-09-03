@@ -19,7 +19,6 @@ from rdm.ui.context import AppContext, get_context, invalidate_metadata, navigat
 from rdm.ui.layout import form_href
 
 log = logging.getLogger(__name__)
-GRID_THEME = "ag-theme-quartz"
 STEPS = [
     ("Source", "Upload a file or start from scratch"),
     ("Columns", "Confirm names, types and rules"),
@@ -213,7 +212,7 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
                         columnDefs=[{"field": str(c), "headerName": str(c)} for c in parsed.raw.columns],
                         defaultColDef={"resizable": True},
                         columnSize="autoSize",
-                        className=GRID_THEME,
+                        className=g.GRID_CLASS,
                         style={"height": "280px"},
                     ),
                     *[dmc.Alert(w, color="yellow", variant="light") for w in parsed.warnings],
@@ -432,11 +431,9 @@ def step_columns(state: dict[str, Any]) -> dmc.Stack:
                     "rowHeight": 34,
                     "stopEditingWhenCellsLoseFocus": True,
                     "singleClickEdit": True,
-                    "rowSelection": "multiple",
-                    "suppressRowClickSelection": False,
                 },
                 columnSize="responsiveSizeToFit",
-                className=GRID_THEME,
+                className=g.GRID_CLASS,
                 style={"height": f"{min(140 + 34 * max(len(rows), 3), 520)}px"},
             ),
             dmc.Group(
@@ -674,7 +671,7 @@ def step_review(state: dict[str, Any]) -> dmc.Stack:
             ],
             defaultColDef={"resizable": True, "editable": False},
             columnSize="responsiveSizeToFit",
-            className=GRID_THEME,
+            className=g.GRID_CLASS,
             style={"height": f"{min(120 + 34 * max(len(columns), 2), 400)}px"},
         )
     )
@@ -705,7 +702,7 @@ def step_review(state: dict[str, Any]) -> dmc.Stack:
                 columnDefs=[{"field": c.name, "headerName": humanize(c.name)} for c in columns],
                 defaultColDef={"resizable": True},
                 columnSize="autoSize",
-                className=GRID_THEME,
+                className=g.GRID_CLASS,
                 style={"height": "260px"},
             )
         )

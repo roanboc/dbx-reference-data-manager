@@ -13,9 +13,6 @@ data/*.duckdb.wal
 .env
 .databricks/
 
-# Streamlit
-.streamlit/secrets.toml
-
 # Test artefacts
 test-results/
-screenshots/
+/screenshots/

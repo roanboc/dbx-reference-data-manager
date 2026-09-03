@@ -162,6 +162,8 @@ Status: **done** = implemented and tested; **planned** = agreed, not built.
 | FR-34 | No action in the app can delete anything outside the `_reference_data` catalog or more than one object at a time: deletes are reserved to global admins, need a typed confirmation, never cascade, and the Databricks backend refuses any statement or file path that leaves the catalog (see DESIGN.md §11). | done |
 | FR-35 | Help opens on an **About** tab written for anyone in the organisation: what reference data is, the domain > function > objects (forms, files) tree as a diagram, the pain it removes (many places, many versions, no trail, re-keying), the benefits (centralised, governed, fresh), what it is and is not for (slowly changing data in batches, not transactional/high-frequency needs) and whom to contact for other use cases (`RDM_ADMIN_CONTACT`). | done |
 | FR-36 | The sidebar can be widened or narrowed by dragging its edge (double-click resets); the width is remembered per browser. | done |
+| FR-37 | Light and dark colour schemes: the app follows the operating system by default (light when it cannot be determined) and offers a System / Light / Dark control in the header; the choice is remembered per browser. | done |
+| FR-38 | The app renders completely without internet access from the browser (icons and styles are served by the app), so it works in locked-down networks. | done |
 
 Removed requirements (decided in review, see §1 *Out of scope*): FR-20 effective-dating
 columns, FR-21 lookup columns and dependent dropdowns, FR-23 approval step with

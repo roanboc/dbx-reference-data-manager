@@ -31,8 +31,6 @@ from rdm.ui.components import (
 from rdm.ui.context import AppContext, get_context, invalidate_metadata, navigation
 from rdm.ui.layout import domain_href, file_href, form_href, function_href, new_form_href
 
-GRID_THEME = "ag-theme-quartz"
-
 GRANTABLE = [Role.VIEWER, Role.EDITOR, Role.ADMIN]
 
 
@@ -357,7 +355,7 @@ def upload_preview(name: str, data: bytes) -> dmc.Stack:
                 columnDefs=g.frame_column_defs(frame),
                 defaultColDef={"resizable": True},
                 columnSize="autoSize",
-                className=GRID_THEME,
+                className=g.GRID_CLASS,
                 style={"height": "240px"},
             ),
         ],
@@ -589,7 +587,7 @@ def _danger_zone(function: FunctionDef, n_forms: int) -> dmc.Paper:
         withBorder=True,
         p="md",
         radius="md",
-        style={"borderColor": "#fa5252"},
+        style={"borderColor": "var(--mantine-color-red-filled)"},
     )
 
 

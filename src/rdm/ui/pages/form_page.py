@@ -56,7 +56,6 @@ from rdm.ui.layout import function_href
 
 log = logging.getLogger(__name__)
 TYPE_OPTIONS = [{"value": t.value, "label": f"{t.label} ({t.value})"} for t in DataType.editable_types()]
-GRID_THEME = "ag-theme-quartz"
 CHANGE_LABELS = {"insert": "Added", "update": "Edited", "delete": "Deleted"}
 BOOL_OPTIONS = [{"value": "true", "label": "Yes"}, {"value": "false", "label": "No"}]
 
@@ -251,7 +250,7 @@ def _data_tab(ctx_: AppContext, form: FormDef, role: Role, editable: bool) -> dm
                 dashGridOptions=g.grid_options(editable),
                 rowClassRules=g.row_class_rules(),
                 columnSize="responsiveSizeToFit" if n_cols <= 6 else "autoSize",
-                className=GRID_THEME,
+                className=g.GRID_CLASS,
                 style={"height": "62vh", "width": "100%"},
             ),
             html.Div(id=ids.PENDING),
@@ -494,7 +493,7 @@ def _settings_tab(form: FormDef, can_delete: bool, table_path: str, is_databrick
                 withBorder=True,
                 p="md",
                 radius="md",
-                style={"borderColor": "#fa5252"},
+                style={"borderColor": "var(--mantine-color-red-filled)"},
             )
         )
     else:
@@ -922,16 +921,11 @@ def history_panel(ctx_: AppContext, form: FormDef, editable: bool) -> Any:
             dag.AgGrid(
                 id=ids.history_grid_id(form.name),
                 rowData=rows,
-                columnDefs=g.history_column_defs(form, selectable=editable),
+                columnDefs=g.history_column_defs(form),
                 defaultColDef={"sortable": True, "filter": True, "resizable": True},
-                dashGridOptions={
-                    "rowHeight": 32,
-                    "enableCellTextSelection": True,
-                    "rowSelection": "single",
-                    "suppressRowClickSelection": True,
-                },
+                dashGridOptions=g.history_grid_options(selectable=editable),
                 columnSize="autoSize",
-                className=GRID_THEME,
+                className=g.GRID_CLASS,
                 style={"height": "58vh"},
             ),
         ],
@@ -1007,7 +1001,7 @@ def schema_panel(ctx_: AppContext, form: FormDef, role: Role) -> Any:
             defaultColDef={"resizable": True, "sortable": False},
             dashGridOptions={"rowHeight": 34, "stopEditingWhenCellsLoseFocus": True, "singleClickEdit": True},
             columnSize="responsiveSizeToFit",
-            className=GRID_THEME,
+            className=g.GRID_CLASS,
             style={"height": f"{min(120 + 34 * len(rows), 520)}px"},
         ),
     ]
@@ -1960,7 +1954,7 @@ def register(app) -> None:
                 columnDefs=[{"field": c_.name, "headerName": humanize(c_.name)} for c_ in form.user_columns],
                 defaultColDef={"resizable": True},
                 columnSize="autoSize",
-                className=GRID_THEME,
+                className=g.GRID_CLASS,
                 style={"height": "300px"},
             )
         )
@@ -2021,13 +2015,8 @@ def register(app) -> None:
     @app.callback(
         Output({"type": "history-grid", "form": MATCH}, "dashGridOptions"),
         Input({"type": "history-filter", "form": MATCH}, "value"),
+        State({"type": "history-grid", "form": MATCH}, "dashGridOptions"),
         prevent_initial_call=True,
     )
-    def filter_history(text):
-        return {
-            "rowHeight": 32,
-            "enableCellTextSelection": True,
-            "rowSelection": "single",
-            "suppressRowClickSelection": True,
-            "quickFilterText": text or "",
-        }
+    def filter_history(text, options):
+        return {**(options or {}), "quickFilterText": text or ""}

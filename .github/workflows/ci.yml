@@ -1,6 +1,6 @@
 # Continuous integration and production deployment.
 #
-#   test         every push and pull request: ruff + pytest (unit, contract on DuckDB, AppTest)
+#   test         every push and pull request: ruff + pytest (unit, contract on DuckDB, Dash server, browser)
 #   deploy-prod  manual (workflow_dispatch) or push to main, after `test` passes:
 #                `databricks bundle validate/deploy -t prod`
 #
@@ -45,9 +45,12 @@ jobs:
       - name: Ruff
         run: ruff check .
 
-      # Playwright screenshot tests are on-demand (DESIGN.md §9) and need browsers; they are
-      # expected to skip when no browser is installed. The Databricks contract tests run only
-      # with RDM_TEST_DATABRICKS=1 and workspace credentials (docs/DEPLOYMENT.md §7).
+      # Chromium for the browser smoke tests (tests/test_browser.py); they skip without it.
+      - name: Install Chromium for Playwright
+        run: python -m playwright install --with-deps chromium
+
+      # The Databricks contract tests run only with RDM_TEST_DATABRICKS=1 and workspace
+      # credentials (docs/DEPLOYMENT.md §7).
       - name: Pytest
         run: python -m pytest
 

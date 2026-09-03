@@ -26,6 +26,7 @@ AUDIT_LABELS = {
     "_updated_at": "Modified",
     "_updated_by": "Modified by",
 }
+GRID_CLASS = "rdm-grid"  # CSS hook for the app's grid tweaks (assets/styles.css); AG Grid themes itself
 INVALID_CLASS = "rdm-invalid"
 NEW_ROW_CLASS = "rdm-new-row"
 INVALID_PREFIX = "_bad_"  # per-column boolean flags on a row: simple expressions the grid can evaluate
@@ -89,7 +90,6 @@ def column_defs(
 ) -> list[dict[str, Any]]:
     """AG Grid ``columnDefs`` for a form. Types drive editors; descriptions become tooltips."""
     defs: list[dict[str, Any]] = []
-    first_user_column = True
     for c in form.columns:
         if c.name in (ID_COLUMN, VERSION_COLUMN):
             continue
@@ -117,12 +117,6 @@ def column_defs(
         if c.is_key:
             d["pinned"] = "left"
             d["headerClass"] = "rdm-key-header"
-        if first_user_column:
-            # Row selection drives "Delete selected", "Bulk update" and the item form; viewers
-            # can select a single row (to open it), editors many.
-            d["checkboxSelection"] = True
-            d["headerCheckboxSelection"] = editable
-            first_user_column = False
         t = c.data_type
         if t is DataType.STRING and c.options:
             d["cellEditor"] = "agSelectCellEditor"
@@ -182,10 +176,25 @@ def default_col_def(editable: bool) -> dict[str, Any]:
     }
 
 
-def grid_options(editable: bool) -> dict[str, Any]:
+def row_selection(multiple: bool, header_checkbox: bool = False) -> dict[str, Any]:
+    """AG Grid ``rowSelection`` (object form): a checkbox column, no selection on row click."""
     return {
-        "rowSelection": "multiple" if editable else "single",
-        "suppressRowClickSelection": True,
+        "mode": "multiRow" if multiple else "singleRow",
+        "checkboxes": True,
+        "headerCheckbox": header_checkbox,
+        "enableClickSelection": False,
+    }
+
+
+SELECTION_COLUMN = {"pinned": "left", "width": 44, "resizable": False}
+
+
+def grid_options(editable: bool) -> dict[str, Any]:
+    # Row selection drives "Delete selected", "Bulk update" and the item form; viewers can
+    # select a single row (to open it), editors many.
+    return {
+        "rowSelection": row_selection(multiple=editable, header_checkbox=editable),
+        "selectionColumnDef": SELECTION_COLUMN,
         "undoRedoCellEditing": True,
         "undoRedoCellEditingLimit": 50,
         "stopEditingWhenCellsLoseFocus": True,
@@ -206,15 +215,20 @@ def row_class_rules() -> dict[str, str]:
     return {NEW_ROW_CLASS: f"params.data.{NEW_FLAG}"}
 
 
-def history_column_defs(form: FormDef, selectable: bool = False) -> list[dict[str, Any]]:
+def history_grid_options(selectable: bool, quick_filter: str | None = None) -> dict[str, Any]:
+    """Options of the History tab grid (a single entry can be ticked and restored by editors)."""
+    options: dict[str, Any] = {"rowHeight": 32, "enableCellTextSelection": True}
+    if selectable:
+        options["rowSelection"] = row_selection(multiple=False)
+        options["selectionColumnDef"] = SELECTION_COLUMN
+    if quick_filter is not None:
+        options["quickFilterText"] = quick_filter
+    return options
+
+
+def history_column_defs(form: FormDef) -> list[dict[str, Any]]:
     defs = [
-        {
-            "field": "version",
-            "headerName": "#",
-            "maxWidth": 90,
-            "type": "numericColumn",
-            "checkboxSelection": selectable,
-        },
+        {"field": "version", "headerName": "#", "maxWidth": 90, "type": "numericColumn"},
         {"field": "changed_at", "headerName": "When", "minWidth": 160},
         {"field": "changed_by", "headerName": "By", "minWidth": 160},
         {"field": "change_type", "headerName": "Change", "maxWidth": 110},

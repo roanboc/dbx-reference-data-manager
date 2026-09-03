@@ -209,7 +209,7 @@ def render(ctx_: AppContext) -> dmc.Stack:
                 ),
                 p="md",
                 radius="md",
-                bg="var(--mantine-color-indigo-0)",
+                bg="var(--mantine-primary-color-light)",
             ),
             _section(
                 "How the data is organised",
