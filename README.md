@@ -18,6 +18,12 @@ definitions. The catalog is `_reference_data`.
 * **Files**: CSV/Parquet datasets (thousands to millions of rows) kept as files in a volume
   per function, with preview, inferred columns, download, replace and upload history; files
   landed by pipelines appear automatically.
+* **Domain overview**: one page per domain with its functions, forms and files; every form
+  and file shows its Databricks path (`catalog`.`schema`.`object`, volume path) and copy-ready
+  query snippets.
+* **Safe deletes**: only global admins delete, with a typed confirmation; nothing cascades and
+  the Databricks backend refuses any statement or file path outside the `_reference_data`
+  catalog (docs/DESIGN.md §11).
 * **Roles**: Viewer, Editor and Function admin per function, plus Global admin at catalog
   level (creates functions, maintains the domain list, deletes functions and forms, sees the
   administration guide). Resolved from Unity Catalog privileges; locally from a mock persona

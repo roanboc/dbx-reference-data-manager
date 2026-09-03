@@ -16,12 +16,14 @@ import dash_mantine_components as dmc
 from dash import Input, Output, State, dcc, html, no_update
 
 from rdm.backend.base import BackendError, PermissionDenied
-from rdm.models import FileDef, Role
+from rdm.models import FileDef, Role, qualified_name, volume_file_path
 from rdm.services.files import FileError, check_upload, human_size, preview_bytes
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
 from rdm.ui.components import (
     TYPE_ICONS,
+    copy_code,
+    databricks_path_block,
     empty_state,
     error_alert,
     icon,
@@ -46,6 +48,7 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
         function_title = ctx_.backend.get_function(function).title
     except BackendError:
         function_title = function
+    dbx_path = volume_file_path(ctx_.settings.catalog, function, name)
     header = page_title(
         file.title,
         file.description or None,
@@ -61,8 +64,10 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
                     gap="xs",
                 ),
                 dmc.Text(_meta(file), size="xs", c="dimmed", ta="right"),
+                dmc.Group([copy_code(dbx_path)], justify="flex-end"),
             ],
             gap=4,
+            align="flex-end",
         ),
     )
     toolbar = [
@@ -99,7 +104,11 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
     if role.can_admin:
         tabs.append(dmc.TabsTab("Settings", value="settings", leftSection=icon("tabler:settings")))
         panels.append(
-            dmc.TabsPanel(_settings_tab(file, ctx_.permissions.can_delete), value="settings", pt="sm")
+            dmc.TabsPanel(
+                _settings_tab(file, ctx_.permissions.can_delete, dbx_path, ctx_.settings),
+                value="settings",
+                pt="sm",
+            )
         )
     notes = []
     if not file.registered:
@@ -271,8 +280,24 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
-def _settings_tab(file: FileDef, can_delete: bool) -> dmc.Stack:
+def _settings_tab(file: FileDef, can_delete: bool, dbx_path: str, settings) -> dmc.Stack:
+    reader = (
+        f"read_files('{dbx_path}', format => 'parquet')"
+        if file.format == "parquet"
+        else f"read_files('{dbx_path}', format => 'csv', header => true)"
+    )
     blocks: list[Any] = [
+        databricks_path_block(
+            "Databricks path",
+            [
+                ("Volume", qualified_name(settings.catalog, file.function, "_files")),
+                ("File path", dbx_path),
+                ("Query", f"SELECT * FROM {reader};"),
+            ],
+            "Copy these into a notebook, a query or a pipeline. The catalog is the one this app is configured "
+            "with"
+            + ("." if settings.is_databricks else " (locally the file is stored on disk, see Storage)."),
+        ),
         dmc.Paper(
             dmc.Stack(
                 [

@@ -33,6 +33,10 @@ def file_href(function: str, name: str) -> str:
     return f"/file/{quote(function)}/{quote(name)}"
 
 
+def domain_href(domain: str) -> str:
+    return f"/dm/{quote(domain)}"
+
+
 DOMAINS_HREF = "/domains"
 NEW_FUNCTION_HREF = "/new-function"
 NEW_FORM_HREF = "/new-form"
@@ -240,16 +244,14 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
         sections.append(
             dmc.Stack(
                 [
-                    dmc.Group(
-                        [
-                            icon(
-                                "tabler:sitemap" if not group.is_unassigned else "tabler:folder-question", 14
-                            ),
-                            dmc.Text(group.domain.title, size="xs", fw=700, tt="uppercase", c="dimmed"),
-                        ],
-                        gap=6,
-                        px=4,
-                    ),
+                    dmc.Anchor(
+                        _domain_heading(group),
+                        href=domain_href(group.domain.name),
+                        underline="never",
+                        c="inherit",
+                    )
+                    if not group.is_unassigned
+                    else _domain_heading(group),
                     dmc.Accordion(
                         accordion_items,
                         multiple=True,
@@ -306,6 +308,17 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
         access.append(global_admin_badge(size="xs"))
     blocks.append(dmc.Group(access, gap=6))
     return dmc.Stack(blocks, gap="sm", h="100%")
+
+
+def _domain_heading(group: NavDomain) -> dmc.Group:
+    return dmc.Group(
+        [
+            icon("tabler:sitemap" if not group.is_unassigned else "tabler:folder-question", 14),
+            dmc.Text(group.domain.title, size="xs", fw=700, tt="uppercase", c="dimmed"),
+        ],
+        gap=6,
+        px=4,
+    )
 
 
 def _current_function(pathname: str) -> str | None:

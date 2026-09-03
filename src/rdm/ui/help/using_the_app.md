@@ -7,7 +7,11 @@
   for a grid: you preview its first rows, download it and, as an editor, replace it as a whole.
 * Your role in each function is shown as a badge: **Viewer** (read only), **Editor** (change
   rows) or **Function admin** (also create forms and change their definition).
-* Every form has its own address, so you can bookmark it or paste the link in an email.
+* Click a **domain** heading (sidebar or home page) for the domain overview: its functions
+  with their forms and files, and who owns what.
+* Every form and file has its own address, so you can bookmark it or paste the link in an
+  email. The **Databricks path** next to the title (and the query snippets in **Settings**)
+  copy with one click for use in notebooks and SQL queries.
 
 ## Editing rows (Editors)
 

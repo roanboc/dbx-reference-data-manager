@@ -66,6 +66,8 @@ def test_page_callback_renders_home_for_admin(client):
         ("/new-function", "admin", "New function"),
         ("/fn/nowhere", "admin", "Access denied"),
         ("/file/finance__cost_management/nothing.csv", "admin", "Access denied"),
+        ("/dm/finance", "viewer", "Domain 'finance' does not exist"),  # unseeded database
+        ("/dm/ghost", "admin", "Not found"),
     ],
 )
 def test_page_callback_routes(client, pathname, persona, expected):

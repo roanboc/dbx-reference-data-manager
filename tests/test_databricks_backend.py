@@ -9,7 +9,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
-from rdm.backend.base import BackendError, NotFoundError
+from rdm.backend.base import BackendError, ConflictError, NotFoundError
 from rdm.backend.databricks_backend import DatabricksBackend
 from rdm.models import (
     ID_COLUMN,
@@ -115,6 +115,8 @@ class FakeFiles:
 
     def upload(self, path, contents, overwrite=False):
         self.calls.append(("upload", path, overwrite))
+        if path in self.store and not overwrite:
+            raise RuntimeError("ALREADY_EXISTS: the file exists and overwrite is false")
         self.store[path] = contents.read()
 
     def download(self, path):
@@ -362,7 +364,8 @@ def test_drop_function_refuses_non_empty_schema_then_drops_and_unregisters():
     assert not statements(conn, r"^DROP SCHEMA")
     b, conn = make_backend([(r"SELECT count\(\*\) FROM .*information_schema.*tables", ["c"], [(0,)])])
     b.drop_function(FunctionDef("finance__cost"), ADMIN)
-    assert statements(conn, r"^DROP SCHEMA `_reference_data`.`finance__cost`$")
+    assert statements(conn, r"^DROP SCHEMA `_reference_data`.`finance__cost` RESTRICT$")
+    assert not statements(conn, r"CASCADE")
     [(sql, params)] = statements(conn, r"^DELETE FROM `_reference_data`.`_catalog`.`functions`")
     assert params == {"name": "finance__cost"}
 
@@ -707,7 +710,7 @@ def test_put_file_creates_volume_uploads_counts_and_registers():
     )
     [(ddl, _)] = statements(conn, r"^CREATE VOLUME IF NOT EXISTS")
     assert ddl.startswith("CREATE VOLUME IF NOT EXISTS `_reference_data`.`finance__cost`.`_files`")
-    assert ("upload", VOLUME + "/gl.csv", True) in files.calls
+    assert ("upload", VOLUME + "/gl.csv", False) in files.calls  # a new file never overwrites
     [(count_sql, _)] = statements(conn, r"^SELECT count\(\*\) FROM read_files")
     assert count_sql == f"SELECT count(*) FROM read_files('{VOLUME}/gl.csv', format => 'csv', header => true)"
     [(merge, params)] = statements(conn, r"^MERGE INTO `_reference_data`.`_catalog`.`files`")
@@ -730,6 +733,7 @@ def test_put_file_creates_volume_uploads_counts_and_registers():
         b.put_file(FileDef("finance__cost", "gl.csv"), b"x", ADMIN)
     conn.calls.clear()
     b.put_file(FileDef("finance__cost", "gl.csv"), b"a,b\n3,4\n", ADMIN, replace=True)
+    assert ("upload", VOLUME + "/gl.csv", True) in files.calls  # replace overwrites
     assert not statements(conn, r"^CREATE VOLUME")
     entry = json.loads(
         statements(conn, r"^INSERT INTO `_reference_data`.`_catalog`.`change_log`")[0][1]["payload"]
@@ -816,15 +820,121 @@ def test_drop_function_refuses_files_then_drops_volume_first():
     b, conn = make_backend(
         [(r"SELECT count\(\*\) FROM .*information_schema.*tables", ["c"], [(0,)])], files=files
     )
-    with pytest.raises(BackendError, match="still has 1 file"):
+    # the fake listing also returns a sub-folder: everything in the volume counts, not only CSV/Parquet
+    with pytest.raises(BackendError, match="still has 2 file\\(s\\) or folder"):
         b.drop_function(FunctionDef("finance__cost"), ADMIN)
+    assert not statements(conn, r"^DROP")
     files.store.clear()
     b.drop_function(FunctionDef("finance__cost"), ADMIN)
     sqls = [s for s, _ in conn.calls]
     assert "DROP VOLUME IF EXISTS `_reference_data`.`finance__cost`.`_files`" in sqls
     assert sqls.index("DROP VOLUME IF EXISTS `_reference_data`.`finance__cost`.`_files`") < sqls.index(
-        "DROP SCHEMA `_reference_data`.`finance__cost`"
+        "DROP SCHEMA `_reference_data`.`finance__cost` RESTRICT"
     )
+
+
+class UnlistableFiles(FakeFiles):
+    """Volume exists but cannot be listed (no READ VOLUME, or a Files API outage)."""
+
+    def list_directory_contents(self, path):
+        self.calls.append(("list", path))
+        raise RuntimeError("PERMISSION_DENIED: User does not have READ VOLUME")
+
+
+class FolderOnlyFiles(FakeFiles):
+    def list_directory_contents(self, path):
+        self.calls.append(("list", path))
+        return [FakeEntry(path.rstrip("/") + "/archive", is_directory=True)]
+
+
+def test_drop_function_refuses_when_the_volume_cannot_be_verified_empty():
+    tables_empty = [(r"SELECT count\(\*\) FROM .*information_schema.*tables", ["c"], [(0,)])]
+    b, conn = make_backend(tables_empty, files=UnlistableFiles())
+    with pytest.raises(BackendError, match="Cannot verify that the file volume"):
+        b.drop_function(FunctionDef("finance__cost"), ADMIN)
+    assert not statements(conn, r"^DROP") and not statements(conn, r"^DELETE")
+    # a listing error does not make the function look empty for the UI either
+    assert b.list_files("finance__cost") == []
+    b, conn = make_backend(tables_empty, files=FolderOnlyFiles())
+    with pytest.raises(BackendError, match="still has 1 file\\(s\\) or folder"):
+        b.drop_function(FunctionDef("finance__cost"), ADMIN)
+    assert not statements(conn, r"^DROP")
+
+
+def test_new_file_upload_cannot_clobber_an_existing_file():
+    class BlindFiles(FakeFiles):
+        def get_metadata(self, path):  # the existence check fails for whatever reason
+            raise RuntimeError("INTERNAL_ERROR")
+
+    files = BlindFiles()
+    files.store[VOLUME + "/gl.csv"] = b"a,b\n1,2\n"
+    b, conn = make_backend(files=files)
+    with pytest.raises(ConflictError, match="already exists"):
+        b.put_file(FileDef("finance__cost", "gl.csv"), b"a,b\n9,9\n", ADMIN)
+    assert files.store[VOLUME + "/gl.csv"] == b"a,b\n1,2\n"
+    assert not statements(conn, r"^INSERT INTO")
+
+
+@pytest.mark.parametrize(
+    ("statement", "reason"),
+    [
+        ("SELECT * FROM `other`.`s`.`t`", "outside catalog"),
+        ("DELETE FROM `main`.`finance__cost`.`cost_centres`", "outside catalog"),
+        ("DROP SCHEMA `_reference_data`.`finance__cost` CASCADE", "CASCADE"),
+        ("DROP CATALOG `_reference_data`", "DROP CATALOG"),
+        ("TRUNCATE TABLE `_reference_data`.`f`.`t`", "TRUNCATE"),
+        ("VACUUM `_reference_data`.`f`.`t`", "VACUUM"),
+        ("DELETE FROM `_reference_data`.`f`.`t` WHERE 1 = 1 PURGE", "PURGE"),
+        ("USE CATALOG `other`", "USE CATALOG"),
+        ("GRANT USE CATALOG ON CATALOG `other` TO `g`", "outside catalog"),
+        ("SELECT * FROM table_changes('other.f.t', 0)", "outside catalog"),
+        ("SELECT * FROM read_files('/Volumes/other/f/_files/a.csv', format => 'csv')", "outside catalog"),
+    ],
+)
+def test_confinement_guard_refuses_statements_outside_the_catalog(statement, reason):
+    b, conn = make_backend()
+    with pytest.raises(BackendError, match=reason):
+        b._run(statement)
+    with pytest.raises(BackendError, match=reason):
+        b._run_df(statement)
+    assert conn.calls == []  # nothing reached the warehouse
+
+
+def test_confinement_guard_accepts_the_apps_own_statements():
+    b, conn = make_backend()
+    for statement in [
+        "SELECT * FROM `_reference_data`.`f`.`t`",
+        "DROP SCHEMA `_reference_data`.`f` RESTRICT",
+        "GRANT USE CATALOG ON CATALOG `_reference_data` TO `g`",
+        "SELECT * FROM table_changes('_reference_data.f.t', 0)",
+        f"SELECT count(*) FROM read_files('{VOLUME}/a.csv', format => 'csv', header => true)",
+        # words inside string literals (comments, descriptions) are data, not clauses
+        "COMMENT ON TABLE `_reference_data`.`f`.`t` IS 'cascade of `other`.`a`.`b`; it''s fine'",
+        "SELECT current_user(), is_account_group_member('g')",
+    ]:
+        b._run(statement)
+    assert len(conn.calls) == 7
+
+
+def test_volume_paths_are_confined_to_the_catalog():
+    b, _ = make_backend()
+    assert b._volume_path("finance__cost") == VOLUME
+    assert b._file_path("finance__cost", "gl.csv") == VOLUME + "/gl.csv"
+    for bad in [
+        "/Volumes/other/finance__cost/_files",
+        "/Volumes/_reference_data/finance__cost/data/gl.csv",
+        "/Volumes/_reference_data/finance__cost/_files/../gl.csv",
+        "/Volumes/_reference_data/finance__cost/_files/sub/gl.csv",
+        "/Volumes/_reference_data/_catalog/_files",
+        "/Volumes/_reference_data//_files",
+        "/tmp/gl.csv",
+    ]:
+        with pytest.raises((BackendError, ValueError)):
+            b._assert_volume_path(bad)
+    with pytest.raises(ValueError):
+        b._file_path("finance__cost", "../gl.csv")
+    with pytest.raises(ValueError):
+        b._volume_path("_catalog")
 
 
 def test_list_functions_counts_registered_files():

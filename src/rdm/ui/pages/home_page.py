@@ -9,7 +9,7 @@ from rdm.services import NavDomain
 from rdm.ui import ids
 from rdm.ui.components import ROLE_COLORS, empty_state, icon, link_button, page_title
 from rdm.ui.context import AppContext, get_context, grouped_navigation
-from rdm.ui.layout import file_href, form_href, function_href
+from rdm.ui.layout import domain_href, file_href, form_href, function_href
 
 
 def render(ctx_: AppContext) -> dmc.Stack:
@@ -170,7 +170,14 @@ def cards(groups: list[NavDomain], text: str | None) -> dmc.Stack | dmc.Paper:
                             icon(
                                 "tabler:sitemap" if not group.is_unassigned else "tabler:folder-question", 18
                             ),
-                            dmc.Title(d.title, order=4),
+                            dmc.Anchor(
+                                dmc.Title(d.title, order=4),
+                                href=domain_href(d.name),
+                                underline="never",
+                                c="inherit",
+                            )
+                            if not group.is_unassigned
+                            else dmc.Title(d.title, order=4),
                             dmc.Text(d.description or "", size="sm", c="dimmed"),
                         ],
                         gap="sm",

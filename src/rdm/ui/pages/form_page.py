@@ -30,6 +30,7 @@ from rdm.models import (
     Role,
     ValidationIssue,
     humanize,
+    qualified_name,
     sanitize_identifier,
 )
 from rdm.services import Draft, build_changeset_from_draft, describe_row
@@ -39,6 +40,8 @@ from rdm.ui import grid as g
 from rdm.ui import ids, uploads
 from rdm.ui.components import (
     TYPE_ICONS,
+    copy_code,
+    databricks_path_block,
     empty_state,
     error_alert,
     icon,
@@ -71,6 +74,7 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
         function_title = ctx_.backend.get_function(function).title
     except BackendError:
         function_title = function
+    table_path = qualified_name(ctx_.settings.catalog, function, name)
     header = page_title(
         form.title,
         form.description or None,
@@ -79,8 +83,10 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
             [
                 dmc.Group([role_badge(role)], justify="flex-end"),
                 dmc.Text(_meta(form), size="xs", c="dimmed", ta="right"),
+                dmc.Group([copy_code(table_path)], justify="flex-end"),
             ],
             gap=4,
+            align="flex-end",
         ),
     )
     tabs = [
@@ -98,7 +104,11 @@ def render(ctx_: AppContext, function: str, name: str) -> dmc.Stack:
     if role.can_admin:
         tabs.append(dmc.TabsTab("Settings", value="settings", leftSection=icon("tabler:settings")))
         panels.append(
-            dmc.TabsPanel(_settings_tab(form, ctx_.permissions.can_delete), value="settings", pt="sm")
+            dmc.TabsPanel(
+                _settings_tab(form, ctx_.permissions.can_delete, table_path, ctx_.settings.is_databricks),
+                value="settings",
+                pt="sm",
+            )
         )
     return dmc.Stack(
         [
@@ -359,8 +369,22 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
-def _settings_tab(form: FormDef, can_delete: bool) -> dmc.Stack:
+def _settings_tab(form: FormDef, can_delete: bool, table_path: str, is_databricks: bool) -> dmc.Stack:
     blocks: list[Any] = [
+        databricks_path_block(
+            "Databricks path",
+            [
+                ("Table (catalog.schema.table)", table_path),
+                ("Query", f"SELECT * FROM {table_path};"),
+                (
+                    "Change feed (SCD Type 2 source)",
+                    f"SELECT * FROM table_changes('{table_path.replace('`', '')}', 0);",
+                ),
+            ],
+            "Copy these into a notebook, a query or a pipeline. The catalog is the one this app is configured "
+            "with"
+            + ("." if is_databricks else " (locally the data lives in DuckDB, the names are the same)."),
+        ),
         dmc.Paper(
             dmc.Stack(
                 [

@@ -29,7 +29,7 @@ from rdm.ui.components import (
     role_badge,
 )
 from rdm.ui.context import AppContext, get_context, invalidate_metadata
-from rdm.ui.layout import file_href, form_href, function_href
+from rdm.ui.layout import domain_href, file_href, form_href, function_href
 
 GRID_THEME = "ag-theme-quartz"
 
@@ -64,7 +64,13 @@ def render(ctx_: AppContext, function_name: str) -> dmc.Stack:
     header = page_title(
         function.title,
         function.description or None,
-        crumbs=[dmc.Anchor("Home", href="/"), dmc.Text(domain_title), dmc.Text("Function")],
+        crumbs=[
+            dmc.Anchor("Home", href="/"),
+            dmc.Anchor(domain_title, href=domain_href(function.domain))
+            if function.domain
+            else dmc.Text(domain_title),
+            dmc.Text("Function"),
+        ],
         right=dmc.Stack(
             [
                 dmc.Group(right, gap="xs", justify="flex-end"),

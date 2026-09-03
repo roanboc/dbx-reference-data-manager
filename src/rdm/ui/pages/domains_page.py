@@ -13,8 +13,9 @@ from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
 from rdm.backend.base import BackendError, PermissionDenied
 from rdm.models import DomainDef, sanitize_identifier
 from rdm.ui import ids
-from rdm.ui.components import error_alert, icon, info_alert, notify, page_title
+from rdm.ui.components import error_alert, icon, info_alert, link_button, notify, page_title
 from rdm.ui.context import AppContext, get_context, invalidate_metadata
+from rdm.ui.layout import domain_href
 
 CREATE_TITLE = "New domain"
 
@@ -60,7 +61,13 @@ def render(ctx_: AppContext) -> dmc.Stack:
                                     ],
                                     justify="space-between",
                                 ),
-                                html.Div(id=ids.DOMAINS_TABLE, children=domains_table(ctx_, None)),
+                                html.Div(
+                                    id=ids.DOMAINS_TABLE,
+                                    children=domains_table(ctx_, None),
+                                    style={
+                                        "overflowX": "auto"
+                                    },  # a wide table scrolls, never overlaps the form
+                                ),
                             ],
                             gap="sm",
                         ),
@@ -174,12 +181,25 @@ def domains_table(ctx_: AppContext, text: str | None) -> dmc.Table | dmc.Text:
                     dmc.TableTd(dmc.Text(d.owner or "", size="sm")),
                     dmc.TableTd(dmc.Badge(f"{d.function_count or 0}", variant="light", size="sm")),
                     dmc.TableTd(
-                        dmc.Button(
-                            "Edit",
-                            id=ids.domain_edit_id(d.name),
-                            size="xs",
-                            variant="subtle",
-                            leftSection=icon("tabler:pencil", 14),
+                        dmc.Group(
+                            [
+                                link_button(
+                                    "Open",
+                                    domain_href(d.name),
+                                    size="xs",
+                                    variant="subtle",
+                                    leftSection=icon("tabler:external-link", 14),
+                                ),
+                                dmc.Button(
+                                    "Edit",
+                                    id=ids.domain_edit_id(d.name),
+                                    size="xs",
+                                    variant="subtle",
+                                    leftSection=icon("tabler:pencil", 14),
+                                ),
+                            ],
+                            gap=4,
+                            wrap="nowrap",
                         )
                     ),
                 ]

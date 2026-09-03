@@ -157,6 +157,9 @@ Status: **done** = implemented and tested; **planned** = agreed, not built.
 | FR-29 | Files: a function holds CSV/Parquet datasets next to its forms, with display name, description, owner, size and row count in the registry; preview of the first rows, inferred columns, download; editors replace the content, function admins add files, global admins delete them; every upload, replacement and deletion is in the history. | done |
 | FR-30 | Files landed in the function's volume outside the app (pipelines, CLI) are shown automatically, marked unregistered until an admin describes them; the browser upload has a configurable size limit. | done |
 | FR-31 | The catalog is named `_reference_data` (it holds forms and files, not only forms). | done |
+| FR-32 | Domain overview page: one page per domain (reachable from the sidebar and home headings) showing its description and owner, how many functions/forms/files it holds and a filterable card per function the user can open, with links to the function, its forms and its files. | done |
+| FR-33 | Every form and file page shows its full Databricks path (`catalog`.`schema`.`object`, volume path for files) with a copy button, and the Settings tab lists copy-ready query snippets (`SELECT`, `table_changes`, `read_files`). | done |
+| FR-34 | No action in the app can delete anything outside the `_reference_data` catalog or more than one object at a time: deletes are reserved to global admins, need a typed confirmation, never cascade, and the Databricks backend refuses any statement or file path that leaves the catalog (see DESIGN.md §11). | done |
 
 Removed requirements (decided in review, see §1 *Out of scope*): FR-20 effective-dating
 columns, FR-21 lookup columns and dependent dropdowns, FR-23 approval step with
@@ -261,9 +264,11 @@ selected version**): it comes back as a new row with the old values and a new `_
 
 Only global admins delete. A form is deleted from its **Settings** tab with a typed
 confirmation (Delta keeps the table recoverable for the retention period; the audit entries
-are kept). A function is deleted from its page once it holds no forms; its grants and
-registry entry go with it. A domain is deleted from the **Domains** page once no function is
-assigned to it.
+are kept). A function is deleted from its page once it holds no forms and its file volume is
+empty (anything left in the volume, whatever its type, blocks the deletion; so does a volume
+that cannot be listed); its grants and registry entry go with it. A domain is deleted from
+the **Domains** page once no function is assigned to it. Nothing cascades: every deletion
+removes exactly the one object that was confirmed.
 
 ### 6.9 Managing a file
 

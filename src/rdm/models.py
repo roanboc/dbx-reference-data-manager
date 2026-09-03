@@ -170,6 +170,24 @@ def sanitize_identifier(raw: Any, fallback: str = "column") -> str:
 
 #: File formats accepted for files (large reference datasets kept as files, not as forms).
 FILE_FORMATS: tuple[str, ...] = ("csv", "parquet")
+#: Managed volume the app creates in every function schema for its files.
+FILES_VOLUME = "_files"
+
+
+def qualified_name(*parts: str) -> str:
+    r"""Back-quoted Databricks name, e.g. ``qualified_name(catalog, function, form)`` -> ``\`c\`.\`f\`.\`t\```.
+
+    Every part is validated first, so the result can be pasted into a query as is.
+    """
+    return ".".join(f"`{validate_identifier(p)}`" for p in parts)
+
+
+def volume_file_path(catalog: str, function: str, name: str) -> str:
+    """Path of a file in the function's volume: ``/Volumes/<catalog>/<function>/_files/<name>``."""
+    validate_identifier(catalog, "catalog name")
+    validate_identifier(function, "function name", allow_leading_underscore=False)
+    validate_file_name(name)
+    return f"/Volumes/{catalog}/{function}/{FILES_VOLUME}/{name}"
 
 
 def split_file_name(name: str) -> tuple[str, str]:

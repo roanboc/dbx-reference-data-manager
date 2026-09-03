@@ -1402,6 +1402,23 @@ def test_drop_file_and_drop_function_guard(backend: DuckDBBackend, admin: User):
     assert not (backend.files_dir / "finance").exists()
 
 
+def test_drop_function_never_deletes_unknown_content_in_the_files_folder(backend: DuckDBBackend, admin: User):
+    backend.create_function(FunctionDef("finance"), admin)
+    folder = backend.files_dir / "finance"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "notes.txt").write_text("not managed by the app")
+    (folder / "archive").mkdir()
+    assert backend.list_files("finance") == []  # ignored by the app ...
+    with pytest.raises(ConflictError, match="still has 2 file\\(s\\) or folder"):
+        backend.drop_function(backend.get_function("finance"), admin)  # ... but never deleted by it
+    assert (folder / "notes.txt").read_text() == "not managed by the app"
+    assert backend.get_function("finance").name == "finance"
+    (folder / "notes.txt").unlink()
+    (folder / "archive").rmdir()
+    backend.drop_function(backend.get_function("finance"), admin)
+    assert not folder.exists()
+
+
 def test_files_persist_next_to_the_database(tmp_path, admin: User):
     path = tmp_path / "db" / "rdm.duckdb"
     b = DuckDBBackend(str(path))

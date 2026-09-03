@@ -121,6 +121,8 @@ def test_parse_path_routes():
     assert parse_path("/new-form") == ("new-form", None, None)
     assert parse_path("/new-function") == ("new-function", None, None)
     assert parse_path("/domains") == ("domains", None, None)
+    assert parse_path("/dm/finance") == ("domain", "finance", None)
+    assert parse_path("/dm") == ("home", None, None)
     assert parse_path("/d/hr__reference") == ("home", None, None)  # old address, no longer routed
     assert parse_path("/f/only-function") == ("home", None, None)
     assert parse_path("/f/a%20b/c") == ("form", "a b", "c")

@@ -52,6 +52,65 @@ def domain_badge(title: str, size: str = "sm") -> dmc.Badge:
     )
 
 
+def copy_code(value: str, label: str | None = None, size: str = "sm") -> dmc.Group:
+    """A code chip with a copy-to-clipboard button (for Databricks paths and query snippets)."""
+    return dmc.Group(
+        [
+            dmc.Text(label, size="xs", c="dimmed") if label else None,
+            dmc.Code(
+                value,
+                style={
+                    "fontSize": "12px" if size == "sm" else "13px",
+                    "whiteSpace": "pre-wrap",
+                    "wordBreak": "break-all",
+                    "minWidth": 0,
+                },
+            ),
+            dmc.CopyButton(
+                dmc.Group([icon("tabler:copy", 14), dmc.Text("Copy", size="xs")], gap=4, wrap="nowrap"),
+                copiedChildren=dmc.Group(
+                    [icon("tabler:check", 14), dmc.Text("Copied", size="xs")], gap=4, wrap="nowrap"
+                ),
+                value=value,
+                timeout=1500,
+                variant="subtle",
+                size="compact-xs",
+                color="gray",
+                copiedColor="teal",
+                style={"flex": "0 0 auto"},
+                **{"aria-label": "Copy to clipboard"},
+            ),
+        ],
+        gap=6,
+        wrap="nowrap",
+        align="center",
+        style={"minWidth": 0, "maxWidth": "100%"},
+    )
+
+
+def databricks_path_block(title: str, rows: list[tuple[str, str]], note: str) -> dmc.Paper:
+    """Settings block listing copy-ready paths and query snippets."""
+    return dmc.Paper(
+        dmc.Stack(
+            [
+                dmc.Title(title, order=4),
+                dmc.Text(note, size="sm", c="dimmed"),
+                dmc.Stack(
+                    [
+                        dmc.Stack([dmc.Text(label, size="xs", fw=600), copy_code(value, size="md")], gap=2)
+                        for label, value in rows
+                    ],
+                    gap="sm",
+                ),
+            ],
+            gap="sm",
+        ),
+        withBorder=True,
+        p="md",
+        radius="md",
+    )
+
+
 def global_admin_badge(size: str = "sm") -> dmc.Badge:
     return dmc.Badge(
         GLOBAL_ADMIN_LABEL,

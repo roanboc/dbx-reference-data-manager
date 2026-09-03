@@ -669,12 +669,15 @@ class DuckDBBackend(DatabaseBackend):
                 raise ConflictError(
                     f"Function '{function.name}' still has {n} form(s). Delete or migrate them first."
                 )
-            n_files = len(self._stored_file_names(function.name))
-            if n_files:
+            folder = self.files_dir / function.name
+            # Anything in the folder counts, not only CSV/Parquet: it is removed with the function.
+            n_entries = len(list(folder.iterdir())) if folder.is_dir() else 0
+            if n_entries:
                 raise ConflictError(
-                    f"Function '{function.name}' still has {n_files} file(s). Delete or migrate them first."
+                    f"Function '{function.name}' still has {n_entries} file(s) or folder(s). "
+                    "Delete or migrate them first."
                 )
-            cur.execute(f"DROP SCHEMA {quote_ident(function.name)}")
+            cur.execute(f"DROP SCHEMA {quote_ident(function.name)} RESTRICT")
             self._delete_props(cur, function.name)
             cur.execute(
                 f"DELETE FROM {qualified([META_SCHEMA, 'grants'])} WHERE schema_name = ?", [function.name]
@@ -683,7 +686,8 @@ class DuckDBBackend(DatabaseBackend):
                 f"DELETE FROM {qualified([META_SCHEMA, 'files'])} WHERE function_name = ?", [function.name]
             )
             self._unregister_function(cur, function.name)
-            shutil.rmtree(self.files_dir / function.name, ignore_errors=True)
+            if folder.is_dir():
+                folder.rmdir()  # verified empty above; never a recursive delete
 
     # -- forms -------------------------------------------------------------------------------
 

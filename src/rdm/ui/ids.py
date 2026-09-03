@@ -192,6 +192,11 @@ NEW_FUNCTION_DOMAIN = "new-function-domain"
 NEW_FUNCTION_SUBMIT = "new-function-submit"
 NEW_FUNCTION_RESULT = "new-function-result"
 
+# domain overview page
+DOMAIN_KEY = "domain-key"
+DOMAIN_FUNCTIONS = "domain-functions"
+DOMAIN_FUNCTIONS_FILTER = "domain-functions-filter"
+
 # domains page (global admins administer the domain list)
 DOMAIN_EDITING = "domain-editing"  # store: name of the domain being edited, or None
 DOMAIN_FORM_TITLE = "domain-form-title"

@@ -12,7 +12,15 @@ from rdm.models import Role
 from rdm.services import CatalogService, FormService
 from rdm.ui import ids
 from rdm.ui.context import AppContext
-from rdm.ui.pages import domains_page, file_page, form_creator, function_page, help_page, home_page
+from rdm.ui.pages import (
+    domain_page,
+    domains_page,
+    file_page,
+    form_creator,
+    function_page,
+    help_page,
+    home_page,
+)
 
 
 def make_ctx(backend, persona: str) -> AppContext:
@@ -203,6 +211,66 @@ def test_form_page_settings_delete_zone_only_for_global_admins(seeded_backend):
     assert ids.SETTINGS_SAVE not in ids_in(editor_tree) and ids.BULK_OPEN in ids_in(editor_tree)
     tabs = next(n for n in walk(admin_tree) if getattr(n, "id", None) == ids.FORM_TABS)
     assert tabs.keepMounted is True  # the grid and its draft survive a tab round trip
+
+
+def test_form_and_file_pages_show_the_databricks_path_to_copy(seeded_backend):
+    from rdm.ui.pages import form_page
+
+    table = "`_reference_data`.`finance__cost_management`.`cost_centres`"
+    # every reader gets the copy chip in the header ...
+    tree = form_page.render(make_ctx(seeded_backend, "editor"), "finance__cost_management", "cost_centres")
+    assert table in {c.value for c in walk(tree) if type(c).__name__ == "CopyButton"}
+    assert "table_changes" not in texts_in(tree)  # ... the query snippets live in Settings (admins)
+    tree = form_page.render(
+        make_ctx(seeded_backend, "function_admin"), "finance__cost_management", "cost_centres"
+    )
+    text = texts_in(tree)
+    assert f"SELECT * FROM {table};" in text
+    assert "table_changes('_reference_data.finance__cost_management.cost_centres', 0)" in text
+    path = "/Volumes/_reference_data/finance__cost_management/_files/gl_transactions.csv"
+    tree = file_page.render(
+        make_ctx(seeded_backend, "editor"), "finance__cost_management", "gl_transactions.csv"
+    )
+    assert path in {c.value for c in walk(tree) if type(c).__name__ == "CopyButton"}
+    tree = file_page.render(
+        make_ctx(seeded_backend, "function_admin"), "finance__cost_management", "gl_transactions.csv"
+    )
+    text = texts_in(tree)
+    assert "`_reference_data`.`finance__cost_management`.`_files`" in text
+    assert f"read_files('{path}', format => 'csv', header => true)" in text
+
+
+@pytest.mark.parametrize("persona", ["admin", "function_admin", "editor", "viewer"])
+def test_domain_overview_lists_the_functions_the_user_can_open(seeded_backend, persona):
+    ctx = make_ctx(seeded_backend, persona)
+    tree = domain_page.render(ctx, "finance")
+    found, text = ids_in(tree), texts_in(tree)
+    assert {ids.DOMAIN_KEY, ids.DOMAIN_FUNCTIONS, ids.DOMAIN_FUNCTIONS_FILTER} <= found
+    assert "Finance" in text and "Functions you can open" in text
+    from rdm.ui.context import grouped_navigation
+
+    visible = [g for g in grouped_navigation(ctx, None) if g.domain.name == "finance"]
+    n_visible = sum(len(g.functions) for g in visible)
+    total = ctx.backend.get_domain("finance").function_count or 0
+    if n_visible:
+        assert "Cost Management" in text and "Open function" in text and "Cost Centres" in text
+    if total > n_visible:
+        assert f"{total - n_visible} function(s) of this domain are not shown" in text
+    else:
+        assert "not shown" not in text
+    assert ("Manage domains" in text) is ctx.permissions.can_manage_domains
+    assert "Not found" in texts_in(domain_page.render(ctx, "ghost"))
+
+
+def test_domain_overview_filter_matches_functions_forms_and_files(seeded_backend):
+    ctx = make_ctx(seeded_backend, "admin")
+    functions = domain_page._functions_of(ctx, "finance")
+    assert functions
+    assert "Cost Centres" in texts_in(domain_page.function_cards(functions, "cost cen"))
+    assert "GL Transactions" in texts_in(domain_page.function_cards(functions, "gl_trans"))
+    assert "No matches" in texts_in(domain_page.function_cards(functions, "zzz-nothing"))
+    assert "No functions you can open" in texts_in(domain_page.function_cards([], None))
+    assert "Open" in texts_in(domains_page.domains_table(ctx, "fin"))
 
 
 def test_item_body_lists_fields_and_row_history(seeded_backend):

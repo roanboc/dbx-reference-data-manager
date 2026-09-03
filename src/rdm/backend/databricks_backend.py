@@ -39,6 +39,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import threading
 import uuid
 from collections.abc import Callable, Iterable
@@ -62,6 +63,7 @@ from rdm.models import (
     CREATED_BY_COLUMN,
     FILE_CHANGE_TYPES,
     FILE_FORMATS,
+    FILES_VOLUME,
     HISTORY_COLUMNS,
     ID_COLUMN,
     PROP_COLUMN_CONFIG,
@@ -93,15 +95,27 @@ from rdm.models import (
     split_file_name,
     system_columns,
     validate_file_name,
+    volume_file_path,
 )
 
 log = logging.getLogger(__name__)
 
 META_SCHEMA = "_catalog"
 AUDIT_TABLE = "change_log"
-#: Managed volume created in every function schema for its files.
-FILES_VOLUME = "_files"
 HIDDEN_SCHEMAS = frozenset({"information_schema", "default", META_SCHEMA})
+
+#: Confinement guard (defence in depth, see docs/DESIGN.md "Security review"): every statement
+#: the backend sends to the warehouse must stay inside ``self.catalog`` and must not carry a
+#: clause that could delete more than one object at a time.
+_STRING_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.)*'")
+_THREE_PART_RE = re.compile(r"`([^`]+)`\.`([^`]+)`\.`([^`]+)`")
+_ON_CATALOG_RE = re.compile(r"\bON\s+CATALOG\s+`([^`]+)`", re.IGNORECASE)
+_TABLE_CHANGES_RE = re.compile(r"table_changes\(\s*'([^'.]+)\.", re.IGNORECASE)
+_VOLUME_PATH_RE = re.compile(r"'/Volumes/([^/']+)/")
+_FORBIDDEN_RE = re.compile(
+    r"\bCASCADE\b|\bDROP\s+CATALOG\b|\bTRUNCATE\b|\bPURGE\b|\bVACUUM\b|\bUSE\s+CATALOG\b(?!\s+ON)",
+    re.IGNORECASE,
+)
 
 #: Delta features every form is created with. Column mapping makes DROP/RENAME COLUMN
 #: possible, deletion vectors give row-level concurrency, CDF feeds downstream SCD2.
@@ -254,6 +268,7 @@ class DatabricksBackend(DatabaseBackend):
         self, statement: str, params: dict[str, Any] | list[Any] | None = None
     ) -> tuple[list[tuple], list[str]]:
         """Execute one statement; returns (rows, column names). Serialised per backend instance."""
+        self._assert_confined(statement)
         with self._lock:
             conn = self._connection()
             try:
@@ -274,6 +289,7 @@ class DatabricksBackend(DatabaseBackend):
                 raise BackendError(message) from exc
 
     def _run_df(self, statement: str, params: dict[str, Any] | list[Any] | None = None) -> pd.DataFrame:
+        self._assert_confined(statement)
         with self._lock:
             conn = self._connection()
             try:
@@ -290,6 +306,43 @@ class DatabricksBackend(DatabaseBackend):
                 raise
             except Exception as exc:  # noqa: BLE001
                 raise BackendError(str(exc)) from exc
+
+    # -- confinement ---------------------------------------------------------------------------
+
+    def _assert_confined(self, statement: str) -> None:
+        """Refuse any statement that reaches outside ``self.catalog`` or could cascade a deletion.
+
+        The SQL is built by this module from validated identifiers, so this never triggers in
+        normal operation; it is a last line of defence against a future coding mistake.
+        """
+        code = _STRING_LITERAL_RE.sub("''", statement)
+        forbidden = _FORBIDDEN_RE.search(code)
+        if forbidden:
+            raise BackendError(f"Refusing statement with '{forbidden.group(0)}': not allowed by the app.")
+        foreign = {m.group(1) for m in _THREE_PART_RE.finditer(code)} - {self.catalog}
+        foreign |= {m.group(1) for m in _ON_CATALOG_RE.finditer(code)} - {self.catalog}
+        foreign |= {m.group(1) for m in _TABLE_CHANGES_RE.finditer(statement)} - {self.catalog}
+        foreign |= {m.group(1) for m in _VOLUME_PATH_RE.finditer(statement)} - {self.catalog}
+        if foreign:
+            raise BackendError(
+                f"Refusing statement outside catalog '{self.catalog}': {', '.join(sorted(foreign))}."
+            )
+
+    def _assert_volume_path(self, path: str) -> str:
+        """Only ``/Volumes/<catalog>/<function>/_files[/<file>]`` may be listed, read, written or deleted."""
+        parts = path.split("/")
+        if (
+            len(parts) not in (5, 6)
+            or parts[:2] != ["", "Volumes"]
+            or parts[2] != self.catalog
+            or parts[4] != FILES_VOLUME
+            or not all(parts[2:])
+        ):
+            raise BackendError(f"Refusing to touch a path outside the '{self.catalog}' file volumes: {path}")
+        validate_identifier(parts[3], "function name", allow_leading_underscore=False)
+        if len(parts) == 6:
+            validate_file_name(parts[5])
+        return path
 
     # -- naming ------------------------------------------------------------------------------
 
@@ -489,7 +542,8 @@ class DatabricksBackend(DatabaseBackend):
         return self.get_function(function.name)
 
     def drop_function(self, function: FunctionDef, actor: User) -> None:
-        """``DROP SCHEMA`` (without CASCADE): refused while the schema still holds tables or files."""
+        """``DROP SCHEMA ... RESTRICT``: refused while the schema still holds tables or its volume
+        holds anything (or cannot be listed). Never cascades."""
         validate_identifier(function.name, "function name")
         rows, _ = self._run(
             f"SELECT count(*) FROM {self._info('tables')} WHERE table_catalog = :catalog AND table_schema = :schema",
@@ -500,14 +554,21 @@ class DatabricksBackend(DatabaseBackend):
             raise ConflictError(
                 f"Function '{function.name}' still has {n} form(s). Delete or migrate them first."
             )
-        n_files = len(self._stored_files(function.name))
-        if n_files:
+        entries = self._list_volume(function.name)
+        if entries is None:
+            raise BackendError(
+                f"Cannot verify that the file volume of '{function.name}' is empty (no READ VOLUME "
+                "privilege, or the Files API is unavailable); the function is not deleted."
+            )
+        if entries:
+            # Anything in the volume counts, not only CSV/Parquet: DROP VOLUME would delete it.
             raise ConflictError(
-                f"Function '{function.name}' still has {n_files} file(s). Delete or migrate them first."
+                f"Function '{function.name}' still has {len(entries)} file(s) or folder(s) in its "
+                "volume. Delete or migrate them first."
             )
         self._run(f"DROP VOLUME IF EXISTS {self._s(function.name)}.{_q(FILES_VOLUME)}")
         self._volumes_ready.discard(function.name)
-        self._run(f"DROP SCHEMA {self._s(function.name)}")
+        self._run(f"DROP SCHEMA {self._s(function.name)} RESTRICT")
         try:
             self._run(f"DELETE FROM {self._reg('functions')} WHERE `name` = :name", {"name": function.name})
         except BackendError as exc:
@@ -1323,12 +1384,11 @@ class DatabricksBackend(DatabaseBackend):
     # -- files (managed volume per function) -----------------------------------------------
 
     def _volume_path(self, function: str) -> str:
-        validate_identifier(function, "function name")
-        return f"/Volumes/{self.catalog}/{function}/{FILES_VOLUME}"
+        validate_identifier(function, "function name", allow_leading_underscore=False)
+        return self._assert_volume_path(f"/Volumes/{self.catalog}/{function}/{FILES_VOLUME}")
 
     def _file_path(self, function: str, name: str) -> str:
-        validate_file_name(name)
-        return f"{self._volume_path(function)}/{name}"
+        return self._assert_volume_path(volume_file_path(self.catalog, function, name))
 
     def _ensure_volume(self, function: str) -> None:
         if function in self._volumes_ready:
@@ -1339,15 +1399,24 @@ class DatabricksBackend(DatabaseBackend):
         )
         self._volumes_ready.add(function)
 
-    def _stored_files(self, function: str) -> dict[str, dict[str, Any]]:
-        """``{name: {size, modified}}`` of the files in the function's volume (empty when absent)."""
-        out: dict[str, dict[str, Any]] = {}
+    def _list_volume(self, function: str) -> list[Any] | None:
+        """Raw entries of the function's volume: ``[]`` when there is no volume (yet), ``None``
+        when it exists but cannot be listed (no READ VOLUME, Files API error)."""
         try:
-            entries = list(self._files_api().list_directory_contents(self._volume_path(function)))
-        except Exception as exc:  # noqa: BLE001 - no volume yet, or no READ VOLUME
-            log.info("No file listing for %s: %s", function, exc)
-            return out
-        for e in entries:
+            return list(self._files_api().list_directory_contents(self._volume_path(function)))
+        except Exception as exc:  # noqa: BLE001 - SDK NotFound or a transport/permission error
+            text = str(exc).upper().replace("_", " ")
+            if type(exc).__name__ in ("NotFound", "ResourceDoesNotExist") or "NOT FOUND" in text:
+                log.info("No file volume for %s yet: %s", function, exc)
+                return []
+            log.warning("Cannot list the file volume of %s: %s", function, exc)
+            return None
+
+    def _stored_files(self, function: str) -> dict[str, dict[str, Any]]:
+        """``{name: {size, modified}}`` of the CSV/Parquet files in the function's volume
+        (empty when the volume is absent or cannot be listed)."""
+        out: dict[str, dict[str, Any]] = {}
+        for e in self._list_volume(function) or []:
             if getattr(e, "is_directory", False):
                 continue
             name = str(getattr(e, "name", "") or "")
@@ -1423,8 +1492,14 @@ class DatabricksBackend(DatabaseBackend):
         self._ensure_volume(file.function)
         path = self._file_path(file.function, file.name)
         try:
-            self._files_api().upload(path, io.BytesIO(data), overwrite=True)
+            # overwrite only on an explicit replace: a new file can never clobber one that the
+            # existence check above missed (for example because of a transient metadata error).
+            self._files_api().upload(path, io.BytesIO(data), overwrite=replace)
         except Exception as exc:  # noqa: BLE001
+            if "EXISTS" in str(exc).upper() or type(exc).__name__ == "AlreadyExists":
+                raise ConflictError(
+                    f"File '{file.full_name}' already exists. Replace it from its page instead."
+                ) from exc
             raise BackendError(f"Upload to {path} failed: {exc}") from exc
         try:
             rows, _ = self._run(f"SELECT count(*) FROM {self._reader(file)}")

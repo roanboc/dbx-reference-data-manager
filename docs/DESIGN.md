@@ -277,5 +277,67 @@ timestamp semantics (naive vs session-zone), MERGE metrics, tags/properties, CDF
   authorization).
 * Native parameter binding, identifier validation, per-user connection cache, short
   navigation/permission caches (`RDM_METADATA_CACHE_TTL`).
+* Catalog confinement and no-cascade deletes enforced in the backend itself (§11).
 * Serverless SQL warehouse recommended (cold-start latency dominates UX otherwise).
 * Everything (catalog, schemas, grants, app) is declared in the bundle.
+
+## 11. Security review: deletions and catalog confinement
+
+Reviewed with the question "can a user delete something they should not, or reach anything
+outside `_reference_data`?". The app never holds broader rights than the signed-in user
+(user authorization), so Unity Catalog remains the ultimate boundary; the controls below are
+what the *app* guarantees on top of it, and what was hardened.
+
+### 11.1 Who can delete what
+
+| Action | Guard in `FormService` | UI confirmation | Backend statement |
+|---|---|---|---|
+| Delete rows of a form | `require(function, EDITOR)` | part of Save; deleted rows stay in History and can be restored | `MERGE ... WHEN MATCHED AND op = 'D' THEN DELETE` on that table only |
+| Remove a column | `require(function, ADMIN)` | typed column name | `ALTER TABLE ... DROP COLUMN` |
+| Delete a form | `require_global_admin` | typed form name | `DROP TABLE` (Delta history keeps it recoverable) |
+| Delete a file | `require_global_admin` | typed file name | Files API `delete` of that one path |
+| Delete a function | `require_global_admin` | typed function name | `DROP VOLUME IF EXISTS` then `DROP SCHEMA ... RESTRICT`, only when empty |
+| Delete a domain | `require_global_admin` | typed domain name | registry `DELETE`, only when no function is assigned |
+| Revoke a group's role | `require(function, ADMIN)` | explicit button | `REVOKE` of the app-managed privileges on that schema |
+
+Every guard is server-side (Dash callbacks are Flask requests; hiding a button is never the
+control). Global admin is derived from catalog-level privileges (`CREATE SCHEMA` / `MANAGE`
+on the catalog or ownership), never from a request header or a browser value. The local
+persona switcher exists only in the mock provider (`RDM_AUTH=mock`); the Databricks provider
+ignores it.
+
+### 11.2 Confinement to the catalog
+
+* Every identifier that reaches SQL (catalog, function, form, column, file name) is validated
+  against `^[a-z_][a-z0-9_]{0,62}$` and back-quoted; user-created names cannot start with
+  `_`, so `_catalog` and `_files` cannot be targeted through a name. Values are bound as
+  parameters; the few DDL literals (comments, properties, tags) are escaped with Spark rules.
+* `DatabricksBackend._assert_confined` runs on **every** statement before it is sent: any
+  three-part name, `ON CATALOG` clause, `table_changes('...')` argument or `/Volumes/...`
+  literal must name `self.catalog`, and `CASCADE`, `DROP CATALOG`, `TRUNCATE`, `PURGE`,
+  `VACUUM` and a bare `USE CATALOG` are refused. String literals are blanked before the
+  clause check so a description mentioning "cascade" is not affected. This is defence in
+  depth against a future coding mistake; the app's own statements never trigger it.
+* `DatabricksBackend._assert_volume_path` accepts only
+  `/Volumes/<catalog>/<function>/_files[/<file>]`, so the Files API can list, read, write
+  and delete nothing else (no `..`, no sub-folders, no other volume).
+* The bundle grants the app service principal `CAN_USE` on the warehouse only; data access is
+  the user's. In the (documented, not recommended) service-principal mode the app's guards
+  are the only enforcement point, which is why the guards are in the service layer and not
+  in the UI.
+
+### 11.3 Findings and fixes
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | `drop_function` counted only CSV/Parquet files before `DROP VOLUME`; other files or sub-folders in the volume would have been deleted with it. | Any entry in the volume blocks the deletion ("still has N file(s) or folder(s)"). DuckDB: same rule for the local folder, which is now removed with a non-recursive `rmdir`. |
+| 2 | A volume that could not be listed (no `READ VOLUME`, Files API error) was treated as empty. | Listing errors other than *not found* abort the deletion ("Cannot verify that the file volume ... is empty"). |
+| 3 | A new file was uploaded with `overwrite=True`; if the existence check failed transiently, an existing file could have been replaced without the *Replace* flow (and without its history entry). | New files upload with `overwrite=False` (the API's *already exists* error becomes a conflict); only *Replace* overwrites. |
+| 4 | `DROP SCHEMA` relied on the default (no cascade). | Explicit `RESTRICT`, and `CASCADE` is refused by the confinement guard. |
+| 5 | Nothing prevented a future statement from naming another catalog. | `_assert_confined` / `_assert_volume_path` (above), covered by tests. |
+
+Observations that were reviewed and kept as designed: function admins can revoke any group's
+role on their own function (a global admin's catalog-level rights are not affected, so there
+is no lockout); granting a role also grants `USE CATALOG` best-effort; `drop_column` is a
+function-admin action with a typed confirmation because it is a definition change, not a
+deletion of an object.

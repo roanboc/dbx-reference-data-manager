@@ -589,6 +589,26 @@ def test_split_and_validate_file_name():
             validate_file_name(bad)
 
 
+def test_qualified_name_and_volume_file_path():
+    from rdm.models import qualified_name, volume_file_path
+
+    assert qualified_name("_reference_data", "finance__cost", "cost_centres") == (
+        "`_reference_data`.`finance__cost`.`cost_centres`"
+    )
+    assert volume_file_path("_reference_data", "finance__cost", "gl.csv") == (
+        "/Volumes/_reference_data/finance__cost/_files/gl.csv"
+    )
+    for bad in [("_reference_data", "../x", "t"), ("cat`", "f", "t"), ("_reference_data", "f", "t;drop")]:
+        with pytest.raises(ValueError):
+            qualified_name(*bad)
+    with pytest.raises(ValueError):
+        volume_file_path("_reference_data", "_catalog", "gl.csv")
+    with pytest.raises(ValueError):
+        volume_file_path("_reference_data", "finance__cost", "../gl.csv")
+    with pytest.raises(ValueError):
+        volume_file_path("other/../x", "finance__cost", "gl.csv")
+
+
 def test_file_def_properties_and_validation():
     f = FileDef("finance__cost", "gl_transactions.csv", description="d")
     assert (f.stem, f.format, f.full_name) == ("gl_transactions", "csv", "finance__cost/gl_transactions.csv")
