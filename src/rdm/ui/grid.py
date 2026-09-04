@@ -26,6 +26,9 @@ AUDIT_LABELS = {
     "_updated_at": "Modified",
     "_updated_by": "Modified by",
 }
+#: CSS hook for the grid containers: AG Grid 35 themes via the Theming API, so this is a
+#: plain class that assets/styles.css targets with --ag-* custom properties (light + dark).
+GRID_THEME = "rdm-grid"
 INVALID_CLASS = "rdm-invalid"
 NEW_ROW_CLASS = "rdm-new-row"
 INVALID_PREFIX = "_bad_"  # per-column boolean flags on a row: simple expressions the grid can evaluate

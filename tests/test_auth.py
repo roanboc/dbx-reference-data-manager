@@ -23,9 +23,9 @@ def test_personas_are_the_four_local_users():
         assert persona.description
         assert "everyone" in persona.user.groups
     assert PERSONAS["admin"].user.groups == ("rdm_admins", "everyone")
-    assert PERSONAS["function_admin"].user.groups == ("finance_admins", "student_readers", "everyone")
-    assert PERSONAS["editor"].user.groups == ("student_stewards", "finance_readers", "everyone")
-    assert PERSONAS["viewer"].user.groups == ("student_readers", "hr_readers", "everyone")
+    assert PERSONAS["function_admin"].user.groups == ("finance_admins", "customer_readers", "everyone")
+    assert PERSONAS["editor"].user.groups == ("customer_stewards", "finance_readers", "everyone")
+    assert PERSONAS["viewer"].user.groups == ("customer_readers", "hr_readers", "everyone")
     assert PERSONAS["viewer"].user.email == "vera.viewer@example.org"
 
 
@@ -213,7 +213,7 @@ def test_settings_defaults_from_empty_env():
     assert s == Settings()
     assert s.backend == "duckdb" and s.auth == "mock" and s.persona == "admin"
     assert s.duckdb_path == "data/rdm.duckdb" and s.catalog == "_reference_data"
-    assert s.max_rows == 5000 and s.metadata_cache_ttl == 60
+    assert s.max_rows == 5000 and s.metadata_cache_ttl == 300
     assert not s.is_databricks
     assert s.databricks_host is None and s.warehouse_http_path is None
 
@@ -300,3 +300,21 @@ def test_settings_reads_dotenv_file_without_overriding_environment(monkeypatch, 
     s = Settings.from_env()
     assert s.persona == "viewer"  # environment wins
     assert s.catalog == "from_dotenv"
+
+
+def test_simulated_permissions_give_each_persona_its_role_everywhere(seeded_backend):
+    """FR-45: review deployments simulate roles instead of resolving grants."""
+    from rdm.ui.context import _simulated_permissions
+
+    functions = [f.name for f in seeded_backend.list_functions()]
+    admin = _simulated_permissions(seeded_backend, PERSONAS["admin"].user)
+    assert admin.is_global_admin and admin.admin_functions == sorted(functions)
+    fa = _simulated_permissions(seeded_backend, PERSONAS["function_admin"].user)
+    assert not fa.is_global_admin and fa.admin_functions == sorted(functions)
+    editor = _simulated_permissions(seeded_backend, PERSONAS["editor"].user)
+    assert all(editor.role_for(f).can_edit and not editor.role_for(f).can_admin for f in functions)
+    viewer = _simulated_permissions(seeded_backend, PERSONAS["viewer"].user)
+    assert all(viewer.role_for(f).can_view and not viewer.role_for(f).can_edit for f in functions)
+    # an unknown identity falls back to the viewer experience
+    stranger = _simulated_permissions(seeded_backend, User("nobody@example.org"))
+    assert not stranger.is_global_admin and all(not stranger.role_for(f).can_edit for f in functions)

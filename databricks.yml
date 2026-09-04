@@ -1,15 +1,25 @@
 # Databricks Asset Bundle for the Reference Data Manager.
 #
 # Declares everything the app needs in a workspace: the Unity Catalog catalog
-# (resources/catalog.yml), the domain schemas with their grants (resources/schemas.yml) and
-# the Databricks App itself (resources/app.yml). See docs/DEPLOYMENT.md for the workflow.
+# (resources/catalog.yml), the function schemas with their grants (resources/schemas.yml)
+# and the Databricks App itself (resources/app.yml). See docs/DEPLOYMENT.md for the
+# workflow.
 #
-#   databricks bundle validate -t dev --var="warehouse_id=<id>"
-#   databricks bundle deploy   -t dev --var="warehouse_id=<id>"
-#   databricks bundle run reference_data_manager -t dev
+# Nothing here is filled in for you. Every value that depends on your workspace is a
+# variable with a placeholder default; set them in the `dev` target below, or pass
+# --var="name=value" / export BUNDLE_VAR_<name>, before the first deploy. A placeholder
+# left unchanged makes the deploy fail loudly rather than deploy into the wrong place.
+#
+#   databricks bundle validate -t dev --profile <your CLI profile>
+#   databricks bundle deploy   -t dev --profile <your CLI profile>
+#   databricks bundle run reference_data_manager -t dev --profile <your CLI profile>
+#
+# None of this is needed to try the app: `make seed && make run` runs it locally on
+# DuckDB with no Databricks account at all.
 
 bundle:
-  name: rdm_reference_data_manager
+  name: dbx-reference-data-manager
+  databricks_cli_version: ">= 1.3.0"
 
 include:
   - resources/*.yml
@@ -17,23 +27,39 @@ include:
 variables:
   catalog:
     description: >-
-      Unity Catalog catalog that holds the reference-data domains (schemas) and forms
-      (tables). Created by resources/catalog.yml; the app reads it as RDM_CATALOG.
+      Unity Catalog catalog that holds the functions (schemas), forms (tables) and files
+      (volumes). Created by resources/catalog.yml; the app reads it as RDM_CATALOG.
+      Keep the leading underscore or drop it, but keep app.yaml in step.
     default: _reference_data
 
   warehouse_id:
     description: >-
-      ID of the SQL warehouse the app queries (serverless recommended, see DESIGN.md §10).
-      Deliberately has no default: pass --var="warehouse_id=<id>", export
-      BUNDLE_VAR_warehouse_id, or set it per target below. List warehouses with
-      `databricks warehouses list`. (A `lookup: {warehouse: <name>}` is a possible
-      alternative to hard-coding the id.)
+      ID of the SQL warehouse the app queries; serverless is recommended (DESIGN.md §10).
+      List yours with `databricks warehouses list`.
+    default: <your-warehouse-id>
+
+  storage_root:
+    description: >-
+      Managed storage location of the catalog, needed only when your metastore has no
+      default storage root; otherwise delete the storage_root line in
+      resources/catalog.yml. Azure looks like
+      abfss://<container>@<storage-account>.dfs.core.windows.net/<path>, AWS like
+      s3://<bucket>/<path>.
+    default: <your-storage-root-or-remove-it>
 
   admin_group:
     description: >-
-      Account-level group of global administrators: may create functions (CREATE_SCHEMA),
-      manage grants (MANAGE) and manage the app (CAN_MANAGE).
-    default: rdm_admins
+      Account-level group of global administrators: creates functions (CREATE_SCHEMA),
+      manages grants (MANAGE) and manages the app (CAN_MANAGE). Must be an account group;
+      workspace-local groups are not accepted by Unity Catalog grants.
+    default: <your-admin-group>
+
+  breakglass_group:
+    description: >-
+      Second account group with the same privileges as admin_group, so the catalog is
+      never left without an administrator. Set it to the same value as admin_group if you
+      do not run a separate break-glass group.
+    default: <your-breakglass-group>
 
   app_name:
     description: >-
@@ -43,40 +69,44 @@ variables:
 
   app_users_group:
     description: >-
-      Group that may open the app (CAN_USE on the app). What a user can see or edit is
-      still decided only by Unity Catalog grants on the schemas.
+      Group that may open the app (CAN_USE on the app). What a user can then see or edit
+      is decided only by the Unity Catalog grants on the schemas.
     default: users
 
+  auth_mode:
+    description: >-
+      Identity provider of the app: `databricks` (X-Forwarded-* headers, production) or
+      `mock` (switchable review personas; only meaningful together with debug_personas,
+      on a deployment that holds test data).
+    default: databricks
+
+  debug_personas:
+    description: >-
+      "true" lets reviewers switch between the Global admin / Function admin / Editor /
+      Viewer personas with simulated roles. Queries then run as the app's service
+      principal, so enable it only on a deployment with test data - never in production.
+    default: "false"
+
 targets:
-  # Personal development deployment. `mode: development` makes the CLI prefix schema names
-  # with `dev_<your-short-name>_` (catalog and app names are not prefixed), skips the
-  # deployment lock and deploys as you (no run_as).
+  # One example target. Copy it for each environment you run (dev, test, prd) and give
+  # each its own workspace host and catalog name.
+  #
+  # `mode: development` is deliberately not set: its schema name prefix (dev_<name>_)
+  # would rename the registry schema, which the app resolves by the fixed name _catalog,
+  # and hang every grant on the wrong schemas. Isolate environments with distinct catalog
+  # names instead. Two people deploying into the same workspace need distinct
+  # --var="catalog=..." and --var="app_name=..." values.
   dev:
-    mode: development
     default: true
     workspace:
-      host: https://<your-workspace>.cloud.databricks.com   # TODO: e.g. https://adb-1234567890123456.7.azuredatabricks.net
-    variables:
-      # A separate catalog keeps dev deployments away from production data. If several
-      # developers deploy `dev` to the same workspace they need distinct catalog and app
-      # names (--var="catalog=_reference_data_dev_<name>" --var="app_name=rdm-dev-<name>") because
-      # every developer holds their own bundle state.
-      catalog: _reference_data_dev
-      app_name: reference-data-manager-dev
-      # warehouse_id: <dev warehouse id>
-
-  # Production. Deployed by CI (.github/workflows/ci.yml) with the credentials of the
-  # service principal named in run_as. The CLI refuses to deploy apps when run_as differs
-  # from the identity performing the deployment, so the CI credentials MUST belong to this
-  # same service principal.
-  prod:
-    mode: production
-    workspace:
-      host: https://<your-workspace>.cloud.databricks.com   # TODO
-      # Shared path so the deployment does not live under one person's home folder.
-      root_path: /Shared/.bundle/${bundle.target}/${bundle.name}
-    run_as:
-      service_principal_name: 00000000-0000-0000-0000-000000000000   # TODO: application ID of the deploying service principal
+      host: https://<your-workspace-host>.cloud.databricks.com
     variables:
       catalog: _reference_data
-      # warehouse_id: <prod warehouse id>   # or export BUNDLE_VAR_warehouse_id in CI
+      app_name: reference-data-manager
+      warehouse_id: <your-warehouse-id>
+      storage_root: <your-storage-root-or-remove-it>
+      # Uncomment both to review the four roles without an identity provider, on test data only.
+      # The app's service principal then needs the admin privilege set on the catalog,
+      # because every query runs as it rather than as the signed-in user.
+      # auth_mode: mock
+      # debug_personas: "true"

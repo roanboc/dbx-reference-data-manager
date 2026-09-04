@@ -17,7 +17,7 @@ from dash import Input, Output, State, dcc, html, no_update
 
 from rdm.backend.base import BackendError, PermissionDenied
 from rdm.models import FileDef, Role, qualified_name, volume_file_path
-from rdm.services.files import FileError, check_upload, human_size, preview_bytes
+from rdm.services.files import FileError, check_upload, human_size, preview_bytes, validate_table
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
 from rdm.ui.components import (
@@ -36,7 +36,7 @@ from rdm.ui.context import AppContext, get_context, invalidate_metadata
 from rdm.ui.layout import function_href
 
 log = logging.getLogger(__name__)
-GRID_THEME = "ag-theme-quartz"
+GRID_THEME = g.GRID_THEME
 PREVIEW_LIMIT = 200
 CHANGE_LABELS = {"upload": "Uploaded", "replace": "Replaced", "delete": "Deleted"}
 
@@ -314,8 +314,22 @@ def _settings_tab(file: FileDef, can_delete: bool, dbx_path: str, settings) -> d
                         description="Recorded in the _catalog.files registry",
                         autosize=True,
                         minRows=2,
+                        required=True,
                     ),
-                    dmc.TextInput(id=ids.FILE_SETTINGS_OWNER, label="Owner", value=file.owner),
+                    dmc.TextInput(
+                        id=ids.FILE_SETTINGS_OWNER,
+                        label="Owner",
+                        value=file.owner,
+                        description="Team or person accountable for this dataset",
+                        required=True,
+                    ),
+                    dmc.TextInput(
+                        id=ids.FILE_SETTINGS_OWNER_EMAIL,
+                        label="Owner e-mail",
+                        value=file.owner_email,
+                        description="Optional contact e-mail of the owning team or person",
+                        placeholder="team@example.org",
+                    ),
                     dmc.Group(
                         [
                             dmc.Button(
@@ -420,6 +434,11 @@ def _replace_modal(ctx_: AppContext, file: FileDef) -> dmc.Modal:
                     max_size=max_mb * 1024 * 1024,
                 ),
                 html.Div(id=ids.FILE_REPLACE_PREVIEW),
+                dmc.Checkbox(
+                    id=ids.FILE_REPLACE_VALIDATE,
+                    label="Check that the file reads as a consistent table (recommended when it feeds pipelines)",
+                    checked=True,
+                ),
                 dmc.Group(
                     [
                         dmc.Button(
@@ -468,6 +487,7 @@ def register(app) -> None:
         State(ids.FILE_KEY, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.FILE_DOWNLOAD, "loading"), True, False)],
     )
     def download(n, key, persona):
         if not n:
@@ -541,13 +561,15 @@ def register(app) -> None:
         Output(ids.NAV_VERSION, "data", allow_duplicate=True),
         Input(ids.FILE_REPLACE_SUBMIT, "n_clicks"),
         State(ids.FILE_REPLACE_TOKEN, "data"),
+        State(ids.FILE_REPLACE_VALIDATE, "checked"),
         State(ids.FILE_KEY, "data"),
         State(ids.URL, "pathname"),
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.FILE_REPLACE_SUBMIT, "loading"), True, False)],
     )
-    def replace_file(n, token, key, pathname, nav_version, persona):
+    def replace_file(n, token, validate, key, pathname, nav_version, persona):
         if not n:
             return no_update, no_update, no_update, no_update
         stored = uploads.get(token)
@@ -557,6 +579,17 @@ def register(app) -> None:
         c = get_context(persona)
         try:
             file, _role = _load(c, key)
+            if validate:
+                problems = validate_table(data, file.format)
+                if problems:
+                    return (
+                        no_update,
+                        no_update,
+                        notify(
+                            " ".join(problems), title="The file is not a consistent table", color="red"
+                        ),
+                        no_update,
+                    )
             updated = c.forms.replace_file(file, data)
         except (BackendError, PermissionDenied, ValueError) as exc:
             return no_update, no_update, notify(str(exc), title="Not replaced", color="red"), no_update
@@ -577,12 +610,14 @@ def register(app) -> None:
         State(ids.FILE_SETTINGS_DISPLAY, "value"),
         State(ids.FILE_SETTINGS_DESC, "value"),
         State(ids.FILE_SETTINGS_OWNER, "value"),
+        State(ids.FILE_SETTINGS_OWNER_EMAIL, "value"),
         State(ids.FILE_KEY, "data"),
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.FILE_SETTINGS_SAVE, "loading"), True, False)],
     )
-    def save_settings(n, display, desc, owner, key, nav_version, persona):
+    def save_settings(n, display, desc, owner, owner_email, key, nav_version, persona):
         if not n:
             return no_update, no_update, no_update
         c = get_context(persona)
@@ -593,6 +628,7 @@ def register(app) -> None:
                 (desc or "").strip(),
                 (owner or "").strip(),
             )
+            file.owner_email = (owner_email or "").strip()
             c.forms.update_file_metadata(file)
         except (BackendError, PermissionDenied, ValueError) as exc:
             return error_alert(exc, "Not saved"), no_update, no_update
@@ -609,6 +645,7 @@ def register(app) -> None:
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.DROP_FILE_SUBMIT, "loading"), True, False)],
     )
     def drop_file(n, confirm, key, nav_version, persona):
         if not n:

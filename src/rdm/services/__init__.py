@@ -7,6 +7,7 @@ from rdm.services.form_service import (
     EditorState,
     FormService,
     build_changeset,
+    build_import_changeset,
     coerce_value,
     describe_row,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "NavDomain",
     "NavFunction",
     "build_changeset",
+    "build_import_changeset",
     "coerce_value",
     "describe_row",
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import io
 
 import pandas as pd
@@ -31,6 +32,61 @@ def check_upload(filename: str, data: bytes, max_mb: int) -> str:
             "Databricks CLI or a pipeline; they appear here automatically."
         )
     return name
+
+
+def validate_table(data: bytes, fmt: str) -> list[str]:
+    """FR-42: problems that would stop the file being used as a consistent table.
+
+    The whole file must parse (ragged CSV rows fail), every column needs a header and
+    headers must be unique. Returns an empty list when the file is sound.
+    """
+    try:
+        if fmt == "parquet":
+            import pyarrow.parquet as pq
+
+            reader = pq.ParquetFile(io.BytesIO(data))
+            names = [str(n) for n in reader.schema_arrow.names]
+            rows = reader.metadata.num_rows
+        else:
+            names, rows, ragged = _scan_csv(data)
+            if ragged:
+                return [ragged]
+    except Exception as exc:  # noqa: BLE001 - any parse problem is the finding
+        return [f"The file cannot be read as {fmt.upper()}: {exc}"]
+    problems = []
+    if not names:
+        problems.append("The file has no columns.")
+    duplicates = sorted({n for n in names if names.count(n) > 1})
+    if duplicates:
+        problems.append("Duplicate column headers: " + ", ".join(duplicates) + ".")
+    unnamed = [n for n in names if not n.strip() or n.lower().startswith("unnamed:")]
+    if unnamed:
+        problems.append(f"{len(unnamed)} column(s) have no header.")
+    if not rows:
+        problems.append("The file has headers but no rows.")
+    return problems
+
+
+def _scan_csv(data: bytes) -> tuple[list[str], int, str]:
+    """Header, row count and the first field-count inconsistency (empty string when none)."""
+    sample = data[:65536].decode("utf-8", errors="replace")
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.reader(io.StringIO(data.decode("utf-8", errors="replace")), dialect)
+    header = [str(c) for c in next(reader, [])]
+    rows = 0
+    for line_no, record in enumerate(reader, start=2):
+        if not record:
+            continue  # blank line
+        if len(record) != len(header):
+            return header, rows, (
+                f"The file cannot be read as CSV: line {line_no} has {len(record)} field(s) "
+                f"where the header has {len(header)}."
+            )
+        rows += 1
+    return header, rows, ""
 
 
 def preview_bytes(data: bytes, fmt: str, rows: int = PREVIEW_ROWS) -> pd.DataFrame:

@@ -42,6 +42,15 @@ def render(ctx_: AppContext) -> dmc.Stack:
         [
             dcc.Store(id=ids.DOMAIN_EDITING, data=None),
             header,
+            info_alert(
+                "Unity Catalog has no domain securable yet, so this list is the app's own registry "
+                "(_catalog.domains). Each function's domain is written on its schema as the property "
+                "rdm.domain and the tag rdm_domain, and scripts/sync_domain_tags.py copies it onto the "
+                "governed tags behind the workspace Discover domains. Once Databricks exposes domains "
+                "natively in Unity Catalog, this registry is meant to be replaced by them.",
+                "Domains live in the app, not (yet) in Unity Catalog",
+                "yellow",
+            ),
             dmc.SimpleGrid(
                 [
                     dmc.Paper(
@@ -92,11 +101,11 @@ def _form(ctx_: AppContext) -> dmc.Stack:
             dmc.TextInput(
                 id=ids.DOMAIN_NAME,
                 label="Name",
-                placeholder="e.g. student",
+                placeholder="e.g. customer",
                 description="Identifier: lower_snake_case, becomes the value of the rdm.domain schema property; cannot change",
                 required=True,
             ),
-            dmc.TextInput(id=ids.DOMAIN_DISPLAY, label="Display name", placeholder="Student"),
+            dmc.TextInput(id=ids.DOMAIN_DISPLAY, label="Display name", placeholder="Customer"),
             dmc.Textarea(id=ids.DOMAIN_DESC, label="Description", autosize=True, minRows=2),
             dmc.TextInput(
                 id=ids.DOMAIN_OWNER,
@@ -306,6 +315,10 @@ def register(app) -> None:
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[
+            (Output(ids.DOMAIN_SUBMIT, "loading"), True, False),
+            (Output(ids.DOMAIN_DELETE_SUBMIT, "loading"), True, False),
+        ],
     )
     def submit_domain(
         n_save, n_delete, editing, raw_name, display, desc, owner, confirm, filter_text, nav_version, persona

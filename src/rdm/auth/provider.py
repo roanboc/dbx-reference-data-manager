@@ -58,9 +58,9 @@ PERSONAS: dict[str, Persona] = {
             username="fiona.functionadmin@example.org",
             display_name="Fiona Function-admin",
             email="fiona.functionadmin@example.org",
-            groups=("finance_admins", "student_readers", "everyone"),
+            groups=("finance_admins", "customer_readers", "everyone"),
         ),
-        "Function admin - creates forms and grants access in Finance (cannot delete), reads Student",
+        "Function admin - creates forms and grants access in Finance (cannot delete), reads Customer",
     ),
     "editor": Persona(
         "editor",
@@ -68,9 +68,9 @@ PERSONAS: dict[str, Persona] = {
             username="eddie.editor@example.org",
             display_name="Eddie Editor",
             email="eddie.editor@example.org",
-            groups=("student_stewards", "finance_readers", "everyone"),
+            groups=("customer_stewards", "finance_readers", "everyone"),
         ),
-        "Editor - edits rows in the Student function, reads Finance, no HR access",
+        "Editor - edits rows in the Customer function, reads Finance, no HR access",
     ),
     "viewer": Persona(
         "viewer",
@@ -78,9 +78,9 @@ PERSONAS: dict[str, Persona] = {
             username="vera.viewer@example.org",
             display_name="Vera Viewer",
             email="vera.viewer@example.org",
-            groups=("student_readers", "hr_readers", "everyone"),
+            groups=("customer_readers", "hr_readers", "everyone"),
         ),
-        "Viewer - read-only access to Student and HR reference lists",
+        "Viewer - read-only access to Customer and HR reference lists",
     ),
 }
 

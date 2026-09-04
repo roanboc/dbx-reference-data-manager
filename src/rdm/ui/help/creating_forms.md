@@ -4,6 +4,9 @@
 
 1. **Source** - upload an Excel or CSV file, or start from scratch. From a file, the first
    sheet's header row becomes the column names and the types are inferred from the values.
+   Forms are recommended up to about 5,000 rows (the configured grid limit): the wizard
+   warns when a file is larger and suggests keeping it as a governed **file** instead,
+   which has the same catalogue entry and history but is replaced as a whole.
 2. **Columns** - confirm the definition of every column (see below).
 3. **Details** - choose the function, the table name (lower_snake_case, becomes the Unity
    Catalog table name), a display name, a description and an owner.

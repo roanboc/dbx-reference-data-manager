@@ -117,7 +117,7 @@ class DatabaseBackend(ABC):
 
     @abstractmethod
     def create_form(self, form: FormDef, actor: User, rows: pd.DataFrame | None = None) -> FormDef:
-        """Create the table (system columns are added automatically) and optionally load rows."""
+        """Create the table (system columns are added automatically) and load ``rows`` when given."""
 
     @abstractmethod
     def update_form_metadata(self, form: FormDef, actor: User) -> FormDef:
@@ -134,6 +134,17 @@ class DatabaseBackend(ABC):
     @abstractmethod
     def drop_form(self, form: FormDef, actor: User) -> None:
         """Delete the table and its metadata."""
+
+    @abstractmethod
+    def set_scd2(self, form: FormDef, enabled: bool, actor: User) -> FormDef:
+        """FR-47: turn the Type 2 history table of a form on or off.
+
+        Enabling creates ``_h__<form>`` in the function's schema (the form's columns plus
+        ``__START_AT``/``__END_AT``, the organisation's Auto CDC notation) and backfills one
+        open window per current row. Disabling stops maintenance but keeps the table; it is
+        dropped with the form. While enabled, every applied change closes and opens windows
+        in the same save.
+        """
 
     # -- rows --------------------------------------------------------------------------------
 

@@ -43,6 +43,24 @@ statement and every file upload, download or deletion is executed as the signed-
 Unity Catalog is the enforcement point and the app only decides what to render. Roles are resolved inside the SQL session with `current_user()` and
 `is_account_group_member()`.
 
+### Domains and Databricks Discover domains
+
+Unity Catalog has **no domain securable**: a domain cannot be created, granted or queried
+like a catalog or a schema. The app therefore keeps its own list in `_catalog.domains` and
+writes each function's domain onto its schema as the property `rdm.domain` and the tag
+`rdm_domain`, so the classification is visible and searchable in Catalog Explorer.
+
+The workspace **Discover** page also groups assets into *domains*, but those are built on
+governed tags: an asset belongs to a domain when it carries the domain's tag. The two are
+bridged by `scripts/sync_domain_tags.py`, which matches each schema's `rdm.domain` to the
+governed tag of the same name (`customer_service` -> `Customer Service`) and applies it.
+See `docs/DEPLOYMENT.md` §10.
+
+> **Waiting on Databricks.** Native Unity Catalog domains are not available today. When they
+> arrive, the registry list, the `rdm.domain` property and the tag sync are intended to be
+> replaced by the native objects; keep domain names aligned with the organisation's
+> published domain names so the migration is a rename-free mapping.
+
 ### Setting up domains and functions
 
 1. **Domains** (sidebar): create the domain list once, aligned with the organisation's data

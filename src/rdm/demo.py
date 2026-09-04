@@ -20,10 +20,10 @@ SEED_USER = User(username="seed@example.org", display_name="Seed script", groups
 
 DEMO_DOMAINS: list[DomainDef] = [
     DomainDef(
-        "student",
-        "Student",
-        "Students, enrolments, surveys and student services.",
-        "student.data@example.org",
+        "customer",
+        "Customer",
+        "Customers, contracts, surveys and support services.",
+        "customer.data@example.org",
     ),
     DomainDef(
         "finance", "Finance", "Financial planning, cost management and reporting.", "finance.data@example.org"
@@ -32,14 +32,17 @@ DEMO_DOMAINS: list[DomainDef] = [
     DomainDef(
         "research",
         "Research",
-        "Research management and grants (no functions yet).",
+        "Research and development (no functions yet).",
         "research.data@example.org",
     ),
 ]
 
 DEMO_GRANTS: dict[str, dict[str, Role]] = {
     CATALOG_LEVEL: {"rdm_admins": Role.ADMIN},
-    "student__survey_service_improvement": {"student_stewards": Role.EDITOR, "student_readers": Role.VIEWER},
+    "customer__survey_service_improvement": {
+        "customer_stewards": Role.EDITOR,
+        "customer_readers": Role.VIEWER,
+    },
     "finance__cost_management": {
         "finance_admins": Role.ADMIN,
         "finance_stewards": Role.EDITOR,
@@ -91,12 +94,12 @@ def seed(backend: DatabaseBackend) -> None:
         backend.create_domain(domain, admin)
     backend.create_function(
         FunctionDef(
-            "student__survey_service_improvement",
-            display_name="Student Survey & Service Improvement",
-            description="Reference lists used by the student survey and service improvement programme.",
+            "customer__survey_service_improvement",
+            display_name="Customer Survey & Service Improvement",
+            description="Reference lists used by the customer survey and service improvement programme.",
             owner="survey.team@example.org",
-            doc_link="https://wiki.example.org/student-survey/reference-data",
-            domain="student",
+            doc_link="https://wiki.example.org/customer-survey/reference-data",
+            domain="customer",
         ),
         admin,
     )
@@ -151,21 +154,21 @@ def seed(backend: DatabaseBackend) -> None:
 
     backend.create_form(
         FormDef(
-            "student__survey_service_improvement",
+            "customer__survey_service_improvement",
             "survey_questions",
             display_name="Survey Questions",
-            description="Master list of questions used across student surveys, with weighting and lifecycle status.",
+            description="Master list of questions used across customer surveys, with weighting and lifecycle status.",
             owner="survey.team@example.org",
             columns=[
                 ColumnDef(
-                    "question_code", DataType.STRING, "Unique code, e.g. NSS-Q01", nullable=False, is_key=True
+                    "question_code", DataType.STRING, "Unique code, e.g. CSAT-Q01", nullable=False, is_key=True
                 ),
-                ColumnDef("question_text", DataType.STRING, "Question as shown to students", nullable=False),
+                ColumnDef("question_text", DataType.STRING, "Question as shown to customers", nullable=False),
                 ColumnDef(
                     "category",
                     DataType.STRING,
                     "Survey theme",
-                    options=["Teaching", "Assessment", "Support", "Facilities", "Overall"],
+                    options=["Product", "Delivery", "Support", "Billing", "Overall"],
                 ),
                 ColumnDef(
                     "weight",
@@ -181,16 +184,16 @@ def seed(backend: DatabaseBackend) -> None:
         admin,
         pd.DataFrame(
             {
-                "question_code": ["NSS-Q01", "NSS-Q02", "NSS-Q08", "NSS-Q15", "INT-Q03", "INT-Q07"],
+                "question_code": ["CSAT-Q01", "CSAT-Q02", "CSAT-Q08", "CSAT-Q15", "NPS-Q03", "NPS-Q07"],
                 "question_text": [
-                    "Staff are good at explaining things.",
-                    "Staff have made the subject interesting.",
-                    "The criteria used in marking have been clear in advance.",
-                    "I have been able to access course-specific resources when I needed to.",
-                    "The library spaces meet my study needs.",
-                    "I know where to get support for my wellbeing.",
+                    "The product does what I expected it to do.",
+                    "The product is good value for what I pay.",
+                    "My order arrived when I was told it would.",
+                    "I could find the information I needed without asking.",
+                    "My last invoice was clear and correct.",
+                    "I know how to get help when something goes wrong.",
                 ],
-                "category": ["Teaching", "Teaching", "Assessment", "Facilities", "Facilities", "Support"],
+                "category": ["Product", "Product", "Delivery", "Support", "Billing", "Support"],
                 "weight": [1.0, 1.0, 1.25, 0.75, 0.5, 1.5],
                 "is_active": [True, True, True, False, True, True],
                 "introduced_on": [
@@ -206,7 +209,7 @@ def seed(backend: DatabaseBackend) -> None:
     )
     backend.create_form(
         FormDef(
-            "student__survey_service_improvement",
+            "customer__survey_service_improvement",
             "service_areas",
             display_name="Service Areas",
             description="Service areas that own survey actions and improvement plans.",
@@ -222,14 +225,20 @@ def seed(backend: DatabaseBackend) -> None:
         admin,
         pd.DataFrame(
             {
-                "area_code": ["LIB", "ITS", "WEL", "CAR", "EST"],
-                "area_name": ["Library", "IT Services", "Wellbeing", "Careers", "Estates"],
+                "area_code": ["SUP", "LOG", "BIL", "ONB", "FLD"],
+                "area_name": [
+                    "Customer Support",
+                    "Logistics",
+                    "Billing",
+                    "Onboarding",
+                    "Field Services",
+                ],
                 "lead_email": [
-                    "lib.lead@example.org",
-                    "it.lead@example.org",
-                    "wel.lead@example.org",
+                    "sup.lead@example.org",
+                    "log.lead@example.org",
+                    "bil.lead@example.org",
                     None,
-                    "est.lead@example.org",
+                    "fld.lead@example.org",
                 ],
                 "target_score": [85, 80, 82, 78, 75],
                 "is_active": [True, True, True, True, False],
@@ -249,10 +258,10 @@ def seed(backend: DatabaseBackend) -> None:
                 ),
                 ColumnDef("cost_centre_name", DataType.STRING, "Descriptive name", nullable=False),
                 ColumnDef(
-                    "faculty",
+                    "business_unit",
                     DataType.STRING,
-                    "Owning faculty or directorate",
-                    options=["Arts", "Science", "Engineering", "Professional Services"],
+                    "Owning business unit",
+                    options=["Commercial", "Operations", "Technology", "Corporate Services"],
                 ),
                 ColumnDef("budget_holder", DataType.STRING, "Budget holder email"),
                 ColumnDef(
@@ -267,19 +276,25 @@ def seed(backend: DatabaseBackend) -> None:
             {
                 "cost_centre_code": ["CC1001", "CC1002", "CC2001", "CC3001", "CC9001"],
                 "cost_centre_name": [
-                    "English Literature",
-                    "History",
-                    "Physics",
-                    "Civil Engineering",
-                    "Registry",
+                    "Direct Sales",
+                    "Marketing",
+                    "Manufacturing",
+                    "Field Services",
+                    "Head Office",
                 ],
-                "faculty": ["Arts", "Arts", "Science", "Engineering", "Professional Services"],
+                "business_unit": [
+                    "Commercial",
+                    "Commercial",
+                    "Operations",
+                    "Operations",
+                    "Corporate Services",
+                ],
                 "budget_holder": [
-                    "a.head@example.org",
-                    "h.head@example.org",
-                    "p.head@example.org",
-                    "c.head@example.org",
-                    "reg@example.org",
+                    "s.head@example.org",
+                    "m.head@example.org",
+                    "o.head@example.org",
+                    "f.head@example.org",
+                    "ho@example.org",
                 ],
                 "annual_budget_gbp": [1250000.00, 980000.50, 3400000.00, 2750000.00, 610000.00],
                 "valid_from": [date(2022, 8, 1)] * 5,
@@ -311,14 +326,14 @@ def seed(backend: DatabaseBackend) -> None:
             {
                 "gl_account": ["4000", "4100", "5000", "5200", "7000"],
                 "reporting_line": [
-                    "Tuition income",
-                    "Research income",
-                    "Academic pay",
-                    "Professional services pay",
+                    "Product income",
+                    "Service income",
+                    "Operations pay",
+                    "Corporate services pay",
                     "Equipment",
                 ],
                 "account_type": ["Income", "Income", "Pay", "Pay", "Capital"],
-                "notes": [None, "Includes grants", None, None, "Over £10k"],
+                "notes": [None, "Includes support contracts", None, None, "Over £10k"],
             }
         ),
     )

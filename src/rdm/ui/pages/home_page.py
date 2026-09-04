@@ -12,6 +12,44 @@ from rdm.ui.context import AppContext, get_context, grouped_navigation
 from rdm.ui.layout import domain_href, file_href, form_href, function_href
 
 
+def _intro() -> dmc.Paper:
+    return dmc.Paper(
+        dmc.Group(
+            [
+                dmc.Stack(
+                    [
+                        dmc.Text("What this app is for", fw=600, size="sm"),
+                        dmc.Text(
+                            "Reference Data Manager is the governed home for the lists the organisation "
+                            "relies on — cost centres, codes, mappings — that used to live in spreadsheets "
+                            "and SharePoint lists. Each list is a form: an editable grid backed by a Unity "
+                            "Catalog table, with an owner, a description, access by role and a full history "
+                            "of who changed what. Larger datasets are kept as files you can preview, "
+                            "download and replace.",
+                            size="sm",
+                            c="dimmed",
+                        ),
+                    ],
+                    gap=4,
+                ),
+                link_button(
+                    "Help",
+                    "/help",
+                    variant="light",
+                    size="xs",
+                    leftSection=icon("tabler:help-circle", 14),
+                ),
+            ],
+            justify="space-between",
+            align="flex-start",
+            wrap="nowrap",
+        ),
+        withBorder=True,
+        p="md",
+        radius="md",
+    )
+
+
 def render(ctx_: AppContext) -> dmc.Stack:
     groups = grouped_navigation(ctx_, None)
     header = page_title(
@@ -24,6 +62,7 @@ def render(ctx_: AppContext) -> dmc.Stack:
         return dmc.Stack(
             [
                 header,
+                _intro(),
                 empty_state(
                     "No functions available",
                     "You have not been granted access to any function. Ask a function administrator for Viewer or Editor access.",
@@ -48,6 +87,7 @@ def render(ctx_: AppContext) -> dmc.Stack:
     return dmc.Stack(
         [
             header,
+            _intro(),
             stats,
             dmc.TextInput(
                 id=ids.HOME_FILTER,

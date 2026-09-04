@@ -22,6 +22,7 @@ from rdm.coercion import CoercionError, coerce_value
 from rdm.models import (
     AUDIT_COLUMNS,
     ID_COLUMN,
+    SCD2_END_COLUMN,
     VERSION_COLUMN,
     ChangeSet,
     ColumnDef,
@@ -32,8 +33,9 @@ from rdm.models import (
     humanize,
     qualified_name,
     sanitize_identifier,
+    scd2_table_name,
 )
-from rdm.services import Draft, build_changeset_from_draft, describe_row
+from rdm.services import Draft, build_changeset_from_draft, build_import_changeset, describe_row
 from rdm.services.draft import bulk_value, invalid_cells, is_temp_id, json_safe, restore_row, same_value
 from rdm.services.excel_import import ImportError_, coerce_frame, list_sheets, map_frame_to_form, read_table
 from rdm.ui import grid as g
@@ -56,7 +58,7 @@ from rdm.ui.layout import function_href
 
 log = logging.getLogger(__name__)
 TYPE_OPTIONS = [{"value": t.value, "label": f"{t.label} ({t.value})"} for t in DataType.editable_types()]
-GRID_THEME = "ag-theme-quartz"
+GRID_THEME = g.GRID_THEME
 CHANGE_LABELS = {"insert": "Added", "update": "Edited", "delete": "Deleted"}
 BOOL_OPTIONS = [{"value": "true", "label": "Yes"}, {"value": "false", "label": "No"}]
 
@@ -370,6 +372,7 @@ def _fmt(value: Any) -> str:
 
 
 def _settings_tab(form: FormDef, can_delete: bool, table_path: str, is_databricks: bool) -> dmc.Stack:
+    scd2_path = table_path.rsplit(".", 1)[0] + f".`{scd2_table_name(form.name)}`"
     blocks: list[Any] = [
         databricks_path_block(
             "Databricks path",
@@ -401,12 +404,21 @@ def _settings_tab(form: FormDef, can_delete: bool, table_path: str, is_databrick
                         description="Stored as the table comment",
                         autosize=True,
                         minRows=2,
+                        required=True,
                     ),
                     dmc.TextInput(
                         id=ids.SETTINGS_OWNER,
                         label="Owner",
                         value=form.owner,
-                        description="Stored as a table property and tag",
+                        description="Team or person accountable for this list; stored as a table property and tag",
+                        required=True,
+                    ),
+                    dmc.TextInput(
+                        id=ids.SETTINGS_OWNER_EMAIL,
+                        label="Owner e-mail",
+                        value=form.owner_email,
+                        description="Optional contact e-mail of the owning team or person",
+                        placeholder="team@example.org",
                     ),
                     dmc.Group(
                         [
@@ -418,6 +430,38 @@ def _settings_tab(form: FormDef, can_delete: bool, table_path: str, is_databrick
                         ]
                     ),
                     html.Div(id=ids.SETTINGS_RESULT),
+                ],
+                gap="sm",
+            ),
+            withBorder=True,
+            p="md",
+            radius="md",
+        ),
+        dmc.Paper(
+            dmc.Stack(
+                [
+                    dmc.Title("History table (SCD Type 2)", order=4),
+                    dmc.Text(
+                        "Optional: maintain a Type 2 history table next to this form in the organisation's "
+                        "notation (__START_AT / __END_AT; the current version has __END_AT IS NULL). Every "
+                        "save closes and opens validity windows, so consumers query ready-made history "
+                        "instead of deriving it from the change feed.",
+                        size="sm",
+                        c="dimmed",
+                    ),
+                    dmc.Switch(
+                        id=ids.SCD2_SWITCH,
+                        label="Maintain the history table",
+                        checked=form.scd2_enabled,
+                        description="Enabling creates the table and backfills the current rows; "
+                        "disabling stops the updates but keeps the table (it is deleted with the form).",
+                    ),
+                    dmc.Code(
+                        f"SELECT * FROM {scd2_path} WHERE {SCD2_END_COLUMN} IS NULL;  -- current rows",
+                        block=True,
+                    )
+                    if form.scd2_enabled
+                    else None,
                 ],
                 gap="sm",
             ),
@@ -513,6 +557,7 @@ def _kv(d: dict[str, str]) -> str:
 
 
 def _import_modal(form: FormDef) -> dmc.Modal:
+    keys = ", ".join(c.name for c in form.key_columns)
     return dmc.Modal(
         id=ids.IMPORT_MODAL,
         title="Import rows",
@@ -520,7 +565,8 @@ def _import_modal(form: FormDef) -> dmc.Modal:
         children=dmc.Stack(
             [
                 dmc.Text(
-                    f"Rows are appended to '{form.title}'. Headers are matched to column names (spaces and punctuation are ignored). Existing rows are never modified.",
+                    f"Import rows into '{form.title}' from Excel or CSV. Headers are matched to column "
+                    "names (spaces and punctuation are ignored).",
                     size="sm",
                     c="dimmed",
                 ),
@@ -532,6 +578,32 @@ def _import_modal(form: FormDef) -> dmc.Modal:
                     className="rdm-dropzone",
                     multiple=False,
                     accept=".xlsx,.xls,.csv,.tsv",
+                ),
+                dmc.RadioGroup(
+                    id=ids.IMPORT_MODE,
+                    value="append",
+                    label="Import mode",
+                    description=(
+                        f"Merge and replace match rows on the business key ({keys})."
+                        if keys
+                        else "Merge and replace need business key columns; mark them on the Schema tab."
+                    ),
+                    children=dmc.Stack(
+                        [
+                            dmc.Radio(value="append", label="Append: every file row becomes a new row"),
+                            dmc.Radio(
+                                value="merge",
+                                label="Merge: update matched rows, add new ones; other rows stay",
+                                disabled=not keys,
+                            ),
+                            dmc.Radio(
+                                value="replace",
+                                label="Replace: merge, then delete the rows that are not in the file",
+                                disabled=not keys,
+                            ),
+                        ],
+                        gap=6,
+                    ),
                 ),
                 dmc.Select(
                     id=ids.IMPORT_SHEET,
@@ -545,7 +617,7 @@ def _import_modal(form: FormDef) -> dmc.Modal:
                 dmc.Group(
                     [
                         dmc.Button(
-                            "Append rows",
+                            "Import",
                             id=ids.IMPORT_SUBMIT,
                             disabled=True,
                             leftSection=icon("tabler:upload"),
@@ -790,7 +862,7 @@ def _schema_modals(form: FormDef) -> html.Div:
                             value="STRING",
                             allowDeselect=False,
                         ),
-                        dmc.TextInput(id=ids.ADD_COL_DESC, label="Description"),
+                        dmc.TextInput(id=ids.ADD_COL_DESC, label="Description", required=True),
                         dmc.Group(
                             [
                                 dmc.NumberInput(
@@ -1122,6 +1194,7 @@ def register(app) -> None:
         State(ids.DRAFT, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call="initial_duplicate",
+        running=[(Output(ids.GRID_REFRESH, "loading"), True, False)],
     )
     def load_grid(key, search, audit, _refresh, _version, draft_raw, persona):
         if not key:
@@ -1197,6 +1270,7 @@ def register(app) -> None:
         State(ids.FORM_KEY, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.GRID_SAVE, "loading"), True, False)],
     )
     def grid_action(events, _add, _delete, _discard, _save, draft_raw, rows, selected, version, key, persona):
         trigger = ctx.triggered_id
@@ -1478,6 +1552,10 @@ def register(app) -> None:
         State(ids.FORM_KEY, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[
+            (Output(ids.BULK_SUBMIT, "loading"), True, False),
+            (Output(ids.ITEM_SAVE, "loading"), True, False),
+        ],
     )
     def draft_actions(
         n_bulk,
@@ -1717,6 +1795,7 @@ def register(app) -> None:
         State(ids.FORM_KEY, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.SCHEMA_SAVE, "loading"), True, False)],
     )
     def save_schema(n, virtual_rows, row_data, version, key, persona):
         if not n:
@@ -1732,6 +1811,8 @@ def register(app) -> None:
                 if col is None:
                     continue
                 col.description = (rec.get("description") or "").strip()
+                if not col.description:
+                    problems.append(f"'{col.name}': a description is required.")
                 col.nullable = not bool(rec.get("required"))
                 col.is_key = bool(rec.get("key"))
                 raw = (rec.get("options") or "").strip()
@@ -1773,12 +1854,15 @@ def register(app) -> None:
         State(ids.URL, "pathname"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.ADD_COL_SUBMIT, "loading"), True, False)],
     )
     def add_column(n, raw_name, type_value, desc, precision, scale, key, pathname, persona):
         if not n:
             return no_update, no_update, no_update
         if not (raw_name or "").strip():
             return no_update, notify("A column name is required", color="red"), no_update
+        if not (desc or "").strip():
+            return no_update, notify("A column description is required", color="red"), no_update
         c = get_context(persona)
         try:
             form, _r, _e = _load(c, key)
@@ -1806,6 +1890,7 @@ def register(app) -> None:
         State(ids.URL, "pathname"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.DROP_COL_SUBMIT, "loading"), True, False)],
     )
     def drop_column(n, target, confirm, key, pathname, persona):
         if not n:
@@ -1824,6 +1909,29 @@ def register(app) -> None:
     # -- settings --------------------------------------------------------------------------
 
     @app.callback(
+        Output(ids.NOTIFY, "sendNotifications", allow_duplicate=True),
+        Output(ids.URL, "pathname", allow_duplicate=True),
+        Input(ids.SCD2_SWITCH, "checked"),
+        State(ids.FORM_KEY, "data"),
+        State(ids.URL, "pathname"),
+        State(ids.PERSONA, "data"),
+        prevent_initial_call=True,
+        running=[(Output(ids.SCD2_SWITCH, "disabled"), True, False)],
+    )
+    def toggle_scd2(checked, key, pathname, persona):
+        c = get_context(persona)
+        try:
+            form, _r, _e = _load(c, key)
+            if bool(checked) == form.scd2_enabled:
+                return no_update, no_update
+            c.forms.set_scd2(form, bool(checked))
+        except (BackendError, PermissionDenied, ValueError) as exc:
+            return notify(str(exc), title="Not changed", color="red"), no_update
+        invalidate_metadata()
+        message = "History table enabled and backfilled" if checked else "History table disabled"
+        return notify(message), pathname  # re-render the page to show or hide the query snippet
+
+    @app.callback(
         Output(ids.SETTINGS_RESULT, "children"),
         Output(ids.NOTIFY, "sendNotifications", allow_duplicate=True),
         Output(ids.NAV_VERSION, "data", allow_duplicate=True),
@@ -1831,12 +1939,14 @@ def register(app) -> None:
         State(ids.SETTINGS_DISPLAY, "value"),
         State(ids.SETTINGS_DESC, "value"),
         State(ids.SETTINGS_OWNER, "value"),
+        State(ids.SETTINGS_OWNER_EMAIL, "value"),
         State(ids.NAV_VERSION, "data"),
         State(ids.FORM_KEY, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.SETTINGS_SAVE, "loading"), True, False)],
     )
-    def save_settings(n, display, desc, owner, nav_version, key, persona):
+    def save_settings(n, display, desc, owner, owner_email, nav_version, key, persona):
         if not n:
             return no_update, no_update, no_update
         c = get_context(persona)
@@ -1848,6 +1958,7 @@ def register(app) -> None:
                 (desc or "").strip(),
                 (owner or "").strip(),
             )
+            updated.owner_email = (owner_email or "").strip()
             c.forms.update_form_metadata(updated)
         except (BackendError, PermissionDenied, ValueError) as exc:
             return error_alert(exc, "Not saved"), no_update, no_update
@@ -1864,6 +1975,7 @@ def register(app) -> None:
         State(ids.FORM_KEY, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.DROP_FORM_SUBMIT, "loading"), True, False)],
     )
     def drop_form(n, confirm, nav_version, key, persona):
         if not n:
@@ -1900,13 +2012,14 @@ def register(app) -> None:
         Output(ids.IMPORT_SUBMIT, "disabled"),
         Input(ids.IMPORT_UPLOAD, "contents"),
         Input(ids.IMPORT_SHEET, "value"),
+        Input(ids.IMPORT_MODE, "value"),
         State(ids.IMPORT_UPLOAD, "filename"),
         State(ids.IMPORT_TOKEN, "data"),
         State(ids.FORM_KEY, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
     )
-    def preview_import(contents, sheet, filename, token, key, persona):
+    def preview_import(contents, sheet, mode, filename, token, key, persona):
         if ctx.triggered_id == ids.IMPORT_UPLOAD:
             if not contents:
                 return no_update, no_update, no_update, no_update, no_update, True
@@ -1965,6 +2078,30 @@ def register(app) -> None:
             )
         )
         blocks.append(dmc.Text(f"{len(frame):,} rows in the file (showing the first 15).", size="sm"))
+        if mode in ("merge", "replace"):
+            try:
+                current = c.forms.load_rows(form, limit=(form.row_count or 0) + 1)
+                changes, plan_problems = build_import_changeset(form, current, frame, mode)
+            except (BackendError, PermissionDenied, ValueError) as exc:
+                return error_alert(exc, "Cannot plan the import"), token, sheet_data, sheet, sheet_style, True
+            if plan_problems:
+                blocks.append(
+                    dmc.Alert(
+                        dmc.List([dmc.ListItem(p) for p in plan_problems[:20]], size="sm"),
+                        title="The file cannot be merged",
+                        color="red",
+                        variant="light",
+                    )
+                )
+                return dmc.Stack(blocks, gap="xs"), token, sheet_data, sheet, sheet_style, True
+            unchanged = len(frame) - len(changes.inserts) - len(changes.updates)
+            plan = (
+                f"Plan: {len(changes.inserts):,} new, {len(changes.updates):,} updated, "
+                f"{unchanged:,} unchanged"
+            )
+            if mode == "replace":
+                plan += f", {len(changes.deletes):,} deleted"
+            blocks.append(dmc.Text(plan, size="sm", fw=600))
         if issues:
             blocks.append(
                 dmc.Alert(
@@ -1992,13 +2129,15 @@ def register(app) -> None:
         Input(ids.IMPORT_SUBMIT, "n_clicks"),
         State(ids.IMPORT_TOKEN, "data"),
         State(ids.IMPORT_SHEET, "value"),
+        State(ids.IMPORT_MODE, "value"),
         State(ids.GRID_VERSION, "data"),
         State(ids.NAV_VERSION, "data"),
         State(ids.FORM_KEY, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.IMPORT_SUBMIT, "loading"), True, False)],
     )
-    def submit_import(n, token, sheet, version, nav_version, key, persona):
+    def submit_import(n, token, sheet, mode, version, nav_version, key, persona):
         if not n:
             return no_update, no_update, no_update, no_update
         stored = uploads.get(token)
@@ -2011,12 +2150,28 @@ def register(app) -> None:
             raw = read_table(data, name, sheet=None if sheet in (None, "data") else sheet)
             mapping, _unmatched = map_frame_to_form(raw, form)
             frame, _issues = coerce_frame(raw, form.user_columns, mapping)
-            count = c.forms.append_rows(form, frame)
+            if mode in ("merge", "replace"):
+                current = c.forms.load_rows(form, limit=(form.row_count or 0) + 1)
+                changes, problems = build_import_changeset(form, current, frame, mode)
+                if problems:
+                    return (
+                        no_update,
+                        no_update,
+                        notify(" ".join(problems[:5]), title="Import failed", color="red"),
+                        no_update,
+                    )
+                result = c.forms.save(form, changes)
+                message = f"Import applied: {result.summary()}" if result.applied else "Nothing changed"
+                if result.conflicts:
+                    message += f" \u00b7 {len(result.conflicts)} row(s) changed meanwhile and were skipped"
+            else:
+                count = c.forms.append_rows(form, frame)
+                message = f"Imported {count:,} rows"
         except (ImportError_, BackendError, PermissionDenied, ValueError) as exc:
             return no_update, no_update, notify(str(exc), title="Import failed", color="red"), no_update
         uploads.drop(token)
         invalidate_metadata()
-        return False, (version or 0) + 1, notify(f"Imported {count:,} rows"), (nav_version or 0) + 1
+        return False, (version or 0) + 1, notify(message), (nav_version or 0) + 1
 
     @app.callback(
         Output({"type": "history-grid", "form": MATCH}, "dashGridOptions"),

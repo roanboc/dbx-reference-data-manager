@@ -34,8 +34,9 @@ env:
   - name: RDM_AUTH
     value: "databricks"
 
-  # Unity Catalog catalog that holds the domains (schemas) and forms (tables).
-  # Must match the catalog declared in resources/catalog.yml (bundle variable `catalog`).
+  # Unity Catalog catalog that holds the functions (schemas), forms (tables) and files.
+  # Must match the catalog declared in resources/catalog.yml (bundle variable `catalog`);
+  # this file serves `run-local` and manual deploys.
   - name: RDM_CATALOG
     value: "_reference_data"
 
@@ -44,5 +45,11 @@ env:
   #   value: "5000"
   # - name: RDM_ADMIN_CONTACT  # e-mail/URL shown in Help > About for other use cases
   #   value: "data-office@example.org"
-  # - name: RDM_METADATA_CACHE_TTL  # seconds navigation metadata is cached (default 60)
+  # - name: RDM_METADATA_CACHE_TTL  # seconds navigation metadata is cached (default 300)
   #   value: "60"
+  # Review deployments only (FR-45): switchable personas with simulated roles; queries run
+  # as the app service principal, so never enable this outside a dev catalog with test data.
+  # - name: RDM_AUTH
+  #   value: "mock"
+  # - name: RDM_DEBUG_PERSONAS
+  #   value: "true"

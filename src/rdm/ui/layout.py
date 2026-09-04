@@ -53,9 +53,36 @@ def new_file_href(function: str | None = None) -> str:
     return f"{NEW_FILE_HREF}/{quote(function)}" if function else NEW_FILE_HREF
 
 
+def scheme_toggle() -> dmc.SegmentedControl:
+    """Light / dark switch in the header; seeded from the OS scheme, then kept per browser (FR-37)."""
+    return dmc.SegmentedControl(
+        id=ids.SCHEME_TOGGLE,
+        size="xs",
+        value=None,  # set once from the OS scheme by a clientside callback
+        persistence=True,
+        persistence_type="local",
+        data=[
+            {"value": "light", "label": icon("tabler:sun", 16)},
+            {"value": "dark", "label": icon("tabler:moon", 16)},
+        ],
+    )
+
+
+def _page_loader() -> dmc.Stack:
+    """Shown while a page renders (FR-39): a cold serverless warehouse can take seconds."""
+    return dmc.Stack(
+        [dmc.Loader(size="md"), dmc.Text("Loading\u2026", size="sm", c="dimmed")],
+        align="center",
+        gap="xs",
+        mt="15vh",
+    )
+
+
 def shell() -> dmc.MantineProvider:
     return dmc.MantineProvider(
+        id=ids.SHELL,
         theme=THEME,
+        defaultColorScheme="auto",  # follow the OS until the user picks a scheme (FR-37)
         children=[
             dcc.Location(id=ids.URL, refresh=False),
             dcc.Store(id=ids.PERSONA, storage_type="session"),
@@ -64,7 +91,18 @@ def shell() -> dmc.MantineProvider:
             dmc.NotificationContainer(id=ids.NOTIFY, position="top-right"),
             dmc.AppShell(
                 [
-                    dmc.AppShellHeader(html.Div(id="header-content"), px="md"),
+                    dmc.AppShellHeader(
+                        dmc.Group(
+                            [
+                                html.Div(id="header-content", style={"flex": 1, "minWidth": 0}),
+                                scheme_toggle(),
+                            ],
+                            gap="sm",
+                            wrap="nowrap",
+                            h=56,
+                        ),
+                        px="md",
+                    ),
                     dmc.AppShellNavbar(
                         id="navbar",
                         children=[
@@ -99,7 +137,18 @@ def shell() -> dmc.MantineProvider:
                         p="sm",
                     ),
                     dmc.AppShellMain(
-                        dmc.Container(html.Div(id=ids.PAGE), size="xl", px="md", py="md", fluid=True)
+                        dmc.Container(
+                            dcc.Loading(
+                                html.Div(id=ids.PAGE),
+                                delay_show=300,
+                                custom_spinner=_page_loader(),
+                                overlay_style={"visibility": "visible", "opacity": 0.4},
+                            ),
+                            size="xl",
+                            px="md",
+                            py="md",
+                            fluid=True,
+                        )
                     ),
                 ],
                 header={"height": 56},

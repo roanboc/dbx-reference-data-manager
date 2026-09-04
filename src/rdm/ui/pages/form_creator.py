@@ -14,12 +14,12 @@ from rdm.models import ColumnDef, DataType, FormDef, humanize, sanitize_identifi
 from rdm.services.excel_import import ImportError_, ParsedSheet, coerce_frame, list_sheets, parse_file
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
-from rdm.ui.components import error_alert, icon, info_alert, issues_list, notify, page_title
-from rdm.ui.context import AppContext, get_context, invalidate_metadata, navigation
-from rdm.ui.layout import form_href
+from rdm.ui.components import error_alert, icon, info_alert, issues_list, link_button, notify, page_title
+from rdm.ui.context import AppContext, get_context, get_settings, invalidate_metadata, navigation
+from rdm.ui.layout import form_href, new_file_href
 
 log = logging.getLogger(__name__)
-GRID_THEME = "ag-theme-quartz"
+GRID_THEME = g.GRID_THEME
 STEPS = [
     ("Source", "Upload a file or start from scratch"),
     ("Columns", "Confirm names, types and rules"),
@@ -43,7 +43,7 @@ def _default_state(function: str | None = None) -> dict[str, Any]:
         "display_name": "",
         "description": "",
         "owner": "",
-        "load_rows": True,
+        "owner_email": "",
     }
 
 
@@ -114,7 +114,9 @@ def _stubs(state: dict[str, Any], present: set[str]) -> html.Div:
         ids.WIZ_DISPLAY: lambda: dmc.TextInput(id=ids.WIZ_DISPLAY, value=state.get("display_name") or ""),
         ids.WIZ_DESC: lambda: dmc.Textarea(id=ids.WIZ_DESC, value=state.get("description") or ""),
         ids.WIZ_OWNER: lambda: dmc.TextInput(id=ids.WIZ_OWNER, value=state.get("owner") or ""),
-        ids.WIZ_LOAD_ROWS: lambda: dmc.Checkbox(id=ids.WIZ_LOAD_ROWS, checked=bool(state.get("load_rows"))),
+        ids.WIZ_OWNER_EMAIL: lambda: dmc.TextInput(
+            id=ids.WIZ_OWNER_EMAIL, value=state.get("owner_email") or ""
+        ),
         ids.WIZ_ERRORS: lambda: html.Div(id=ids.WIZ_ERRORS),
     }
     return html.Div(
@@ -176,7 +178,39 @@ def _nav_buttons(back: bool = True, next_label: str = "Next", next_id: str = ids
     return dmc.Group(buttons, justify="flex-end", mt="md")
 
 
-def step_source(state: dict[str, Any]) -> dmc.Stack:
+def _size_warning(row_count: int, max_rows: int, function: str | None) -> dmc.Alert | None:
+    """FR-46: beyond the grid limit a form cannot even be fully seen while editing."""
+    if row_count <= max_rows:
+        return None
+    return dmc.Alert(
+        dmc.Stack(
+            [
+                dmc.Text(
+                    f"This file has {row_count:,} rows; forms are recommended up to {max_rows:,} "
+                    f"(the grid shows at most {max_rows:,} rows at a time, the rest is only reachable "
+                    "through search). Datasets of this size are better kept as a governed file: same "
+                    "place, description, owner and history, but replaced as a whole instead of edited "
+                    "row by row.",
+                    size="sm",
+                ),
+                link_button(
+                    "Create a file instead",
+                    new_file_href(function or None),
+                    variant="light",
+                    size="xs",
+                    leftSection=icon("tabler:file-plus"),
+                ),
+            ],
+            gap=6,
+        ),
+        title="Consider a file instead of a form",
+        color="yellow",
+        variant="light",
+        icon=icon("tabler:scale"),
+    )
+
+
+def step_source(state: dict[str, Any], max_rows: int) -> dmc.Stack:
     stored = uploads.get(state.get("token"))
     preview: Any = None
     sheet_select = dmc.Select(id=ids.WIZ_SHEET, label="Sheet", data=[], value=None, style={"display": "none"})
@@ -205,6 +239,7 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
                         size="sm",
                         fw=500,
                     ),
+                    _size_warning(parsed.row_count, max_rows, state.get("function")),
                     dag.AgGrid(
                         rowData=[
                             {str(k): g.to_json_value(v) for k, v in r.items()}
@@ -269,6 +304,13 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
     return dmc.Stack(
         [
             dmc.Title("Where does the data come from?", order=4),
+            dmc.Text(
+                f"Forms are lists edited row by row \u2014 recommended up to {max_rows:,} rows. "
+                "Keep larger datasets as governed files (New file): same catalogue entry and history, "
+                "replaced as a whole.",
+                size="sm",
+                c="dimmed",
+            ),
             mode,
             upload_block,
             scratch_block,
@@ -471,7 +513,6 @@ def step_columns(state: dict[str, Any]) -> dmc.Stack:
 def step_details(ctx_: AppContext, state: dict[str, Any]) -> dmc.Stack:
     titles = {item.function.name: item.function.title for item in navigation(ctx_, None)}
     functions = ctx_.permissions.admin_functions
-    has_file = uploads.get(state.get("token")) is not None and state["mode"] == "upload"
     return dmc.Stack(
         [
             dmc.Title("Describe the form", order=4),
@@ -515,17 +556,21 @@ def step_details(ctx_: AppContext, state: dict[str, Any]) -> dmc.Stack:
                                 description="Stored as the table comment; searchable in the sidebar",
                                 autosize=True,
                                 minRows=3,
+                                required=True,
                             ),
                             dmc.TextInput(
                                 id=ids.WIZ_OWNER,
                                 label="Owner",
                                 value=state.get("owner") or ctx_.user.email or ctx_.user.username,
+                                description="Team or person accountable for this list",
+                                required=True,
                             ),
-                            dmc.Checkbox(
-                                id=ids.WIZ_LOAD_ROWS,
-                                label="Load the rows from the file",
-                                checked=bool(state.get("load_rows")) and has_file,
-                                style={} if has_file else {"display": "none"},
+                            dmc.TextInput(
+                                id=ids.WIZ_OWNER_EMAIL,
+                                label="Owner e-mail",
+                                value=state.get("owner_email") or "",
+                                description="Optional contact e-mail of the owning team or person",
+                                placeholder="team@example.org",
                             ),
                         ],
                         gap="sm",
@@ -543,7 +588,7 @@ def step_details(ctx_: AppContext, state: dict[str, Any]) -> dmc.Stack:
                     ids.WIZ_DISPLAY,
                     ids.WIZ_DESC,
                     ids.WIZ_OWNER,
-                    ids.WIZ_LOAD_ROWS,
+                    ids.WIZ_OWNER_EMAIL,
                     ids.WIZ_ERRORS,
                     ids.WIZ_BACK,
                     ids.WIZ_NEXT,
@@ -614,12 +659,13 @@ def assemble(state: dict[str, Any]) -> tuple[FormDef, list[ColumnDef], list[str]
         display_name=(state.get("display_name") or "").strip(),
         description=(state.get("description") or "").strip(),
         owner=(state.get("owner") or "").strip(),
+        owner_email=(state.get("owner_email") or "").strip(),
         columns=columns,
     )
     return form, columns, errors, mapping
 
 
-def step_review(state: dict[str, Any]) -> dmc.Stack:
+def step_review(state: dict[str, Any], max_rows: int) -> dmc.Stack:
     form, columns, errors, mapping = assemble(state)
     blocks: list[Any] = [dmc.Title("Review and create", order=4)]
     if errors:
@@ -678,10 +724,11 @@ def step_review(state: dict[str, Any]) -> dmc.Stack:
             style={"height": f"{min(120 + 34 * max(len(columns), 2), 400)}px"},
         )
     )
-    parsed = _parsed(state) if state["mode"] == "upload" and state.get("load_rows") else None
+    parsed = _parsed(state) if state["mode"] == "upload" else None
     if parsed is not None and not errors:
         frame, issues = coerce_frame(parsed.raw, columns, mapping)
         blocks.append(dmc.Text(f"Data: {len(frame):,} rows will be loaded.", fw=500, size="sm"))
+        blocks.append(_size_warning(len(frame), max_rows, form.function))
         if issues:
             blocks.append(
                 dmc.Alert(
@@ -732,15 +779,16 @@ def register(app) -> None:
     def render_step(state, persona):
         state = state or _default_state()
         step = int(state.get("step", 0))
+        max_rows = get_settings().max_rows
         try:
             if step == 0:
-                body = step_source(state)
+                body = step_source(state, max_rows)
             elif step == 1:
                 body = step_columns(state)
             elif step == 2:
                 body = step_details(get_context(persona), state)
             else:
-                body = step_review(state)
+                body = step_review(state, max_rows)
         except Exception as exc:  # noqa: BLE001
             log.exception("wizard step failed")
             body = error_alert(exc)
@@ -807,10 +855,14 @@ def register(app) -> None:
         State(ids.WIZ_DISPLAY, "value"),
         State(ids.WIZ_DESC, "value"),
         State(ids.WIZ_OWNER, "value"),
-        State(ids.WIZ_LOAD_ROWS, "checked"),
+        State(ids.WIZ_OWNER_EMAIL, "value"),
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[
+            (Output(ids.WIZ_CREATE, "loading"), True, False),
+            (Output(ids.WIZ_NEXT, "loading"), True, False),
+        ],
     )
     def navigate(
         n_next,
@@ -826,7 +878,7 @@ def register(app) -> None:
         display,
         desc,
         owner,
-        load_rows,
+        owner_email,
         nav_version,
         persona,
     ):
@@ -867,7 +919,7 @@ def register(app) -> None:
             if step == 1 and grid_rows is not None:
                 state["columns"] = list(grid_rows)
             if step == 2:
-                state.update(_details(function, name, display, desc, owner, load_rows))
+                state.update(_details(function, name, display, desc, owner, owner_email))
             state["step"] = max(0, step - 1)
             return state, None, no_update, no_update, no_update
         if trigger == ids.WIZ_NEXT:
@@ -894,7 +946,6 @@ def register(app) -> None:
                         )
                     if not state.get("columns"):
                         state["columns"] = _rows_from_parsed(parsed)
-                    state["load_rows"] = True
                 elif not state.get("columns"):
                     state["columns"] = [
                         {
@@ -918,7 +969,6 @@ def register(app) -> None:
                             "source": "",
                         },
                     ]
-                    state["load_rows"] = False
                 state["step"] = 1
                 return state, None, no_update, no_update, no_update
             if step == 1:
@@ -940,7 +990,7 @@ def register(app) -> None:
                 state["step"] = 2
                 return state, None, no_update, no_update, no_update
             if step == 2:
-                state.update(_details(function, name, display, desc, owner, load_rows))
+                state.update(_details(function, name, display, desc, owner, owner_email))
                 if not state["name"]:
                     return (
                         state,
@@ -953,6 +1003,16 @@ def register(app) -> None:
                     return (
                         state,
                         error_alert("Choose a function.", "Missing function"),
+                        no_update,
+                        no_update,
+                        no_update,
+                    )
+                if not state["description"].strip() or not state["owner"].strip():
+                    return (
+                        state,
+                        error_alert(
+                            "A description and an owner (team or person) are required.", "Missing details"
+                        ),
                         no_update,
                         no_update,
                         no_update,
@@ -972,7 +1032,7 @@ def register(app) -> None:
             c = get_context(persona)
             frame = None
             try:
-                if state["mode"] == "upload" and state.get("load_rows"):
+                if state["mode"] == "upload":
                     parsed = _parsed(state)
                     if parsed is not None:
                         frame, _issues = coerce_frame(parsed.raw, columns, mapping)
@@ -991,7 +1051,7 @@ def register(app) -> None:
         return (no_update,) * 5
 
 
-def _details(function, name, display, desc, owner, load_rows) -> dict[str, Any]:
+def _details(function, name, display, desc, owner, owner_email) -> dict[str, Any]:
     clean = sanitize_identifier(name or "", fallback="") if (name or "").strip() else ""
     return {
         "function": function or "",
@@ -999,5 +1059,5 @@ def _details(function, name, display, desc, owner, load_rows) -> dict[str, Any]:
         "display_name": (display or "").strip() or (humanize(clean) if clean else ""),
         "description": desc or "",
         "owner": owner or "",
-        "load_rows": bool(load_rows),
+        "owner_email": owner_email or "",
     }

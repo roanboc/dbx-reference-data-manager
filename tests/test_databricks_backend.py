@@ -243,7 +243,7 @@ def test_create_function_issues_create_schema_with_domain_and_registers_it():
             [("research__rimu", "RIMU lists", "alice")],
         ),
         (
-            r"SELECT name, domain_name, display_name, description, owner, doc_link FROM",
+            r"^SELECT \* FROM `_reference_data`\.`_catalog`\.`functions`",
             FUNCTION_REGISTRY_COLS,
             [
                 (
@@ -317,7 +317,7 @@ def test_domain_registry_crud_and_delete_guard():
             [("research__rimu", "", "alice")],
         ),
         (
-            r"SELECT name, domain_name, display_name, description, owner, doc_link FROM",
+            r"^SELECT \* FROM `_reference_data`\.`_catalog`\.`functions`",
             FUNCTION_REGISTRY_COLS,
             [("research__rimu", "research", "", "", "", "")],
         ),
@@ -346,7 +346,7 @@ def test_domain_registry_crud_and_delete_guard():
         [DOMAIN_REGISTRY, (r"^MERGE INTO", None, lambda s, p: (_ for _ in ()).throw(RuntimeError("boom")))]
     )
     with pytest.raises(BackendError, match="boom"):
-        b.create_domain(DomainDef("student", "Student"), ADMIN)
+        b.create_domain(DomainDef("customer", "Customer"), ADMIN)
 
 
 def test_delete_domain_deletes_from_the_registry():
@@ -696,7 +696,7 @@ def test_put_file_creates_volume_uploads_counts_and_registers():
     responses = [
         (r"^SELECT count\(\*\) FROM read_files", ["c"], [(1200,)]),
         (
-            r"SELECT name, display_name, description, owner, size_bytes, row_count",
+            r"^SELECT \* FROM `_reference_data`\.`_catalog`\.`files`",
             FILE_REGISTRY_COLS,
             [("gl.csv", "GL", "d", "o@x", 12, 1200, None, "alice", None, "alice")],
         ),
@@ -759,7 +759,7 @@ def test_list_get_preview_columns_download_and_drop():
     files.store[VOLUME + "/notes.txt"] = b"ignored"
     responses = [
         (
-            r"SELECT name, display_name, description, owner, size_bytes, row_count",
+            r"^SELECT \* FROM `_reference_data`\.`_catalog`\.`files`",
             FILE_REGISTRY_COLS,
             [("gl.csv", "GL", "", "", 8, 1, None, "alice", None, "alice")],
         ),
@@ -949,3 +949,87 @@ def test_list_functions_counts_registered_files():
     b, _ = make_backend(responses)
     [f] = b.list_functions()
     assert f.file_count == 2 and f.form_count == 0
+
+
+def test_owner_email_lands_in_properties_and_registry():
+    form = sample_form()
+    form.owner_email = "fin-team@example.org"
+    responses = [
+        (
+            r"information_schema`\.`tables`.*table_name = :table",
+            ["comment", "table_owner", "created", "last_altered", "last_altered_by"],
+            [("d", "alice", None, None, None)],
+        ),
+        (
+            r"information_schema`\.`columns`",
+            ["column_name", "full_data_type", "is_nullable", "comment", "ordinal_position"],
+            [(c.name, "string", "YES", "", i) for i, c in enumerate(form.columns)],
+        ),
+        (
+            r"SHOW TBLPROPERTIES",
+            ["key", "value"],
+            [("rdm.owner", "fin@example.org"), ("rdm.owner_email", "fin-team@example.org")],
+        ),
+        (r"SELECT count\(\*\)", ["c"], [(0,)]),
+    ]
+    b, conn = make_backend(responses)
+    created = b.create_form(form, ADMIN)
+    [(ddl, _)] = statements(conn, r"^CREATE TABLE")
+    assert "'rdm.owner_email' = 'fin-team@example.org'" in ddl
+    [(_, params)] = statements(conn, r"^MERGE INTO `_reference_data`\.`_catalog`\.`forms`")
+    assert params["owner_email"] == "fin-team@example.org"
+    assert created.owner_email == "fin-team@example.org"
+
+
+def test_registry_write_adds_owner_email_to_a_pre_upgrade_registry():
+    seen = {"merges": 0}
+
+    def merge(sql, params):
+        seen["merges"] += 1
+        if seen["merges"] == 1:
+            raise RuntimeError("[UNRESOLVED_COLUMN] A column named `owner_email` cannot be resolved")
+        return []
+
+    b, conn = make_backend([(r"^MERGE INTO `_reference_data`\.`_catalog`\.`forms`", None, merge)])
+    b._register_form(sample_form(), ADMIN)
+    [(alter, _)] = statements(conn, r"^ALTER TABLE `_reference_data`\.`_catalog`\.`forms` ADD COLUMNS")
+    assert "`owner_email` STRING" in alter
+    assert seen["merges"] == 2  # the MERGE is retried after the column is added
+
+
+def test_scd2_enable_creates_history_and_saves_maintain_windows():
+    form = sample_form()
+    responses = [
+        (
+            r"information_schema`\.`tables`.*table_name = :table",
+            ["comment", "table_owner", "created", "last_altered", "last_altered_by"],
+            [("d", "alice", None, None, None)],
+        ),
+        (
+            r"information_schema`\.`columns`",
+            ["column_name", "full_data_type", "is_nullable", "comment", "ordinal_position"],
+            [(c.name, "string", "YES", "", i) for i, c in enumerate(form.columns)],
+        ),
+        (r"SHOW TBLPROPERTIES", ["key", "value"], [("rdm.scd2", "true")]),
+        (r"SELECT count\(\*\)", ["c"], [(3,)]),
+    ]
+    b, conn = make_backend(responses)
+    enabled = b.set_scd2(form, True, ADMIN)
+    assert enabled.scd2_enabled
+    hist = "`_reference_data`.`finance__cost`.`_h__cost_centres`"
+    [(create, _)] = statements(conn, r"^CREATE TABLE IF NOT EXISTS " + hist.replace("`", r"\`"))
+    assert "__START_AT" in create and "__END_AT" in create and "WHERE 1 = 0" in create
+    assert "'delta.enableChangeDataFeed' = 'true'" in create  # same properties as the ingestion SCD2 tables
+    [(backfill, _)] = statements(conn, r"^INSERT INTO " + hist.replace("`", r"\`"))
+    assert "__END_AT` IS NULL" in backfill or "__END_AT" in backfill
+    [(props, _)] = statements(conn, r"SET TBLPROPERTIES \('rdm.scd2'")
+    assert "'rdm.scd2' = 'true'" in props
+    # a save on an SCD2 form closes and opens windows after the MERGE
+    conn.calls.clear()
+    form.scd2_enabled = True
+    b.apply_changes(form, ChangeSet(inserts=[RowInsert({"code": "X"})]), ADMIN)
+    assert statements(conn, r"^MERGE INTO `_reference_data`\.`finance__cost`\.`cost_centres`")
+    [(close, _)] = statements(conn, r"^UPDATE " + hist.replace("`", r"\`"))
+    assert "__END_AT` = :now" in close and "IS NULL" in close
+    [(open_, _)] = statements(conn, r"^INSERT INTO " + hist.replace("`", r"\`"))
+    assert ":now, NULL FROM" in open_

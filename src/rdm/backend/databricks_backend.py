@@ -72,6 +72,10 @@ from rdm.models import (
     PROP_DOMAIN,
     PROP_FORM,
     PROP_OWNER,
+    PROP_OWNER_EMAIL,
+    PROP_SCD2,
+    SCD2_END_COLUMN,
+    SCD2_START_COLUMN,
     SYSTEM_COLUMNS,
     TAG_DISPLAY_NAME,
     TAG_DOMAIN,
@@ -92,6 +96,7 @@ from rdm.models import (
     SaveResult,
     User,
     new_row_id,
+    scd2_table_name,
     split_file_name,
     system_columns,
     validate_file_name,
@@ -230,12 +235,21 @@ class DatabricksBackend(DatabaseBackend):
 
         cfg = Config(host=self.host) if self.host else Config()
         hostname = (cfg.host or "").replace("https://", "").replace("http://", "").rstrip("/")
+        # Naive timestamps are UTC by contract; without this the warehouse session zone
+        # (workspace-local) would reinterpret them on write while reads return UTC.
+        session_conf = {"timezone": "UTC"}
         if self.access_token:
             return sql.connect(
-                server_hostname=hostname, http_path=self.http_path, access_token=self.access_token
+                server_hostname=hostname,
+                http_path=self.http_path,
+                access_token=self.access_token,
+                session_configuration=session_conf,
             )
         return sql.connect(
-            server_hostname=hostname, http_path=self.http_path, credentials_provider=lambda: cfg.authenticate
+            server_hostname=hostname,
+            http_path=self.http_path,
+            credentials_provider=lambda: cfg.authenticate,
+            session_configuration=session_conf,
         )
 
     def _connection(self) -> Any:
@@ -461,6 +475,7 @@ class DatabricksBackend(DatabaseBackend):
                     display_name=r.get("display_name") or t.get(TAG_DISPLAY_NAME, ""),
                     description=comment or r.get("description") or "",
                     owner=r.get("owner") or t.get(TAG_OWNER, "") or (owner or ""),
+                    owner_email=r.get("owner_email") or "",
                     doc_link=r.get("doc_link") or "",
                     domain=r.get("domain_name") or t.get(TAG_DOMAIN, "") or "",
                     form_count=int(counts.get(name, 0)),
@@ -471,14 +486,19 @@ class DatabricksBackend(DatabaseBackend):
         return functions
 
     def _function_registry(self) -> dict[str, dict[str, Any]]:
-        """Descriptive attributes from ``_catalog.functions`` (empty when the table is absent)."""
+        """Descriptive attributes from ``_catalog.functions`` (empty when the table is absent).
+
+        ``SELECT *`` keeps the read tolerant of registries created before newer columns.
+        """
         try:
-            rows, cols = self._run(
-                f"SELECT name, domain_name, display_name, description, owner, doc_link FROM {self._reg('functions')}"
-            )
+            rows, cols = self._run(f"SELECT * FROM {self._reg('functions')}")
         except BackendError:
             return {}
-        return {r[0]: dict(zip(cols, r, strict=True)) for r in rows}
+        out = {}
+        for r in rows:
+            d = dict(zip(cols, r, strict=True))
+            out[d["name"]] = d
+        return out
 
     def _reg(self, table: str) -> str:
         return f"{_q(self.catalog)}.{_q(self.meta_schema)}.{_q(table)}"
@@ -502,6 +522,7 @@ class DatabricksBackend(DatabaseBackend):
         props = {
             PROP_DISPLAY_NAME: function.display_name,
             PROP_OWNER: function.owner or actor.username,
+            PROP_OWNER_EMAIL: function.owner_email,
             PROP_DOC_LINK: function.doc_link,
             PROP_DOMAIN: function.domain,
             "rdm.created_by": actor.username,
@@ -529,6 +550,7 @@ class DatabricksBackend(DatabaseBackend):
         props = {
             PROP_DISPLAY_NAME: function.display_name,
             PROP_OWNER: function.owner,
+            PROP_OWNER_EMAIL: function.owner_email,
             PROP_DOC_LINK: function.doc_link,
             PROP_DOMAIN: function.domain,
         }
@@ -584,19 +606,19 @@ class DatabricksBackend(DatabaseBackend):
         ),
         "functions": (
             "CREATE TABLE IF NOT EXISTS {t} (name STRING NOT NULL, domain_name STRING, display_name STRING, "
-            "description STRING, owner STRING, doc_link STRING, created_at TIMESTAMP_NTZ, created_by STRING, "
-            "updated_at TIMESTAMP_NTZ, updated_by STRING) "
+            "description STRING, owner STRING, owner_email STRING, doc_link STRING, created_at TIMESTAMP_NTZ, "
+            "created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
             "USING DELTA COMMENT 'Registry of functions (schemas) maintained by the Reference Data Manager'"
         ),
         "forms": (
             "CREATE TABLE IF NOT EXISTS {t} (function_name STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
-            "description STRING, owner STRING, created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, "
-            "updated_by STRING) USING DELTA COMMENT 'Registry of forms maintained by the Reference Data Manager'"
+            "description STRING, owner STRING, owner_email STRING, created_at TIMESTAMP_NTZ, created_by STRING, "
+            "updated_at TIMESTAMP_NTZ, updated_by STRING) USING DELTA COMMENT 'Registry of forms maintained by the Reference Data Manager'"
         ),
         "files": (
             "CREATE TABLE IF NOT EXISTS {t} (function_name STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
-            "description STRING, owner STRING, size_bytes BIGINT, row_count BIGINT, created_at TIMESTAMP_NTZ, "
-            "created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
+            "description STRING, owner STRING, owner_email STRING, size_bytes BIGINT, row_count BIGINT, "
+            "created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
             "USING DELTA COMMENT 'Registry of files (CSV/Parquet in the function volumes) maintained by the Reference Data Manager'"
         ),
     }
@@ -634,8 +656,16 @@ class DatabricksBackend(DatabaseBackend):
                     raise
                 log.warning("Registry table %s unavailable: %s", table, exc)
         except BackendError as exc:
+            # Registries created before owner_email existed migrate on first write.
+            if "owner_email" in str(exc).lower():
+                try:
+                    self._run(f"ALTER TABLE {self._reg(table)} ADD COLUMNS (`owner_email` STRING)")
+                    self._run(statement, params)
+                    return
+                except BackendError as migrate_exc:
+                    exc = migrate_exc
             if strict:
-                raise
+                raise exc
             log.warning("Registry update for %s failed: %s", table, exc)
 
     def _register_domain(self, domain: DomainDef, actor: User, strict: bool = False) -> None:
@@ -660,6 +690,7 @@ class DatabricksBackend(DatabaseBackend):
                 "display_name": function.display_name,
                 "description": function.description,
                 "owner": function.owner,
+                "owner_email": function.owner_email,
                 "doc_link": function.doc_link,
             },
             actor,
@@ -669,7 +700,12 @@ class DatabricksBackend(DatabaseBackend):
         self._registry_upsert(
             "forms",
             {"function_name": form.function, "name": form.name},
-            {"display_name": form.display_name, "description": form.description, "owner": form.owner},
+            {
+                "display_name": form.display_name,
+                "description": form.description,
+                "owner": form.owner,
+                "owner_email": form.owner_email,
+            },
             actor,
         )
 
@@ -690,6 +726,7 @@ class DatabricksBackend(DatabaseBackend):
                 "display_name": file.display_name,
                 "description": file.description,
                 "owner": file.owner,
+                "owner_email": file.owner_email,
                 "size_bytes": file.size_bytes,
                 "row_count": file.row_count,
             },
@@ -707,26 +744,19 @@ class DatabricksBackend(DatabaseBackend):
             log.warning("Registry delete for %s failed: %s", file.full_name, exc)
 
     def _file_registry(self, function: str) -> dict[str, dict[str, Any]]:
-        cols = [
-            "name",
-            "display_name",
-            "description",
-            "owner",
-            "size_bytes",
-            "row_count",
-            "created_at",
-            "created_by",
-            "updated_at",
-            "updated_by",
-        ]
+        """``SELECT *`` keeps the read tolerant of registries created before newer columns."""
         try:
-            rows, _ = self._run(
-                f"SELECT {', '.join(cols)} FROM {self._reg('files')} WHERE `function_name` = :function_name",
+            rows, cols = self._run(
+                f"SELECT * FROM {self._reg('files')} WHERE `function_name` = :function_name",
                 {"function_name": function},
             )
         except BackendError:
             return {}
-        return {r[0]: dict(zip(cols, r, strict=True)) for r in rows}
+        out = {}
+        for r in rows:
+            d = dict(zip(cols, r, strict=True))
+            out[d["name"]] = d
+        return out
 
     def _file_counts(self) -> dict[str, int]:
         try:
@@ -767,6 +797,7 @@ class DatabricksBackend(DatabaseBackend):
         rows, _ = self._run(
             f"SELECT table_name, comment, table_owner, created, last_altered, last_altered_by FROM {self._info('tables')} "
             "WHERE table_catalog = :catalog AND table_schema = :schema AND table_type IN ('MANAGED', 'EXTERNAL') "
+            "AND table_name NOT LIKE '\\_%' "
             "ORDER BY table_name",
             {"catalog": self.catalog, "schema": function},
         )
@@ -840,6 +871,8 @@ class DatabricksBackend(DatabaseBackend):
         form.tags = self._table_tags(function).get(name, {})
         form.display_name = form.properties.get(PROP_DISPLAY_NAME) or form.tags.get(TAG_DISPLAY_NAME, "")
         form.owner = form.properties.get(PROP_OWNER) or form.tags.get(TAG_OWNER, "") or (owner or "")
+        form.owner_email = form.properties.get(PROP_OWNER_EMAIL, "")
+        form.scd2_enabled = form.properties.get(PROP_SCD2, "") == "true"
         form.apply_column_config(form.properties.get(PROP_COLUMN_CONFIG))
         form.created_at = to_db_scalar(created)
         form.updated_at = to_db_scalar(altered)
@@ -861,6 +894,8 @@ class DatabricksBackend(DatabaseBackend):
             PROP_FORM: "true",
             PROP_DISPLAY_NAME: form.display_name or "",
             PROP_OWNER: form.owner or (actor.username if actor else ""),
+            PROP_OWNER_EMAIL: form.owner_email or "",
+            PROP_SCD2: "true" if form.scd2_enabled else "",
             PROP_COLUMN_CONFIG: form.column_config_json(),
         }
         return props
@@ -871,7 +906,7 @@ class DatabricksBackend(DatabaseBackend):
         form.validate()
         props = {**FORM_TABLE_PROPERTIES, **self._rdm_properties(form, actor)}
         col_ddl = ",\n  ".join(self._column_ddl(c) for c in form.columns)
-        prop_ddl = ", ".join(f"{lit(k)} = {lit(v)}" for k, v in props.items())
+        prop_ddl = ", ".join(f"{lit(k)} = {lit(v)}" for k, v in props.items() if v)
         self._run(
             f"CREATE TABLE {self._t(form)} (\n  {col_ddl},\n"
             f"  CONSTRAINT {_q('pk_' + form.name)} PRIMARY KEY ({_q(ID_COLUMN)})\n)\n"
@@ -882,6 +917,8 @@ class DatabricksBackend(DatabaseBackend):
             {TAG_FORM: "true", TAG_DISPLAY_NAME: form.display_name, TAG_OWNER: form.owner or actor.username},
         )
         self._register_form(form, actor)
+        if form.scd2_enabled:
+            self._scd2_create(form)
         if rows is not None and len(rows):
             self._append_rows(form, rows, actor)
         return self.get_form(form.function, form.name)
@@ -927,6 +964,10 @@ class DatabricksBackend(DatabaseBackend):
         self._run(
             f"ALTER TABLE {self._t(form)} ADD COLUMN {_q(column.name)} {native_type_databricks(column)}{comment}"
         )
+        if form.scd2_enabled:
+            self._run(
+                f"ALTER TABLE {self._h(form)} ADD COLUMN {_q(column.name)} {native_type_databricks(column)}"
+            )
         form.columns.append(column)
         self._run(
             f"ALTER TABLE {self._t(form)} SET TBLPROPERTIES ({lit(PROP_COLUMN_CONFIG)} = {lit(form.column_config_json())})"
@@ -939,6 +980,8 @@ class DatabricksBackend(DatabaseBackend):
         if column_name not in {c.name for c in self._load_columns(form.function, form.name)}:
             raise NotFoundError(f"Column '{column_name}' does not exist.")
         self._run(f"ALTER TABLE {self._t(form)} DROP COLUMN {_q(column_name)}")
+        if form.scd2_enabled:
+            self._run(f"ALTER TABLE {self._h(form)} DROP COLUMN {_q(column_name)}")
         form.columns = [c for c in form.columns if c.name != column_name]
         self._run(
             f"ALTER TABLE {self._t(form)} SET TBLPROPERTIES ({lit(PROP_COLUMN_CONFIG)} = {lit(form.column_config_json())})"
@@ -947,6 +990,7 @@ class DatabricksBackend(DatabaseBackend):
 
     def drop_form(self, form: FormDef, actor: User) -> None:
         self._run(f"DROP TABLE {self._t(form)}")
+        self._run(f"DROP TABLE IF EXISTS {self._h(form)}")
         self._unregister_form(form)
 
     def _select_columns(self, form: FormDef) -> list[str]:
@@ -1102,6 +1146,7 @@ class DatabricksBackend(DatabaseBackend):
             expected_deletes += 1
         if not ops:
             return result
+        applied_ids = [str(o[ID_COLUMN]) for o in ops]
 
         schema = self._struct_schema(
             editable, {"_op": "STRING", ID_COLUMN: "STRING", VERSION_COLUMN: "BIGINT"}
@@ -1155,6 +1200,8 @@ class DatabricksBackend(DatabaseBackend):
                     result.conflicts.append(self._conflict_message(o[ID_COLUMN], after.get(o[ID_COLUMN])))
                 if o["_op"] == "D" and o[ID_COLUMN] in after:
                     result.conflicts.append(self._conflict_message(o[ID_COLUMN], after.get(o[ID_COLUMN])))
+        if form.scd2_enabled and result.applied:
+            self._scd2_sync(form, applied_ids, now)
         self._write_audit(audit)
         return result
 
@@ -1164,6 +1211,69 @@ class DatabricksBackend(DatabaseBackend):
         for c in columns:
             out[c.name] = _json_value(c, row.get(c.name))
         return out
+
+    # -- SCD Type 2 history table (FR-47) ---------------------------------------------------
+
+    def _h(self, form: FormDef) -> str:
+        return f"{_q(self.catalog)}.{_q(form.function)}.{_q(scd2_table_name(form.name))}"
+
+    def _scd2_create(self, form: FormDef) -> None:
+        # Same table properties as an Auto CDC SCD type 2 target: CDF lets
+        # consumers chain off the history; column mapping lets it follow DROP COLUMN.
+        props = ", ".join(
+            f"{lit(k)} = {lit(v)}"
+            for k, v in {
+                "delta.enableChangeDataFeed": "true",
+                "delta.columnMapping.mode": "name",
+            }.items()
+        )
+        self._run(
+            f"CREATE TABLE IF NOT EXISTS {self._h(form)} USING DELTA "
+            f"COMMENT {lit('Type 2 history of ' + form.full_name + ' maintained by the Reference Data Manager')} "
+            f"TBLPROPERTIES ({props}) "
+            f"AS SELECT *, CAST(NULL AS TIMESTAMP) AS `{SCD2_START_COLUMN}`, "
+            f"CAST(NULL AS TIMESTAMP) AS `{SCD2_END_COLUMN}` FROM {self._t(form)} WHERE 1 = 0"
+        )
+
+    def _scd2_sync(self, form: FormDef, row_ids: list[str], now: datetime) -> None:
+        """Close and open validity windows for the rows a save touched.
+
+        Works from the form's state: a candidate row whose ``_updated_at`` equals the save
+        timestamp was applied (insert or new version); one missing from the form was
+        deleted. Rows that lost the concurrency check keep their window untouched.
+        """
+        for i in range(0, len(row_ids), 200):
+            chunk = row_ids[i : i + 200]
+            params: dict[str, Any] = {f"p{j}": rid for j, rid in enumerate(chunk)}
+            markers = ", ".join(f":{k}" for k in params)
+            params["now"] = now
+            self._run(
+                f"UPDATE {self._h(form)} SET `{SCD2_END_COLUMN}` = :now "
+                f"WHERE `{SCD2_END_COLUMN}` IS NULL AND {_q(ID_COLUMN)} IN ({markers}) "
+                f"AND ({_q(ID_COLUMN)} NOT IN (SELECT {_q(ID_COLUMN)} FROM {self._t(form)}) "
+                f"OR EXISTS (SELECT 1 FROM {self._t(form)} f WHERE f.{_q(ID_COLUMN)} = {self._h(form)}.{_q(ID_COLUMN)} "
+                f"AND f.{_q(UPDATED_AT_COLUMN)} = :now))",
+                params,
+            )
+            self._run(
+                f"INSERT INTO {self._h(form)} SELECT *, :now, NULL FROM {self._t(form)} "
+                f"WHERE {_q(ID_COLUMN)} IN ({markers}) AND {_q(UPDATED_AT_COLUMN)} = :now",
+                params,
+            )
+
+    def set_scd2(self, form: FormDef, enabled: bool, actor: User) -> FormDef:
+        scd2_table_name(form.name)  # length check before anything is written
+        if enabled:
+            self._scd2_create(form)
+            self._run(
+                f"INSERT INTO {self._h(form)} SELECT *, {_q(UPDATED_AT_COLUMN)}, NULL FROM {self._t(form)} t "
+                f"WHERE NOT EXISTS (SELECT 1 FROM {self._h(form)} h "
+                f"WHERE h.{_q(ID_COLUMN)} = t.{_q(ID_COLUMN)} AND h.`{SCD2_END_COLUMN}` IS NULL)"
+            )
+        self._run(
+            f"ALTER TABLE {self._t(form)} SET TBLPROPERTIES ({lit(PROP_SCD2)} = {lit('true' if enabled else '')})"
+        )
+        return self.get_form(form.function, form.name)
 
     @staticmethod
     def _conflict_message(label: str, current: dict[str, Any] | None) -> str:
@@ -1225,6 +1335,8 @@ class DatabricksBackend(DatabaseBackend):
                 )
             self._run(statement, {"payload": json.dumps(payload), "now": now, "actor": actor.username})
             total += len(payload)
+        if form.scd2_enabled and total:
+            self._scd2_sync(form, [str(a["row_id"]) for a in audit], now)
         self._write_audit(audit)
         return total
 
@@ -1438,6 +1550,7 @@ class DatabricksBackend(DatabaseBackend):
             display_name=reg.get("display_name") or "",
             description=reg.get("description") or "",
             owner=reg.get("owner") or "",
+            owner_email=reg.get("owner_email") or "",
             size_bytes=int(size) if size is not None else None,
             row_count=int(reg["row_count"]) if reg.get("row_count") is not None else None,
             path=self._file_path(function, name),
@@ -1516,6 +1629,7 @@ class DatabricksBackend(DatabaseBackend):
             file.display_name = file.display_name or previous.display_name
             file.description = file.description or previous.description
             file.owner = file.owner or previous.owner
+            file.owner_email = file.owner_email or previous.owner_email
         file.owner = file.owner or actor.username
         self._register_file(file, actor)
         now = utcnow()
@@ -1541,10 +1655,11 @@ class DatabricksBackend(DatabaseBackend):
     def update_file_metadata(self, file: FileDef, actor: User) -> FileDef:
         file.validate()
         current = self.get_file(file.function, file.name)
-        current.display_name, current.description, current.owner = (
+        current.display_name, current.description, current.owner, current.owner_email = (
             file.display_name,
             file.description,
             file.owner,
+            file.owner_email,
         )
         self._register_file(current, actor)
         return self.get_file(file.function, file.name)

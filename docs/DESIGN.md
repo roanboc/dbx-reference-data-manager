@@ -61,7 +61,7 @@ tests/                      Unit, backend contract and Dash server tests
 |---|---|---|
 | Catalog | DuckDB database file | `_reference_data` (configurable `RDM_CATALOG`, per bundle target) |
 | Domain (classifier) | `_catalog.domains` | `<catalog>._catalog.domains` (registry table, same shape) |
-| Function | schema | schema, e.g. `student__survey_service_improvement` |
+| Function | schema | schema, e.g. `customer__survey_service_improvement` |
 | Function's domain | `_catalog.object_properties` (`rdm.domain`) | schema `DBPROPERTIES ('rdm.domain')`, schema tag `rdm_domain`, `_catalog.functions.domain_name` |
 | Form | table | Delta table |
 | File | `<db dir>/files/<function>/<name>` on disk, read with `read_csv_auto` / `read_parquet` | file in the managed volume `<catalog>.<function>._files`, moved with the Files API, read with `read_files` |
@@ -235,7 +235,8 @@ import (append) cover bulk changes instead.
 * **Form creator**: upload → sheet/header choice → inferred columns editable in a grid
   (name, type, description, required, business key, allowed values suggested for
   low-cardinality text) → function/name/description/owner → review with coercion issues →
-  create (+ system columns, comments, properties, tags) and load the rows.
+  create (+ system columns, comments, properties, tags) and load the file's rows in the
+  same step (forms started from scratch begin empty).
 * **Schema editor**: descriptions, required, business key, allowed values; add and remove
   columns. Types are fixed after creation (a type change is a rewrite).
 * **Settings**: display name, description, owner; delete form with typed confirmation
@@ -262,11 +263,13 @@ DuckDB is the local *runtime* backend; it is deliberately not the only truth:
 | Contract | `DatabaseBackend` behaviour against DuckDB (create/alter, read, save, conflicts, history, permissions) | every commit |
 | Server | Dash app boots, layout and callbacks resolve (Flask test client) | every commit |
 | Browser | Playwright: edit/add/delete/save, bulk update, item form + restore, tab round trip, function and domains pages, persona switch | on demand (`scripts` in the session; add to CI when a browser is available) |
-| Real | `databricks apps run-local` against a dev workspace; the contract suite against a dev catalog with `RDM_TEST_DATABRICKS=1` (to be wired when a workspace is available) | before release |
+| Real | `databricks apps run-local` against a dev workspace; the live contract suite (`tests/test_databricks_live.py`) against a dev catalog with `RDM_TEST_DATABRICKS=1` | before release |
 
-Known DuckDB/Databricks divergences (covered by the Databricks SQL-generation tests rather
-than by DuckDB): PRIMARY KEY enforcement, literal escaping, DROP COLUMN requirements,
-timestamp semantics (naive vs session-zone), MERGE metrics, tags/properties, CDF retention.
+Known DuckDB/Databricks divergences (covered by the Databricks SQL-generation tests and the
+live contract suite rather than by DuckDB): PRIMARY KEY enforcement, literal escaping,
+DROP COLUMN requirements, MERGE metrics, tags/properties, CDF retention. Timestamp
+semantics are pinned: the SQL connection sets the session timezone to UTC, so naive
+timestamps round-trip unchanged regardless of the warehouse's default zone.
 
 ## 10. Databricks Apps practices applied
 

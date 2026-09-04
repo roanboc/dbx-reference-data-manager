@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from conftest import sample_columns
+from conftest import SAMPLE_FUNCTION, sample_columns
 from rdm.backend.base import BackendError, PermissionDenied
 from rdm.backend.duckdb_backend import DuckDBBackend
 from rdm.models import (
@@ -35,6 +35,7 @@ from rdm.services.form_service import (
     EditorState,
     FormService,
     build_changeset,
+    build_import_changeset,
     coerce_value,
     describe_row,
     is_missing,
@@ -660,7 +661,7 @@ def test_build_changeset_on_empty_snapshot():
 # FormService guards (seeded backend)
 # --------------------------------------------------------------------------------------
 
-STUDENT = "student__survey_service_improvement"
+CUSTOMER = "customer__survey_service_improvement"
 FINANCE = "finance__cost_management"
 HR = "hr__reference"
 
@@ -670,9 +671,9 @@ def service(backend: DuckDBBackend, user: User) -> FormService:
 
 
 def test_service_roles_per_persona(seeded_backend, admin, editor, viewer):
-    assert service(seeded_backend, viewer).role(STUDENT) is Role.VIEWER
+    assert service(seeded_backend, viewer).role(CUSTOMER) is Role.VIEWER
     assert service(seeded_backend, viewer).role(FINANCE) is Role.NONE
-    assert service(seeded_backend, editor).role(STUDENT) is Role.EDITOR
+    assert service(seeded_backend, editor).role(CUSTOMER) is Role.EDITOR
     assert service(seeded_backend, editor).role(FINANCE) is Role.VIEWER
     assert service(seeded_backend, editor).role(HR) is Role.NONE
     assert service(seeded_backend, admin).role(HR) is Role.ADMIN
@@ -681,10 +682,10 @@ def test_service_roles_per_persona(seeded_backend, admin, editor, viewer):
 
 def test_viewer_cannot_save(seeded_backend, viewer):
     svc = service(seeded_backend, viewer)
-    form = svc.get_form(STUDENT, "service_areas")
+    form = svc.get_form(CUSTOMER, "service_areas")
     with pytest.raises(
         PermissionDenied,
-        match="Editor access to function 'student__survey_service_improvement' is required \\(you have: Viewer\\)",
+        match="Editor access to function 'customer__survey_service_improvement' is required \\(you have: Viewer\\)",
     ):
         svc.save(form, ChangeSet(inserts=[RowInsert({"area_code": "X"})]))
     with pytest.raises(PermissionDenied):
@@ -696,9 +697,9 @@ def test_viewer_cannot_save(seeded_backend, viewer):
 
 def test_viewer_can_read_visible_functions_only(seeded_backend, viewer):
     svc = service(seeded_backend, viewer)
-    form = svc.get_form(STUDENT, "service_areas")
+    form = svc.get_form(CUSTOMER, "service_areas")
     assert len(svc.load_rows(form)) == 5
-    assert len(svc.load_rows(form, search="lib")) == 1
+    assert len(svc.load_rows(form, search="log")) == 1
     assert len(svc.load_rows(form, search="", limit=2)) == 2
     assert len(svc.history(form)) == 5
     with pytest.raises(
@@ -715,8 +716,8 @@ def test_viewer_can_read_visible_functions_only(seeded_backend, viewer):
 
 def test_editor_cannot_administer(seeded_backend, editor):
     svc = service(seeded_backend, editor)
-    form = svc.get_form(STUDENT, "service_areas")
-    new_form = FormDef(STUDENT, "new_form", columns=[ColumnDef("x")])
+    form = svc.get_form(CUSTOMER, "service_areas")
+    new_form = FormDef(CUSTOMER, "new_form", columns=[ColumnDef("x")])
     with pytest.raises(PermissionDenied, match="Function admin access to function"):
         svc.create_form(new_form)
     with pytest.raises(PermissionDenied):
@@ -728,21 +729,21 @@ def test_editor_cannot_administer(seeded_backend, editor):
     with pytest.raises(PermissionDenied):
         svc.drop_form(form)
     with pytest.raises(PermissionDenied):
-        svc.update_function(FunctionDef(STUDENT, description="x"))
+        svc.update_function(FunctionDef(CUSTOMER, description="x"))
     with pytest.raises(PermissionDenied):
-        svc.list_function_grants(STUDENT)
+        svc.list_function_grants(CUSTOMER)
     with pytest.raises(PermissionDenied):
-        svc.grant_function_role(STUDENT, "someone", Role.VIEWER)
+        svc.grant_function_role(CUSTOMER, "someone", Role.VIEWER)
     with pytest.raises(PermissionDenied, match="global administrator"):
         svc.create_function(FunctionDef("new_function"))
     with pytest.raises(PermissionDenied, match="global administrator"):
         svc.create_domain(DomainDef("new_domain"))
     with pytest.raises(PermissionDenied, match="global administrator"):
-        svc.delete_domain("student")
-    assert [f.name for f in seeded_backend.list_forms(STUDENT)] == ["service_areas", "survey_questions"]
+        svc.delete_domain("customer")
+    assert [f.name for f in seeded_backend.list_forms(CUSTOMER)] == ["service_areas", "survey_questions"]
     assert "new_function" not in [d.name for d in seeded_backend.list_functions()]
-    assert [d.name for d in svc.list_domains()] == ["finance", "people", "research", "student"]
-    assert seeded_backend.get_form(STUDENT, "service_areas").column("lead_email") is not None
+    assert [d.name for d in svc.list_domains()] == ["customer", "finance", "people", "research"]
+    assert seeded_backend.get_form(CUSTOMER, "service_areas").column("lead_email") is not None
 
 
 def test_function_admin_without_catalog_rights_cannot_create_or_delete(seeded_backend, function_admin):
@@ -751,8 +752,16 @@ def test_function_admin_without_catalog_rights_cannot_create_or_delete(seeded_ba
     with pytest.raises(PermissionDenied, match="global administrator"):
         svc.create_function(FunctionDef("another"))
     # they administer their function ...
-    created = svc.create_form(FormDef(FINANCE, "local_form", columns=[ColumnDef("x")]))
-    assert created.owner == function_admin.username
+    created = svc.create_form(
+        FormDef(
+            FINANCE,
+            "local_form",
+            description="Local list",
+            owner="fin@example.org",
+            columns=[ColumnDef("x")],
+        )
+    )
+    assert created.owner == "fin@example.org"
     assert dict(svc.list_function_grants(FINANCE))["finance_admins"] is Role.ADMIN
     assert "finance_admins" in svc.list_groups("finance")
     function = seeded_backend.get_function(FINANCE)
@@ -774,19 +783,39 @@ def test_global_admin_can_create_domain_function_and_form_and_delete_them(seeded
     svc = service(seeded_backend, admin)
     domain = svc.create_domain(DomainDef("library_services", display_name="Library Services"))
     assert domain.owner == admin.username and domain.function_count == 0
-    function = svc.create_function(FunctionDef("library", display_name="Library", domain="library_services"))
-    assert function.owner == admin.username and function.domain == "library_services"
+    function = svc.create_function(
+        FunctionDef(
+            "library",
+            display_name="Library",
+            description="Library lists",
+            owner="lib@example.org",
+            domain="library_services",
+        )
+    )
+    assert function.owner == "lib@example.org" and function.domain == "library_services"
     assert seeded_backend.get_domain("library_services").function_count == 1
     # permissions were resolved before the function existed; refresh them
     svc = service(seeded_backend, admin)
     form = svc.create_form(
-        FormDef("library", "loans", columns=[ColumnDef("loan_id", nullable=False, is_key=True)])
+        FormDef(
+            "library",
+            "loans",
+            description="Active loans",
+            owner="lib@example.org",
+            columns=[ColumnDef("loan_id", nullable=False, is_key=True)],
+        )
     )
     assert form.row_count == 0
     updated = svc.update_function(
-        FunctionDef("library", display_name="Library Services", owner="lib@example.org", domain="student")
+        FunctionDef(
+            "library",
+            display_name="Library Services",
+            description="Library lists",
+            owner="lib@example.org",
+            domain="customer",
+        )
     )
-    assert updated.display_name == "Library Services" and updated.domain == "student"
+    assert updated.display_name == "Library Services" and updated.domain == "customer"
     svc.grant_function_role("library", "library_readers", Role.VIEWER)
     assert ("library_readers", Role.VIEWER) in svc.list_function_grants("library")
     with pytest.raises(BackendError, match="still has 1 form"):
@@ -799,37 +828,37 @@ def test_global_admin_can_create_domain_function_and_form_and_delete_them(seeded
     svc.delete_domain("library_services")
     assert "library_services" not in [d.name for d in svc.list_domains()]
     with pytest.raises(BackendError, match="still has"):
-        svc.delete_domain("student")
+        svc.delete_domain("customer")
 
 
 def test_editor_happy_path_save_through_seeded_backend(seeded_backend, editor):
     svc = service(seeded_backend, editor)
-    form = svc.get_form(STUDENT, "service_areas")
+    form = svc.get_form(CUSTOMER, "service_areas")
     snapshot = svc.load_rows(form)
-    careers_pos = int(snapshot.index[snapshot["area_code"] == "CAR"][0])
-    estates_pos = int(snapshot.index[snapshot["area_code"] == "EST"][0])
+    onboarding_pos = int(snapshot.index[snapshot["area_code"] == "ONB"][0])
+    field_pos = int(snapshot.index[snapshot["area_code"] == "FLD"][0])
     raw_state = {
-        "edited_rows": {str(careers_pos): {"lead_email": "car.lead@example.org", "target_score": "79"}},
+        "edited_rows": {str(onboarding_pos): {"lead_email": "onb.lead@example.org", "target_score": "79"}},
         "added_rows": [{"area_code": "SPT", "area_name": "Sport", "is_active": "yes", "target_score": "70"}],
-        "deleted_rows": [estates_pos],
+        "deleted_rows": [field_pos],
     }
     changes, issues = build_changeset(form, snapshot, EditorState.from_session(raw_state))
     assert issues == []
-    assert changes.updates[0].label == "Row area_code=CAR"
+    assert changes.updates[0].label == "Row area_code=ONB"
     result = svc.save(form, changes)
     assert isinstance(result, SaveResult) and result.ok
     assert (result.inserted, result.updated, result.deleted) == (1, 1, 1)
     after = svc.load_rows(form)
-    assert set(after["area_code"]) == {"LIB", "ITS", "WEL", "CAR", "SPT"}
-    car = after[after["area_code"] == "CAR"].iloc[0]
-    assert car["lead_email"] == "car.lead@example.org" and int(car["target_score"]) == 79
-    assert car["_updated_by"] == editor.username
+    assert set(after["area_code"]) == {"SUP", "LOG", "BIL", "ONB", "SPT"}
+    onb = after[after["area_code"] == "ONB"].iloc[0]
+    assert onb["lead_email"] == "onb.lead@example.org" and int(onb["target_score"]) == 79
+    assert onb["_updated_by"] == editor.username
     spt = after[after["area_code"] == "SPT"].iloc[0]
     assert bool(spt["is_active"]) is True and spt["_created_by"] == editor.username
     history = svc.history(form)
     assert history["change_type"].tolist()[:3] == ["delete", "update", "insert"]
     assert history["changed_by"].tolist()[:3] == [editor.username] * 3
-    assert history.iloc[0]["area_code"] == "EST"
+    assert history.iloc[0]["area_code"] == "FLD"
     assert history.iloc[1]["changed_fields"] == "lead_email, target_score"
     # an empty save is a no-op that touches nothing
     assert svc.save(form, ChangeSet()) == SaveResult()
@@ -839,9 +868,9 @@ def test_editor_happy_path_save_through_seeded_backend(seeded_backend, editor):
 
 def test_editor_stale_edit_is_reported_not_applied(seeded_backend, editor, admin):
     svc = service(seeded_backend, editor)
-    form = svc.get_form(STUDENT, "service_areas")
+    form = svc.get_form(CUSTOMER, "service_areas")
     snapshot = svc.load_rows(form)
-    pos = int(snapshot.index[snapshot["area_code"] == "LIB"][0])
+    pos = int(snapshot.index[snapshot["area_code"] == "SUP"][0])
     changes, _ = build_changeset(form, snapshot, EditorState(edited_rows={pos: {"target_score": 90}}))
     # someone else changes the same row in between
     other = service(seeded_backend, admin)
@@ -851,9 +880,9 @@ def test_editor_stale_edit_is_reported_not_applied(seeded_backend, editor, admin
     assert other.save(form, other_changes).updated == 1
     result = svc.save(form, changes)
     assert not result.ok and result.updated == 0
-    assert result.conflicts[0].startswith(f"Row area_code=LIB: modified by {admin.username}")
+    assert result.conflicts[0].startswith(f"Row area_code=SUP: modified by {admin.username}")
     row = svc.load_rows(form)
-    assert int(row[row["area_code"] == "LIB"].iloc[0]["target_score"]) == 91
+    assert int(row[row["area_code"] == "SUP"].iloc[0]["target_score"]) == 91
 
 
 def test_service_with_explicit_permissions_object(backend, admin):
@@ -874,7 +903,7 @@ CSV = b"code,amount\nA,1\nB,2\n"
 
 
 def test_file_guards_per_role(seeded_backend, admin, function_admin, editor, viewer):
-    # viewer on student: preview / download / history, nothing else
+    # viewer on customer: preview / download / history, nothing else
     v = service(seeded_backend, viewer)
     finance_file = seeded_backend.get_file(FINANCE, "gl_transactions.csv")
     with pytest.raises(PermissionDenied):
@@ -892,11 +921,20 @@ def test_file_guards_per_role(seeded_backend, admin, function_admin, editor, vie
     with pytest.raises(PermissionDenied, match="Editor access to function 'finance__cost_management'"):
         e.replace_file(finance_file, CSV)
     with pytest.raises(PermissionDenied):
-        e.add_file(FileDef(STUDENT, "new.csv"), CSV)  # editor on student, not admin
+        e.add_file(FileDef(CUSTOMER, "new.csv"), CSV)  # editor on customer, not admin
     # function admin on finance: add, replace, metadata; not delete
     fa = service(seeded_backend, function_admin)
-    added = fa.add_file(FileDef(FINANCE, "budget.csv", display_name="Budget"), CSV)
-    assert added.row_count == 2 and added.owner == function_admin.username
+    added = fa.add_file(
+        FileDef(
+            FINANCE,
+            "budget.csv",
+            display_name="Budget",
+            description="Budget lines",
+            owner="fin@example.org",
+        ),
+        CSV,
+    )
+    assert added.row_count == 2 and added.owner == "fin@example.org"
     replaced = fa.replace_file(added, CSV + b"C,3\n")
     assert replaced.row_count == 3 and replaced.display_name == "Budget"
     replaced.description = "annual budget"
@@ -904,9 +942,102 @@ def test_file_guards_per_role(seeded_backend, admin, function_admin, editor, vie
     with pytest.raises(PermissionDenied, match="Deleting a file requires global administrator"):
         fa.drop_file(replaced)
     with pytest.raises(PermissionDenied):
-        fa.add_file(FileDef(STUDENT, "x.csv"), CSV)  # only viewer there
+        fa.add_file(FileDef(CUSTOMER, "x.csv"), CSV)  # only viewer there
     # global admin deletes
     g = service(seeded_backend, admin)
     g.drop_file(replaced)
     assert "budget.csv" not in [f.name for f in seeded_backend.list_files(FINANCE)]
     assert seeded_backend.file_history(replaced)["change_type"].tolist() == ["delete", "replace", "upload"]
+
+
+# --------------------------------------------------------------------------------------
+# Metadata quality rules (FR-40 / FR-41)
+# --------------------------------------------------------------------------------------
+
+
+def test_descriptions_and_owner_are_mandatory(seeded_backend, function_admin):
+    svc = service(seeded_backend, function_admin)
+    with pytest.raises(ValueError, match="needs a description"):
+        svc.create_form(FormDef(FINANCE, "x1", owner="fin", columns=[ColumnDef("a")]))
+    with pytest.raises(ValueError, match="an owner"):
+        svc.create_form(FormDef(FINANCE, "x1", description="d", columns=[ColumnDef("a")]))
+    with pytest.raises(ValueError, match="does not look like an e-mail"):
+        svc.create_form(
+            FormDef(
+                FINANCE, "x1", description="d", owner="fin", owner_email="nope", columns=[ColumnDef("a")]
+            )
+        )
+    created = svc.create_form(
+        FormDef(
+            FINANCE,
+            "x1",
+            description="d",
+            owner="fin",
+            owner_email="team@example.org",
+            columns=[ColumnDef("a", description="A value")],
+        )
+    )
+    assert created.owner_email == "team@example.org"
+    with pytest.raises(ValueError, match="needs a description"):
+        svc.add_column(created, ColumnDef("extra"))
+    with pytest.raises(ValueError, match="needs a description"):
+        svc.update_file_metadata(FileDef(FINANCE, "gl_transactions.csv", owner="fin"))
+    with pytest.raises(ValueError, match="The function needs"):
+        svc.update_function(FunctionDef(FINANCE))
+
+
+def test_scd2_toggle_requires_function_admin(seeded_backend, editor, function_admin):
+    form = seeded_backend.get_form(FINANCE, "cost_centres")
+    with pytest.raises(PermissionDenied, match="Function admin access"):
+        service(seeded_backend, editor).set_scd2(form, True)
+    enabled = service(seeded_backend, function_admin).set_scd2(form, True)
+    assert enabled.scd2_enabled
+
+
+# --------------------------------------------------------------------------------------
+# Import modes (FR-43)
+# --------------------------------------------------------------------------------------
+
+
+def test_build_import_changeset_merges_and_replaces(backend, admin, sample_form):
+    current = backend.read_rows(sample_form)
+    incoming = pd.DataFrame({"code": ["A001", "E005"], "qty": [99, 5]})
+    changes, problems = build_import_changeset(sample_form, current, incoming, "merge")
+    assert problems == []
+    assert [u.changes for u in changes.updates] == [{"qty": 99}]  # only the changed cell
+    assert [i.values["code"] for i in changes.inserts] == ["E005"]
+    assert not changes.deletes
+    replace, problems = build_import_changeset(sample_form, current, incoming, "replace")
+    assert problems == [] and len(replace.deletes) == 3  # B002, C003, D004
+    # applied through the service: audit and versions as for grid edits
+    svc = FormService(backend, admin, Permissions({SAMPLE_FUNCTION: Role.ADMIN}))
+    result = svc.save(sample_form, replace)
+    assert result.inserted == 1 and result.updated == 1 and result.deleted == 3
+    rows = backend.read_rows(sample_form)
+    assert sorted(rows["code"].tolist()) == ["A001", "E005"]
+    assert int(rows[rows["code"] == "A001"]["qty"].iloc[0]) == 99
+
+
+def test_build_import_changeset_rejects_bad_files(backend, admin, sample_form):
+    current = backend.read_rows(sample_form)
+    _, problems = build_import_changeset(
+        sample_form, current, pd.DataFrame({"code": ["X", "X"], "qty": [1, 2]}), "merge"
+    )
+    assert any("repeats the key" in p for p in problems)
+    _, problems = build_import_changeset(
+        sample_form, current, pd.DataFrame({"code": [None], "qty": [1]}), "merge"
+    )
+    assert any("business key" in p and "empty" in p for p in problems)
+    _, problems = build_import_changeset(
+        sample_form, current, pd.DataFrame({"code": ["A001"], "category": ["Bogus"]}), "merge"
+    )
+    assert any("must be one of" in p for p in problems)
+    keyless = FormDef(
+        SAMPLE_FUNCTION,
+        "keyless",
+        columns=system_columns() + [ColumnDef("x")],
+    )
+    _, problems = build_import_changeset(keyless, current, pd.DataFrame({"x": ["1"]}), "merge")
+    assert any("business key columns" in p for p in problems)
+    with pytest.raises(ValueError, match="Unknown import mode"):
+        build_import_changeset(sample_form, current, pd.DataFrame(), "upsert")

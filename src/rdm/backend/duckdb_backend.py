@@ -56,6 +56,10 @@ from rdm.models import (
     PROP_DOMAIN,
     PROP_FORM,
     PROP_OWNER,
+    PROP_OWNER_EMAIL,
+    PROP_SCD2,
+    SCD2_END_COLUMN,
+    SCD2_START_COLUMN,
     SYSTEM_COLUMNS,
     UPDATED_AT_COLUMN,
     UPDATED_BY_COLUMN,
@@ -72,6 +76,7 @@ from rdm.models import (
     SaveResult,
     User,
     new_row_id,
+    scd2_table_name,
     split_file_name,
     system_columns,
     validate_file_name,
@@ -85,8 +90,8 @@ FILES_DIRNAME = "files"
 DEFAULT_LOCAL_GROUPS = (
     "rdm_admins",
     "everyone",
-    "student_stewards",
-    "student_readers",
+    "customer_stewards",
+    "customer_readers",
     "finance_admins",
     "finance_stewards",
     "finance_readers",
@@ -221,6 +226,7 @@ class DuckDBBackend(DatabaseBackend):
                         display_name VARCHAR,
                         description  VARCHAR,
                         owner        VARCHAR,
+                        owner_email  VARCHAR,
                         doc_link     VARCHAR,
                         created_at   TIMESTAMP,
                         created_by   VARCHAR,
@@ -234,6 +240,7 @@ class DuckDBBackend(DatabaseBackend):
                         display_name  VARCHAR,
                         description   VARCHAR,
                         owner         VARCHAR,
+                        owner_email   VARCHAR,
                         created_at    TIMESTAMP,
                         created_by    VARCHAR,
                         updated_at    TIMESTAMP,
@@ -247,6 +254,7 @@ class DuckDBBackend(DatabaseBackend):
                         display_name  VARCHAR,
                         description   VARCHAR,
                         owner         VARCHAR,
+                        owner_email   VARCHAR,
                         size_bytes    BIGINT,
                         row_count     BIGINT,
                         created_at    TIMESTAMP,
@@ -278,6 +286,18 @@ class DuckDBBackend(DatabaseBackend):
             cur.execute(
                 f"ALTER TABLE {qualified([META_SCHEMA, 'forms'])} RENAME COLUMN domain TO function_name"
             )
+        # Registries created before owner_email existed gain the column; fresh databases get it from the DDL.
+        existing_tables = {
+            t
+            for (t,) in cur.execute(
+                "SELECT DISTINCT table_name FROM duckdb_columns() WHERE schema_name = ?", [META_SCHEMA]
+            ).fetchall()
+        }
+        for table in ("functions", "forms", "files"):
+            if table in existing_tables:
+                cur.execute(
+                    f"ALTER TABLE {qualified([META_SCHEMA, table])} ADD COLUMN IF NOT EXISTS owner_email VARCHAR"
+                )
 
     # -- registry (mirrors the Databricks ``_catalog`` tables) -----------------------------
 
@@ -290,14 +310,15 @@ class DuckDBBackend(DatabaseBackend):
         created_at, created_by = existing if existing else (now, actor.username)
         cur.execute(
             f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'functions'])} "
-            "(name, domain_name, display_name, description, owner, doc_link, created_at, created_by, "
-            "updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(name, domain_name, display_name, description, owner, owner_email, doc_link, created_at, "
+            "created_by, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 function.name,
                 function.domain or None,
                 function.display_name,
                 function.description,
                 function.owner,
+                function.owner_email,
                 function.doc_link,
                 created_at,
                 created_by,
@@ -319,14 +340,15 @@ class DuckDBBackend(DatabaseBackend):
         created_at, created_by = existing if existing else (now, actor.username)
         cur.execute(
             f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'forms'])} "
-            "(function_name, name, display_name, description, owner, created_at, created_by, updated_at, "
-            "updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(function_name, name, display_name, description, owner, owner_email, created_at, created_by, "
+            "updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 form.function,
                 form.name,
                 form.display_name,
                 form.description,
                 form.owner,
+                form.owner_email,
                 created_at,
                 created_by,
                 now,
@@ -350,14 +372,15 @@ class DuckDBBackend(DatabaseBackend):
         created_at, created_by = existing if existing else (now, actor.username)
         cur.execute(
             f"INSERT OR REPLACE INTO {qualified([META_SCHEMA, 'files'])} "
-            "(function_name, name, display_name, description, owner, size_bytes, row_count, created_at, "
-            "created_by, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(function_name, name, display_name, description, owner, owner_email, size_bytes, row_count, "
+            "created_at, created_by, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 file.function,
                 file.name,
                 file.display_name,
                 file.description,
                 file.owner,
+                file.owner_email,
                 file.size_bytes,
                 file.row_count,
                 created_at,
@@ -379,6 +402,7 @@ class DuckDBBackend(DatabaseBackend):
             "display_name",
             "description",
             "owner",
+            "owner_email",
             "size_bytes",
             "row_count",
             "created_at",
@@ -563,6 +587,7 @@ class DuckDBBackend(DatabaseBackend):
             counts = dict(
                 cur.execute(
                     "SELECT schema_name, count(*) FROM duckdb_tables() WHERE NOT internal AND NOT temporary "
+                    "AND table_name NOT LIKE '\\_%' ESCAPE '\\' "
                     "GROUP BY schema_name"
                 ).fetchall()
             )
@@ -583,6 +608,7 @@ class DuckDBBackend(DatabaseBackend):
             display_name=props.get(PROP_DISPLAY_NAME, ""),
             description=props.get("comment", ""),
             owner=props.get(PROP_OWNER, ""),
+            owner_email=props.get(PROP_OWNER_EMAIL, ""),
             doc_link=props.get(PROP_DOC_LINK, ""),
             domain=props.get(PROP_DOMAIN, ""),
             form_count=form_count,
@@ -595,7 +621,8 @@ class DuckDBBackend(DatabaseBackend):
             if name in HIDDEN_SCHEMAS or not self._schema_exists(cur, name):
                 raise NotFoundError(f"Function '{name}' does not exist.")
             count = cur.execute(
-                "SELECT count(*) FROM duckdb_tables() WHERE NOT internal AND NOT temporary AND schema_name = ?",
+                "SELECT count(*) FROM duckdb_tables() WHERE NOT internal AND NOT temporary AND schema_name = ? "
+                "AND table_name NOT LIKE '\\_%' ESCAPE '\\'",
                 [name],
             ).fetchone()[0]
             return self._function_from(cur, name, count)
@@ -627,6 +654,7 @@ class DuckDBBackend(DatabaseBackend):
                     "comment": function.description,
                     PROP_DISPLAY_NAME: function.display_name,
                     PROP_OWNER: function.owner or actor.username,
+                    PROP_OWNER_EMAIL: function.owner_email,
                     PROP_DOC_LINK: function.doc_link,
                     PROP_DOMAIN: function.domain,
                     "created_by": actor.username,
@@ -650,6 +678,7 @@ class DuckDBBackend(DatabaseBackend):
                     "comment": function.description,
                     PROP_DISPLAY_NAME: function.display_name,
                     PROP_OWNER: function.owner,
+                    PROP_OWNER_EMAIL: function.owner_email,
                     PROP_DOC_LINK: function.doc_link,
                     PROP_DOMAIN: function.domain,
                 },
@@ -662,7 +691,8 @@ class DuckDBBackend(DatabaseBackend):
             if not self._schema_exists(cur, function.name):
                 raise NotFoundError(f"Function '{function.name}' does not exist.")
             n = cur.execute(
-                "SELECT count(*) FROM duckdb_tables() WHERE NOT internal AND NOT temporary AND schema_name = ?",
+                "SELECT count(*) FROM duckdb_tables() WHERE NOT internal AND NOT temporary AND schema_name = ? "
+                "AND table_name NOT LIKE '\\_%' ESCAPE '\\'",
                 [function.name],
             ).fetchone()[0]
             if n:
@@ -697,7 +727,8 @@ class DuckDBBackend(DatabaseBackend):
                 raise NotFoundError(f"Function '{function}' does not exist.")
             rows = cur.execute(
                 "SELECT table_name, comment, estimated_size FROM duckdb_tables() "
-                "WHERE NOT internal AND NOT temporary AND schema_name = ? ORDER BY table_name",
+                "WHERE NOT internal AND NOT temporary AND schema_name = ? "
+                "AND table_name NOT LIKE '\\_%' ESCAPE '\\' ORDER BY table_name",
                 [function],
             ).fetchall()
             props = self._get_props_bulk(cur, "table", function)
@@ -712,6 +743,8 @@ class DuckDBBackend(DatabaseBackend):
                         display_name=p.get(PROP_DISPLAY_NAME, ""),
                         description=comment or "",
                         owner=p.get(PROP_OWNER, ""),
+                        owner_email=p.get(PROP_OWNER_EMAIL, ""),
+                        scd2_enabled=p.get(PROP_SCD2, "") == "true",
                         properties=p,
                         tags=tags.get(name, {}),
                         row_count=int(size) if size is not None else None,
@@ -765,6 +798,8 @@ class DuckDBBackend(DatabaseBackend):
                 display_name=props.get(PROP_DISPLAY_NAME, ""),
                 description=comment or "",
                 owner=props.get(PROP_OWNER, ""),
+                owner_email=props.get(PROP_OWNER_EMAIL, ""),
+                scd2_enabled=props.get(PROP_SCD2, "") == "true",
                 columns=self._load_columns(cur, function, name),
                 properties=props,
                 tags=tags,
@@ -821,6 +856,8 @@ class DuckDBBackend(DatabaseBackend):
                     PROP_FORM: "true",
                     PROP_DISPLAY_NAME: form.display_name,
                     PROP_OWNER: form.owner or actor.username,
+                    PROP_OWNER_EMAIL: form.owner_email,
+                    PROP_SCD2: "true" if form.scd2_enabled else "",
                     PROP_COLUMN_CONFIG: form.column_config_json(),
                     "created_by": actor.username,
                     "created_at": utcnow().isoformat(),
@@ -838,6 +875,9 @@ class DuckDBBackend(DatabaseBackend):
                 },
             )
             self._register_form(cur, form, actor)
+            if form.scd2_enabled:
+                scd2_table_name(form.name)  # length check before the table is created
+                self._scd2_create(cur, form)
             if rows is not None and len(rows):
                 self._append_rows(cur, form, rows, actor)
         return self.get_form(form.function, form.name)
@@ -878,6 +918,7 @@ class DuckDBBackend(DatabaseBackend):
                 {
                     PROP_DISPLAY_NAME: form.display_name,
                     PROP_OWNER: form.owner,
+                    PROP_OWNER_EMAIL: form.owner_email,
                     PROP_COLUMN_CONFIG: form.column_config_json(),
                 },
             )
@@ -906,6 +947,10 @@ class DuckDBBackend(DatabaseBackend):
             cur.execute(
                 f"COMMENT ON COLUMN {self._t(form)}.{quote_ident(column.name)} IS {lit(column.description or '')}"
             )
+            if form.scd2_enabled:
+                cur.execute(
+                    f"ALTER TABLE {self._h(form)} ADD COLUMN {quote_ident(column.name)} {native_type_duckdb(column)}"
+                )
             column.nullable = True  # existing rows have no value; NOT NULL can be set later
             form.columns.append(column)
             self._set_props(
@@ -921,6 +966,8 @@ class DuckDBBackend(DatabaseBackend):
             if column_name not in names:
                 raise NotFoundError(f"Column '{column_name}' does not exist.")
             cur.execute(f"ALTER TABLE {self._t(form)} DROP COLUMN {quote_ident(column_name)}")
+            if form.scd2_enabled:
+                cur.execute(f"ALTER TABLE {self._h(form)} DROP COLUMN {quote_ident(column_name)}")
             form.columns = [c for c in form.columns if c.name != column_name]
             self._set_props(
                 cur, "table", form.function, form.name, {PROP_COLUMN_CONFIG: form.column_config_json()}
@@ -932,6 +979,7 @@ class DuckDBBackend(DatabaseBackend):
             if not self._table_exists(cur, form.function, form.name):
                 raise NotFoundError(f"Form '{form.full_name}' does not exist.")
             cur.execute(f"DROP TABLE {self._t(form)}")
+            cur.execute(f"DROP TABLE IF EXISTS {self._h(form)}")
             self._delete_props(cur, form.function, form.name)
             self._unregister_form(cur, form.function, form.name)
             cur.execute(
@@ -1030,6 +1078,8 @@ class DuckDBBackend(DatabaseBackend):
         now = utcnow()
         batch = uuid.uuid4().hex
         user_cols = [c.name for c in form.user_columns]
+        touched: list[str] = []  # rows whose current window closes
+        opened: list[str] = []  # rows that get a new open window
         with self._tx() as cur:
             for ins in changes.inserts:
                 row_id = new_row_id()
@@ -1059,6 +1109,7 @@ class DuckDBBackend(DatabaseBackend):
                 )
                 self._log(cur, form, row_id, "insert", actor, batch, None, {ID_COLUMN: row_id, **values}, now)
                 result.inserted += 1
+                opened.append(row_id)
             for upd in changes.updates:
                 values = {c: to_db_scalar(v) for c, v in upd.changes.items() if c in user_cols}
                 if not values:
@@ -1084,6 +1135,8 @@ class DuckDBBackend(DatabaseBackend):
                 after = self._fetch_row(cur, form, upd.row_id)
                 self._log(cur, form, upd.row_id, "update", actor, batch, before, after, now)
                 result.updated += 1
+                touched.append(upd.row_id)
+                opened.append(upd.row_id)
             for dele in changes.deletes:
                 before = self._fetch_row(cur, form, dele.row_id)
                 n = cur.execute(
@@ -1096,7 +1149,70 @@ class DuckDBBackend(DatabaseBackend):
                     continue
                 self._log(cur, form, dele.row_id, "delete", actor, batch, before, None, now)
                 result.deleted += 1
+                touched.append(dele.row_id)
+            if form.scd2_enabled and (touched or opened):
+                self._scd2_close(cur, form, touched, now)
+                self._scd2_open(cur, form, opened, now)
         return result
+
+    # -- SCD Type 2 history table (FR-47) ---------------------------------------------------
+
+    def _h(self, form: FormDef) -> str:
+        return qualified([form.function, scd2_table_name(form.name)])
+
+    def _scd2_columns(self, cur, form: FormDef) -> list[str]:
+        """The form's columns as stored, so history follows schema changes (add/drop column)."""
+        return [c.name for c in self._load_columns(cur, form.function, form.name)]
+
+    def _scd2_create(self, cur, form: FormDef) -> None:
+        cols = ", ".join(quote_ident(c) for c in self._scd2_columns(cur, form))
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {self._h(form)} AS "
+            f"SELECT {cols}, CAST(NULL AS TIMESTAMP) AS \"{SCD2_START_COLUMN}\", "
+            f"CAST(NULL AS TIMESTAMP) AS \"{SCD2_END_COLUMN}\" FROM {self._t(form)} WHERE 1 = 0"
+        )
+
+    def _scd2_open(self, cur, form: FormDef, row_ids: list[str], now: datetime) -> None:
+        """One new open window per row, valid from ``now`` (the save/backfill timestamp)."""
+        if not row_ids:
+            return
+        cols = ", ".join(quote_ident(c) for c in self._scd2_columns(cur, form))
+        markers = ", ".join("?" for _ in row_ids)
+        cur.execute(
+            f"INSERT INTO {self._h(form)} SELECT {cols}, ?, NULL FROM {self._t(form)} "
+            f"WHERE {quote_ident(ID_COLUMN)} IN ({markers})",
+            [now, *row_ids],
+        )
+
+    def _scd2_close(self, cur, form: FormDef, row_ids: list[str], now: datetime) -> None:
+        if not row_ids:
+            return
+        markers = ", ".join("?" for _ in row_ids)
+        cur.execute(
+            f"UPDATE {self._h(form)} SET \"{SCD2_END_COLUMN}\" = ? "
+            f"WHERE \"{SCD2_END_COLUMN}\" IS NULL AND {quote_ident(ID_COLUMN)} IN ({markers})",
+            [now, *row_ids],
+        )
+
+    def set_scd2(self, form: FormDef, enabled: bool, actor: User) -> FormDef:
+        scd2_table_name(form.name)  # length check before anything is written
+        with self._tx() as cur:
+            if not self._table_exists(cur, form.function, form.name):
+                raise NotFoundError(f"Form '{form.full_name}' does not exist.")
+            if enabled:
+                self._scd2_create(cur, form)
+                ids = [
+                    r[0]
+                    for r in cur.execute(
+                        f"SELECT {quote_ident(ID_COLUMN)} FROM {self._t(form)} WHERE {quote_ident(ID_COLUMN)} NOT IN "
+                        f"(SELECT {quote_ident(ID_COLUMN)} FROM {self._h(form)} WHERE \"{SCD2_END_COLUMN}\" IS NULL)"
+                    ).fetchall()
+                ]
+                self._scd2_open(cur, form, [str(i) for i in ids], utcnow())
+            self._set_props(
+                cur, "table", form.function, form.name, {PROP_SCD2: "true" if enabled else ""}
+            )
+        return self.get_form(form.function, form.name)
 
     @staticmethod
     def _conflict_message(label: str, current: dict[str, Any] | None) -> str:
@@ -1148,6 +1264,8 @@ class DuckDBBackend(DatabaseBackend):
                 if isinstance(after.get(k), datetime):
                     after[k] = after[k].date()
             self._log(cur, form, rec[ID_COLUMN], "insert", actor, batch, None, after, now)
+        if form.scd2_enabled:
+            self._scd2_open(cur, form, ids, now)
         return len(df)
 
     def get_history(self, form: FormDef, limit: int = 200, row_id: str | None = None) -> pd.DataFrame:
@@ -1207,9 +1325,10 @@ class DuckDBBackend(DatabaseBackend):
             display_name=reg.get("display_name") or "",
             description=reg.get("description") or "",
             owner=reg.get("owner") or "",
+            owner_email=reg.get("owner_email") or "",
             size_bytes=int(size) if size is not None else None,
             row_count=int(reg["row_count"]) if reg.get("row_count") is not None else None,
-            path=str(path),
+            path=path.as_posix(),
             registered=bool(reg),
             created_at=reg.get("created_at"),
             created_by=reg.get("created_by") or "",
@@ -1278,6 +1397,7 @@ class DuckDBBackend(DatabaseBackend):
                 file.display_name = file.display_name or previous.display_name
                 file.description = file.description or previous.description
                 file.owner = file.owner or previous.owner
+                file.owner_email = file.owner_email or previous.owner_email
             file.owner = file.owner or actor.username
             self._register_file(cur, file, actor)
             self._log(
@@ -1296,10 +1416,11 @@ class DuckDBBackend(DatabaseBackend):
     def update_file_metadata(self, file: FileDef, actor: User) -> FileDef:
         file.validate()
         current = self.get_file(file.function, file.name)
-        current.display_name, current.description, current.owner = (
+        current.display_name, current.description, current.owner, current.owner_email = (
             file.display_name,
             file.description,
             file.owner,
+            file.owner_email,
         )
         with self._tx() as cur:
             self._register_file(cur, current, actor)

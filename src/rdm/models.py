@@ -219,7 +219,7 @@ def validate_file_name(name: str) -> str:
 
 
 def humanize(name: str) -> str:
-    """``cost_centre_code`` -> ``Cost Centre Code``; ``student__survey`` -> ``Student / Survey``."""
+    """``cost_centre_code`` -> ``Cost Centre Code``; ``customer__survey`` -> ``Customer / Survey``."""
     parts = [p for p in name.split("__")]
     words = [" ".join(w.capitalize() for w in p.split("_") if w) for p in parts]
     return " / ".join(w for w in words if w) or name
@@ -503,6 +503,7 @@ class FunctionDef:
     display_name: str = ""
     description: str = ""
     owner: str = ""
+    owner_email: str = ""  # optional contact e-mail of the owning team or person
     doc_link: str = ""  # project documentation URL
     domain: str = ""  # name of the domain the function is assigned to
     form_count: int | None = None
@@ -526,13 +527,32 @@ class FunctionDef:
 PROP_FORM = "rdm.form"
 PROP_DISPLAY_NAME = "rdm.display_name"
 PROP_OWNER = "rdm.owner"
+PROP_OWNER_EMAIL = "rdm.owner_email"
 PROP_COLUMN_CONFIG = "rdm.column_config"
 PROP_DOC_LINK = "rdm.doc_link"
 PROP_DOMAIN = "rdm.domain"
+PROP_SCD2 = "rdm.scd2"
 TAG_DISPLAY_NAME = "rdm_display_name"
 TAG_OWNER = "rdm_owner"
 TAG_FORM = "rdm_form"
 TAG_DOMAIN = "rdm_domain"
+
+#: SCD Type 2 history tables use the organisation's standard notation (Databricks Auto CDC):
+#: a validity window per version, the current row has ``__END_AT IS NULL``.
+SCD2_START_COLUMN = "__START_AT"
+SCD2_END_COLUMN = "__END_AT"
+SCD2_TABLE_PREFIX = "_h__"
+
+
+def scd2_table_name(form_name: str) -> str:
+    """History table of a form: app-managed (leading ``_``), lives in the same schema."""
+    name = f"{SCD2_TABLE_PREFIX}{form_name}"
+    if len(name) > MAX_IDENTIFIER_LENGTH:
+        raise ValueError(
+            f"The form name is too long for a history table ({len(name)} > {MAX_IDENTIFIER_LENGTH} "
+            f"characters with the '{SCD2_TABLE_PREFIX}' prefix)."
+        )
+    return name
 
 
 @dataclass
@@ -542,6 +562,8 @@ class FormDef:
     display_name: str = ""
     description: str = ""
     owner: str = ""
+    owner_email: str = ""  # optional contact e-mail of the owning team or person
+    scd2_enabled: bool = False  # FR-47: maintain a Type 2 history table (__START_AT/__END_AT)
     columns: list[ColumnDef] = field(default_factory=list)
     properties: dict[str, str] = field(default_factory=dict)
     tags: dict[str, str] = field(default_factory=dict)
@@ -645,6 +667,7 @@ class FileDef:
     display_name: str = ""
     description: str = ""
     owner: str = ""
+    owner_email: str = ""  # optional contact e-mail of the owning team or person
     size_bytes: int | None = None
     row_count: int | None = None
     path: str = ""  # where the backend stores it (volume path or local path), informative

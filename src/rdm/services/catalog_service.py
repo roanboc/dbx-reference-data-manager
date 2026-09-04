@@ -64,10 +64,18 @@ class CatalogService:
 
     def navigation(self, search: str | None = None) -> list[NavFunction]:
         """Visible functions with their forms and files, filtered by ``search`` on names and descriptions."""
+        return self.filter(self.load_navigation(), search)
+
+    def load_navigation(self) -> list[NavFunction]:
+        """The unfiltered catalogue the user may see; the expensive part, worth caching."""
         items = self.visible_functions()
         for item in items:
             item.forms = self.backend.list_forms(item.function.name)
             item.files = self.backend.list_files(item.function.name)
+        return items
+
+    def filter(self, items: list[NavFunction], search: str | None = None) -> list[NavFunction]:
+        """Filter loaded navigation in memory - no backend calls."""
         if not search or not search.strip():
             return items
         filtered = []
@@ -87,17 +95,19 @@ class CatalogService:
             raise PermissionDenied(f"You do not have access to function '{function}'.")
         return self.backend.get_file(function, name)
 
-    def grouped(self, items: list[NavFunction]) -> list[NavDomain]:
+    def grouped(
+        self, items: list[NavFunction], domains: list[DomainDef] | None = None
+    ) -> list[NavDomain]:
         """Group navigation items by domain, in domain order; unassigned functions come last."""
-        domains = {d.name: d for d in self.backend.list_domains()}
+        known = {d.name: d for d in (self.backend.list_domains() if domains is None else domains)}
         groups: dict[str, NavDomain] = {}
         for item in items:
-            key = item.function.domain if item.function.domain in domains else ""
+            key = item.function.domain if item.function.domain in known else ""
             if key not in groups:
-                domain = domains.get(key) or DomainDef("", display_name=UNASSIGNED_DOMAIN_LABEL)
+                domain = known.get(key) or DomainDef("", display_name=UNASSIGNED_DOMAIN_LABEL)
                 groups[key] = NavDomain(domain)
             groups[key].functions.append(item)
-        ordered = [groups[name] for name in domains if name in groups]
+        ordered = [groups[name] for name in known if name in groups]
         if "" in groups:
             ordered.append(groups[""])
         return ordered

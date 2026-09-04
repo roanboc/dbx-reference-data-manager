@@ -78,7 +78,7 @@ def test_home_renders_for_every_persona_grouped_by_domain(seeded_backend, person
     assert {ids.HOME_FILTER, ids.HOME_CARDS} <= ids_in(tree)
     text = texts_in(tree)
     assert "Finance - Cost Management" in text if persona != "viewer" else "Finance" not in text
-    assert "Student" in text  # the domain heading of the student function
+    assert "Customer" in text  # the domain heading of the customer function
     assert "People" in text if persona in ("admin", "viewer") else "People" not in text
     # the filter narrows the cards
     from rdm.ui.context import grouped_navigation
@@ -183,7 +183,7 @@ def test_function_page_function_admin_cannot_delete_or_move_domain(seeded_backen
     assert next(n for n in walk(tree) if getattr(n, "id", None) == ids.FUNCTION_DOMAIN).disabled
     assert "Global admin" not in texts_in(tree)
     # read-only elsewhere
-    assert ids.FUNCTION_SAVE not in ids_in(function_page.render(ctx, "student__survey_service_improvement"))
+    assert ids.FUNCTION_SAVE not in ids_in(function_page.render(ctx, "customer__survey_service_improvement"))
 
 
 def test_function_page_viewer_has_no_admin_controls(seeded_backend):
@@ -218,7 +218,7 @@ def test_new_function_page_requires_global_admin(seeded_backend):
     tree = function_page.render_new(make_ctx(seeded_backend, "admin"))
     assert {ids.NEW_FUNCTION_DOC_LINK, ids.NEW_FUNCTION_DOMAIN} <= ids_in(tree)
     domains = next(n for n in walk(tree) if getattr(n, "id", None) == ids.NEW_FUNCTION_DOMAIN)
-    assert {d["value"] for d in domains.data} == {"finance", "people", "research", "student"}
+    assert {d["value"] for d in domains.data} == {"customer", "finance", "people", "research"}
     assert "Global admins only" in texts_in(function_page.render_new(make_ctx(seeded_backend, "editor")))
     assert "Global admins only" in texts_in(
         function_page.render_new(make_ctx(seeded_backend, "function_admin"))
@@ -282,7 +282,7 @@ def test_form_page_settings_delete_zone_only_for_global_admins(seeded_backend):
         make_ctx(seeded_backend, "function_admin"), "finance__cost_management", "cost_centres"
     )
     editor_tree = form_page.render(
-        make_ctx(seeded_backend, "editor"), "student__survey_service_improvement", "service_areas"
+        make_ctx(seeded_backend, "editor"), "customer__survey_service_improvement", "service_areas"
     )
     assert {ids.DROP_FORM_SUBMIT, ids.SETTINGS_SAVE, ids.BULK_OPEN, ids.ITEM_OPEN} <= ids_in(admin_tree)
     assert ids.SETTINGS_SAVE in ids_in(fa_tree) and ids.DROP_FORM_SUBMIT not in ids_in(fa_tree)
@@ -356,7 +356,7 @@ def test_item_body_lists_fields_and_row_history(seeded_backend):
     from rdm.ui.pages import form_page
 
     ctx = make_ctx(seeded_backend, "editor")
-    form = ctx.forms.get_form("student__survey_service_improvement", "service_areas")
+    form = ctx.forms.get_form("customer__survey_service_improvement", "service_areas")
     rows = ctx.forms.load_rows(form)
     row = {k: v for k, v in rows.iloc[0].to_dict().items()}
     history = form_page._history_records(ctx.forms.history(form, row_id=row["_id"]), form)
@@ -401,6 +401,16 @@ def test_wizard_columns_step_guidance_and_sample_column(seeded_backend):
     assert samples["hide"] is True  # nothing to sample when starting from scratch
     text = texts_in(tree)
     assert "Allowed values" in text and "Active, Inactive, Retired" in text
+
+
+def test_wizard_warns_when_the_file_is_too_big_for_a_form():
+    """FR-46: above the grid limit the wizard suggests a governed file instead."""
+    assert form_creator._size_warning(5000, 5000, None) is None
+    alert = form_creator._size_warning(12_000, 5000, "finance__cost_management")
+    text = texts_in(alert)
+    assert "12,000 rows" in text and "recommended up to 5,000" in text
+    links = [n for n in walk(alert) if getattr(n, "href", None)]
+    assert links and links[0].href == "/new-file/finance__cost_management"
 
 
 def test_function_page_lists_files_and_add_file_for_admins(seeded_backend):
