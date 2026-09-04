@@ -8,7 +8,7 @@ from urllib.parse import unquote
 
 import dash
 import dash_mantine_components as dmc
-from dash import Input, Output, ctx, no_update
+from dash import Input, Output, State, ctx, no_update
 
 from rdm.backend.base import BackendError, PermissionDenied
 from rdm.config import APP_TITLE
@@ -81,6 +81,23 @@ def create_app() -> dash.Dash:
 
 
 def register_shell_callbacks(app: dash.Dash) -> None:
+    # FR-37: seed the toggle from the OS scheme on first visit; the persisted choice wins after.
+    app.clientside_callback(
+        """(_, v) => v ? window.dash_clientside.no_update
+            : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark' : 'light')""",
+        Output(ids.SCHEME_TOGGLE, "value"),
+        Input(ids.SHELL, "id"),
+        State(ids.SCHEME_TOGGLE, "value"),
+    )
+
+    # FR-37: apply the chosen scheme; the toggle is persisted per browser (persistence_type="local").
+    app.clientside_callback(
+        "(v) => v || null",
+        Output(ids.SHELL, "forceColorScheme"),
+        Input(ids.SCHEME_TOGGLE, "value"),
+    )
+
     @app.callback(Output(ids.PERSONA, "data"), Input(ids.PERSONA_SELECT, "value"), prevent_initial_call=True)
     def switch_persona(value):
         return value

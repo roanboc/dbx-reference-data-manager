@@ -24,7 +24,9 @@ resources:
           - name: RDM_BACKEND
             value: databricks
           - name: RDM_AUTH
-            value: databricks                    # identity from the X-Forwarded-* headers
+            value: ${var.auth_mode}              # databricks = X-Forwarded-* headers; mock = review personas (FR-45)
+          - name: RDM_DEBUG_PERSONAS
+            value: ${var.debug_personas}         # "true" only on dev targets: simulated roles, queries as the app SP
           - name: RDM_CATALOG
             value: ${resources.catalogs.forms.name}                       # same value the runtime sets; never anything else
           # - name: RDM_MAX_ROWS
@@ -51,20 +53,21 @@ resources:
       #                            (the user needs CAN_USE on the warehouse, see DEPLOYMENT.md)
       #   files.files            - upload, download and delete files in the function volumes
       #                            (Files API) as the user; READ/WRITE VOLUME grants apply
-      #   iam.current-user:read  - lets DatabricksAuthProvider read the user's group
-      #                            memberships (/Me) with the same token; a default scope in
-      #                            the UI, declared explicitly here.
+      # iam.current-user:read is not accepted by this workspace's Apps API; group
+      # membership lookup falls back to the app's own credentials (rendering only — Unity
+      # Catalog enforces the actual grants).
       # Without user authorization the app falls back to its service principal, which would
       # then need the union of all data privileges - documented but not recommended (§5).
       user_api_scopes:
         - sql
         - files.files
-        - iam.current-user:read
 
       # Who may open the app. CAN_USE only opens the door: what a user sees and edits is
       # decided by Unity Catalog grants (resources/schemas.yml).
       permissions:
         - group_name: ${var.admin_group}
+          level: CAN_MANAGE
+        - group_name: ${var.breakglass_group}
           level: CAN_MANAGE
         - group_name: ${var.app_users_group}
           level: CAN_USE

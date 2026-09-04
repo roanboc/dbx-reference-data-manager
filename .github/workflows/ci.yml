@@ -1,17 +1,10 @@
-# Continuous integration and production deployment.
+# Continuous integration.
 #
-#   test         every push and pull request: ruff + pytest (unit, contract on DuckDB, AppTest)
-#   deploy-prod  manual (workflow_dispatch) or push to main, after `test` passes:
-#                `databricks bundle validate/deploy -t prod`
+#   test   every push and pull request: ruff + pytest (unit, contract on DuckDB, AppTest).
+#          Needs no credentials: the suite runs entirely against the local DuckDB backend.
 #
-# Repository configuration required for deploy-prod (Settings -> Environments -> prod):
-#   secrets  DATABRICKS_HOST   https://<workspace>.cloud.databricks.com
-#            DATABRICKS_TOKEN  token of the service principal named in databricks.yml
-#                              targets.prod.run_as (apps must be deployed by that very
-#                              identity, the CLI rejects any other run_as)
-#   vars     DATABRICKS_WAREHOUSE_ID  id of the production SQL warehouse
-#                                     (bundle variable `warehouse_id`)
-# Prefer GitHub OIDC federation over a long-lived token - see the commented block below.
+# Deployment is not automated here. `databricks bundle deploy` needs a workspace, so wire
+# it up in your own fork with your own credentials (docs/DEPLOYMENT.md).
 
 name: CI
 
@@ -51,38 +44,5 @@ jobs:
       - name: Pytest
         run: python -m pytest
 
-  deploy-prod:
-    name: Deploy bundle (prod)
-    needs: test
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
-    # GitHub creates the environment on first use; add required reviewers there to gate
-    # production deployments.
-    environment: prod
-    # permissions:
-    #   id-token: write          # needed for the OIDC alternative below
-    #   contents: read
-    env:
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-      # --- OIDC alternative (no stored token): create a federation policy for the service
-      # --- principal in the Databricks account, remove DATABRICKS_TOKEN and uncomment:
-      # DATABRICKS_AUTH_TYPE: github-oidc
-      # DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}   # service principal application ID
-      BUNDLE_VAR_warehouse_id: ${{ vars.DATABRICKS_WAREHOUSE_ID }}
-    steps:
-      - uses: actions/checkout@v4
-
-      # Installs the Databricks CLI (bundles need the "new" Go CLI, not the PyPI package).
-      # Pin a version, e.g. databricks/setup-cli@v0.2xx.0, once your team has settled on one.
-      - uses: databricks/setup-cli@main
-
-      - name: Validate bundle
-        run: databricks bundle validate -t prod
-
-      - name: Deploy bundle
-        run: databricks bundle deploy -t prod
-
-      # Starts the app / pushes the freshly uploaded source into the running app.
-      - name: Start app
-        run: databricks bundle run reference_data_manager -t prod
+      - name: Scan for content that must not be published
+        run: python scripts/scan_public_safe.py --root .

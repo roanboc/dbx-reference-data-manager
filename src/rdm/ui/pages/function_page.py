@@ -13,7 +13,7 @@ from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
 
 from rdm.backend.base import BackendError, NotFoundError, PermissionDenied
 from rdm.models import FileDef, FormDef, FunctionDef, Role, humanize, sanitize_identifier, split_file_name
-from rdm.services.files import FileError, check_upload, human_size, preview_bytes
+from rdm.services.files import FileError, check_upload, human_size, preview_bytes, validate_table
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
 from rdm.ui.components import (
@@ -31,7 +31,7 @@ from rdm.ui.components import (
 from rdm.ui.context import AppContext, get_context, invalidate_metadata, navigation
 from rdm.ui.layout import domain_href, file_href, form_href, function_href, new_form_href
 
-GRID_THEME = "ag-theme-quartz"
+GRID_THEME = g.GRID_THEME
 
 GRANTABLE = [Role.VIEWER, Role.EDITOR, Role.ADMIN]
 
@@ -263,12 +263,28 @@ def _add_file_form(ctx_: AppContext) -> dmc.Stack:
                         required=True,
                     ),
                     dmc.TextInput(id=ids.ADD_FILE_DISPLAY, label="Display name"),
-                    dmc.Textarea(id=ids.ADD_FILE_DESC, label="Description", autosize=True, minRows=2),
+                    dmc.Textarea(
+                        id=ids.ADD_FILE_DESC, label="Description", autosize=True, minRows=2, required=True
+                    ),
                     dmc.TextInput(
-                        id=ids.ADD_FILE_OWNER, label="Owner", value=ctx_.user.email or ctx_.user.username
+                        id=ids.ADD_FILE_OWNER,
+                        label="Owner",
+                        value=ctx_.user.email or ctx_.user.username,
+                        required=True,
+                    ),
+                    dmc.TextInput(
+                        id=ids.ADD_FILE_OWNER_EMAIL,
+                        label="Owner e-mail",
+                        description="Optional contact e-mail of the owning team or person",
+                        placeholder="team@example.org",
                     ),
                 ],
                 cols={"base": 1, "md": 2},
+            ),
+            dmc.Checkbox(
+                id=ids.ADD_FILE_VALIDATE,
+                label="Check that the file reads as a consistent table (recommended when it feeds pipelines)",
+                checked=True,
             ),
             dmc.Group(
                 [
@@ -449,12 +465,21 @@ def _admin(ctx_: AppContext, function: FunctionDef) -> dmc.Stack:
                     description="Stored as the schema comment",
                     autosize=True,
                     minRows=2,
+                    required=True,
                 ),
                 dmc.TextInput(
                     id=ids.FUNCTION_OWNER,
                     label="Owner",
                     value=function.owner,
                     description="Team or person accountable for the lists in this function",
+                    required=True,
+                ),
+                dmc.TextInput(
+                    id=ids.FUNCTION_OWNER_EMAIL,
+                    label="Owner e-mail",
+                    value=function.owner_email,
+                    description="Optional contact e-mail of the owning team or person",
+                    placeholder="team@example.org",
                 ),
                 dmc.TextInput(
                     id=ids.FUNCTION_DOC_LINK,
@@ -677,21 +702,34 @@ def render_new(ctx_: AppContext) -> dmc.Stack:
                         dmc.TextInput(
                             id=ids.NEW_FUNCTION_NAME,
                             label="Name",
-                            placeholder="e.g. student__survey_service_improvement",
+                            placeholder="e.g. customer__survey_service_improvement",
                             description="Convention: <domain>__<area>; becomes the schema name and cannot change",
                             required=True,
                         ),
                         dmc.TextInput(
                             id=ids.NEW_FUNCTION_DISPLAY,
                             label="Display name",
-                            placeholder="Student Survey & Service Improvement",
+                            placeholder="Customer Survey & Service Improvement",
                         ),
-                        dmc.Textarea(id=ids.NEW_FUNCTION_DESC, label="Description", autosize=True, minRows=2),
+                        dmc.Textarea(
+                            id=ids.NEW_FUNCTION_DESC,
+                            label="Description",
+                            autosize=True,
+                            minRows=2,
+                            required=True,
+                        ),
                         dmc.TextInput(
                             id=ids.NEW_FUNCTION_OWNER,
                             label="Owner",
                             value=ctx_.user.email or ctx_.user.username,
                             description="Team or person accountable for the function",
+                            required=True,
+                        ),
+                        dmc.TextInput(
+                            id=ids.NEW_FUNCTION_OWNER_EMAIL,
+                            label="Owner e-mail",
+                            description="Optional contact e-mail of the owning team or person",
+                            placeholder="team@example.org",
                         ),
                         dmc.TextInput(
                             id=ids.NEW_FUNCTION_DOC_LINK,
@@ -786,12 +824,15 @@ def register(app) -> None:
         State(ids.ADD_FILE_DISPLAY, "value"),
         State(ids.ADD_FILE_DESC, "value"),
         State(ids.ADD_FILE_OWNER, "value"),
+        State(ids.ADD_FILE_OWNER_EMAIL, "value"),
+        State(ids.ADD_FILE_VALIDATE, "checked"),
         State(ids.FUNCTION_KEY, "data"),
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.ADD_FILE_SUBMIT, "loading"), True, False)],
     )
-    def add_file(n, token, raw_name, display, desc, owner, function, nav_version, persona):
+    def add_file(n, token, raw_name, display, desc, owner, owner_email, validate, function, nav_version, persona):
         if not n:
             return no_update, no_update, no_update, no_update
         stored = uploads.get(token)
@@ -801,6 +842,15 @@ def register(app) -> None:
         c = get_context(persona)
         try:
             name = check_upload(raw_name or "", data, c.settings.max_file_mb)
+            if validate:
+                problems = validate_table(data, split_file_name(name)[1])
+                if problems:
+                    return (
+                        no_update,
+                        no_update,
+                        no_update,
+                        error_alert(" ".join(problems), "The file is not a consistent table"),
+                    )
             created = c.forms.add_file(
                 FileDef(
                     function,
@@ -808,6 +858,7 @@ def register(app) -> None:
                     display_name=(display or "").strip(),
                     description=(desc or "").strip(),
                     owner=(owner or "").strip(),
+                    owner_email=(owner_email or "").strip(),
                 ),
                 data,
             )
@@ -832,12 +883,14 @@ def register(app) -> None:
         State(ids.FUNCTION_DISPLAY, "value"),
         State(ids.FUNCTION_DESC, "value"),
         State(ids.FUNCTION_OWNER, "value"),
+        State(ids.FUNCTION_OWNER_EMAIL, "value"),
         State(ids.FUNCTION_DOC_LINK, "value"),
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.FUNCTION_SAVE, "loading"), True, False)],
     )
-    def save_function(n, name, domain, display, desc, owner, doc_link, nav_version, persona):
+    def save_function(n, name, domain, display, desc, owner, owner_email, doc_link, nav_version, persona):
         if not n:
             return no_update, no_update, no_update
         c = get_context(persona)
@@ -848,6 +901,7 @@ def register(app) -> None:
                 (desc or "").strip(),
                 (owner or "").strip(),
             )
+            function.owner_email = (owner_email or "").strip()
             function.doc_link = (doc_link or "").strip()
             if c.permissions.is_global_admin:
                 function.domain = (domain or "").strip()
@@ -870,6 +924,7 @@ def register(app) -> None:
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.GRANT_SUBMIT, "loading"), True, False)],
     )
     def change_grants(n_grant, n_revokes, filter_text, function, principal, role_name, nav_version, persona):
         trigger = ctx.triggered_id
@@ -906,6 +961,7 @@ def register(app) -> None:
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.DROP_FUNCTION_SUBMIT, "loading"), True, False)],
     )
     def drop_function(n, confirm, name, nav_version, persona):
         if not n:
@@ -932,12 +988,14 @@ def register(app) -> None:
         State(ids.NEW_FUNCTION_DISPLAY, "value"),
         State(ids.NEW_FUNCTION_DESC, "value"),
         State(ids.NEW_FUNCTION_OWNER, "value"),
+        State(ids.NEW_FUNCTION_OWNER_EMAIL, "value"),
         State(ids.NEW_FUNCTION_DOC_LINK, "value"),
         State(ids.NAV_VERSION, "data"),
         State(ids.PERSONA, "data"),
         prevent_initial_call=True,
+        running=[(Output(ids.NEW_FUNCTION_SUBMIT, "loading"), True, False)],
     )
-    def create_function(n, domain, raw_name, display, desc, owner, doc_link, nav_version, persona):
+    def create_function(n, domain, raw_name, display, desc, owner, owner_email, doc_link, nav_version, persona):
         if not n:
             return no_update, no_update, no_update, no_update
         name = sanitize_identifier(raw_name or "", fallback="")
@@ -951,6 +1009,7 @@ def register(app) -> None:
                     (display or "").strip(),
                     (desc or "").strip(),
                     (owner or "").strip(),
+                    owner_email=(owner_email or "").strip(),
                     doc_link=(doc_link or "").strip(),
                     domain=(domain or "").strip(),
                 )

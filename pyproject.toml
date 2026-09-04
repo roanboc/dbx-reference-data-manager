@@ -2,6 +2,7 @@
 name = "rdm"
 version = "0.1.0"
 description = "Databricks Reference Data Manager (SCD Manager) - Dash data steward app"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 readme = "README.md"
 

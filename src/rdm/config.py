@@ -25,6 +25,7 @@ class Settings:
     duckdb_path: str = "data/rdm.duckdb"
     auth: str = "mock"  # mock | databricks
     persona: str = "admin"  # default mock persona
+    debug_personas: bool = False  # FR-45: mock personas with simulated roles (dev deployments)
     catalog: str = "_reference_data"
     max_rows: int = 5000
     max_file_mb: int = 200  # largest file accepted through the browser upload
@@ -32,7 +33,7 @@ class Settings:
     databricks_host: str | None = None
     databricks_warehouse_id: str | None = None
     databricks_http_path: str | None = None
-    metadata_cache_ttl: int = 60  # seconds for navigation metadata caching
+    metadata_cache_ttl: int = 300  # seconds for navigation metadata caching
 
     @property
     def is_databricks(self) -> bool:
@@ -59,6 +60,7 @@ class Settings:
             duckdb_path=env.get("RDM_DUCKDB_PATH", "data/rdm.duckdb"),
             auth=auth,
             persona=env.get("RDM_PERSONA", "admin").strip().lower(),
+            debug_personas=env.get("RDM_DEBUG_PERSONAS", "").strip().lower() in {"1", "true", "yes"},
             catalog=env.get("RDM_CATALOG", "_reference_data").strip(),
             max_rows=int(env.get("RDM_MAX_ROWS", "5000")),
             max_file_mb=int(env.get("RDM_MAX_FILE_MB", "200")),
@@ -66,5 +68,5 @@ class Settings:
             databricks_host=env.get("DATABRICKS_HOST") or None,
             databricks_warehouse_id=env.get("DATABRICKS_WAREHOUSE_ID") or None,
             databricks_http_path=env.get("DATABRICKS_HTTP_PATH") or None,
-            metadata_cache_ttl=int(env.get("RDM_METADATA_CACHE_TTL", "60")),
+            metadata_cache_ttl=int(env.get("RDM_METADATA_CACHE_TTL", "300")),
         )

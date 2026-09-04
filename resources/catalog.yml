@@ -18,7 +18,15 @@ resources:
         (<domain>__<area>, grouped into business domains), one Delta table per form and a
         _files volume per function for CSV/Parquet datasets. Governance is Unity Catalog grants
         on the schemas; the app only decides what to render.
-      # storage_root: abfss://... / s3://...  # required only if the metastore has no default storage root
+      # Only needed when your metastore has no default storage root; delete this line
+      # otherwise, and leave the storage_root variable at its placeholder.
+      storage_root: ${var.storage_root}
+
+      # A catalog is visible to every workspace of the metastore until it is isolated.
+      # The bundle schema has no isolation field, so if you want to restrict the catalog to
+      # named workspaces, set the isolation mode and the bindings with two CLI calls after
+      # the first deploy (docs/DEPLOYMENT.md, "Restricting the catalog to its workspaces");
+      # they persist over redeploys.
 
       grants:
         # Global administrators (design §5): USE_CATALOG + CREATE_SCHEMA to create functions,
@@ -41,8 +49,25 @@ resources:
             - MANAGE
             - APPLY_TAG
 
-        # Every account user may *use* the catalog. USE_CATALOG on its own reveals nothing but
-        # the catalog name: without USE_SCHEMA + SELECT on a schema (resources/schemas.yml) a
+        - principal: ${var.breakglass_group}
+          privileges:
+            - USE_CATALOG
+            - BROWSE
+            - CREATE_SCHEMA
+            - USE_SCHEMA
+            - SELECT
+            - MODIFY
+            - CREATE_TABLE
+            - CREATE_VOLUME
+            - READ_VOLUME
+            - WRITE_VOLUME
+            - MANAGE
+            - APPLY_TAG
+
+        # Every account user may *use* and *discover* the catalog. USE_CATALOG on its own
+        # reveals nothing but the catalog name, and BROWSE (FR-44) lets everyone find the
+        # catalog and read object metadata in Catalog Explorer / Discover like other domain
+        # catalogs: without USE_SCHEMA + SELECT on a schema (resources/schemas.yml) a
         # user sees no functions and no data. Granting it once here means a new function group only
         # needs schema-level grants (the Viewer role = USE_CATALOG + USE_SCHEMA + SELECT).
         # If your policy forbids catalog-wide USE_CATALOG, replace this with one entry per
@@ -50,3 +75,4 @@ resources:
         - principal: account users
           privileges:
             - USE_CATALOG
+            - BROWSE

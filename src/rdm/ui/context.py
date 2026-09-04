@@ -17,11 +17,11 @@ from functools import lru_cache
 
 import flask
 
-from rdm.auth.provider import AuthProvider
+from rdm.auth.provider import PERSONAS, AuthProvider
 from rdm.backend.base import DatabaseBackend
 from rdm.backend.factory import create_auth_provider, create_backend
 from rdm.config import Settings
-from rdm.models import Permissions, User
+from rdm.models import DomainDef, Permissions, Role, User
 from rdm.services import CatalogService, FormService, NavDomain, NavFunction
 
 log = logging.getLogger(__name__)
@@ -30,6 +30,7 @@ _lock = threading.RLock()
 _backends: dict[str, tuple[float, DatabaseBackend]] = {}
 _permissions: dict[tuple, tuple[float, Permissions]] = {}
 _navigation: dict[tuple, tuple[float, list[NavFunction]]] = {}
+_domains: dict[tuple, tuple[float, list[DomainDef]]] = {}
 TOKEN_BACKEND_TTL = 900.0
 
 
@@ -109,33 +110,71 @@ def _permissions_for(settings: Settings, backend: DatabaseBackend, user: User) -
             cached = _permissions.get(key)
             if cached and cached[0] > now:
                 return cached[1]
-    perms = backend.get_permissions(user)
+    perms = (
+        _simulated_permissions(backend, user) if settings.debug_personas else backend.get_permissions(user)
+    )
     if ttl > 0:
         with _lock:
             _permissions[key] = (now + ttl, perms)
     return perms
 
 
+#: FR-45: role each persona experiences on every function when RDM_DEBUG_PERSONAS is on.
+_SIMULATED_ROLES: dict[str, tuple[bool, Role]] = {
+    "admin": (True, Role.ADMIN),
+    "function_admin": (False, Role.ADMIN),
+    "editor": (False, Role.EDITOR),
+    "viewer": (False, Role.VIEWER),
+}
+
+
+def _simulated_permissions(backend: DatabaseBackend, user: User) -> Permissions:
+    """Simulated access for review deployments: the persona's role applies to every function.
+
+    Queries still run as the app's own principal, so this mode belongs only on a dev
+    deployment with test data (set ``RDM_DEBUG_PERSONAS`` there and nowhere else).
+    """
+    key = next((p.key for p in PERSONAS.values() if p.user.username == user.username), "viewer")
+    is_global, role = _SIMULATED_ROLES[key]
+    return Permissions({f.name: role for f in backend.list_functions()}, is_global_admin=is_global)
+
+
 def navigation(ctx: AppContext, search: str | None) -> list[NavFunction]:
-    """Visible functions (with their forms) for the sidebar and the home page, cached briefly."""
+    """Visible functions (with their forms) for the sidebar and the home page, cached briefly.
+
+    The cache holds the unfiltered catalogue: filtering happens in memory, so typing in the
+    sidebar or home filter costs no warehouse round trips.
+    """
+    return ctx.catalog.filter(_loaded_navigation(ctx), search)
+
+
+def _loaded_navigation(ctx: AppContext) -> list[NavFunction]:
     ttl = ctx.settings.metadata_cache_ttl
-    key = (ctx.user.username, tuple(ctx.user.groups), (search or "").strip().lower(), id(ctx.backend))
+    key = (ctx.user.username, tuple(ctx.user.groups), id(ctx.backend))
     now = time.monotonic()
     if ttl > 0:
         with _lock:
             cached = _navigation.get(key)
             if cached and cached[0] > now:
                 return cached[1]
-    items = ctx.catalog.navigation(search)
+    items = ctx.catalog.load_navigation()
+    domains = ctx.backend.list_domains()
     if ttl > 0:
         with _lock:
             _navigation[key] = (now + ttl, items)
+            _domains[key] = (now + ttl, domains)
     return items
 
 
 def grouped_navigation(ctx: AppContext, search: str | None) -> list[NavDomain]:
     """Navigation items grouped by domain (domain > function > form)."""
-    return ctx.catalog.grouped(navigation(ctx, search))
+    items = navigation(ctx, search)
+    key = (ctx.user.username, tuple(ctx.user.groups), id(ctx.backend))
+    now = time.monotonic()
+    with _lock:
+        cached = _domains.get(key)
+    domains = cached[1] if cached and cached[0] > now else None
+    return ctx.catalog.grouped(items, domains)
 
 
 def invalidate_metadata() -> None:
@@ -143,3 +182,4 @@ def invalidate_metadata() -> None:
     with _lock:
         _permissions.clear()
         _navigation.clear()
+        _domains.clear()

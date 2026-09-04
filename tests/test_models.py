@@ -131,7 +131,7 @@ def test_validate_identifier_error_mentions_kind():
     ("name", "expected"),
     [
         ("cost_centre_code", "Cost Centre Code"),
-        ("student__survey", "Student / Survey"),
+        ("customer__survey", "Customer / Survey"),
         ("hr__reference", "Hr / Reference"),
         ("single", "Single"),
         ("a__b__c", "A / B / C"),
@@ -346,12 +346,12 @@ def test_function_title_and_validate():
 
 
 def test_domain_title_and_validate():
-    assert DomainDef("student").title == "Student"
-    assert DomainDef("student", display_name="Student Experience").title == "Student Experience"
+    assert DomainDef("customer").title == "Customer"
+    assert DomainDef("customer", display_name="Customer Experience").title == "Customer Experience"
     assert DomainDef("people", "People", "HR data", "hr@example.org").validate().owner == "hr@example.org"
     assert DomainDef("x").function_count is None
     with pytest.raises(ValueError, match="Invalid domain name"):
-        DomainDef("Student Domain").validate()
+        DomainDef("Customer Domain").validate()
     with pytest.raises(ValueError, match="reserved for system use"):
         DomainDef("_catalog").validate()
 

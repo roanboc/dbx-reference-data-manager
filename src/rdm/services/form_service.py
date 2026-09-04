@@ -10,6 +10,7 @@ based :mod:`rdm.services.draft` instead; :class:`FormService` guards both.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -203,6 +204,146 @@ def _norm_key(value: Any) -> Any:
     return value
 
 
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+def require_metadata(kind: str, description: str | None, owner: str | None, owner_email: str | None = "") -> None:
+    """FR-40/FR-41: a description and an owner are mandatory; the contact e-mail is optional."""
+    missing = []
+    if not (description or "").strip():
+        missing.append("a description")
+    if not (owner or "").strip():
+        missing.append("an owner (a team or a person)")
+    if missing:
+        raise ValueError(f"The {kind} needs {' and '.join(missing)}.")
+    email = (owner_email or "").strip()
+    if email and not _EMAIL_RE.fullmatch(email):
+        raise ValueError(f"'{email}' does not look like an e-mail address.")
+
+
+# --------------------------------------------------------------------------------------
+# Import modes (FR-43): merge / replace an imported frame by business key
+# --------------------------------------------------------------------------------------
+
+IMPORT_MODES = ("append", "merge", "replace")
+
+
+def build_import_changeset(
+    form: FormDef, current: pd.DataFrame, incoming: pd.DataFrame, mode: str
+) -> tuple[ChangeSet, list[str]]:
+    """Resolve an imported (already coerced) frame against the current rows by business key.
+
+    ``merge`` updates matched rows and inserts new ones; ``replace`` additionally deletes
+    current rows whose key is not in the file. Only columns present in the file are
+    touched. The result is saved through :meth:`FormService.save`, so audit and
+    optimistic concurrency work exactly as for grid edits.
+    """
+    if mode not in ("merge", "replace"):
+        raise ValueError(f"Unknown import mode '{mode}'.")
+    keys = [c.name for c in form.key_columns]
+    if not keys:
+        return ChangeSet(), [
+            "Merge and replace need business key columns. Mark the key column(s) on the Schema tab first."
+        ]
+    key_label = ", ".join(keys)
+
+    def key_of(rec: Mapping[str, Any]) -> tuple:
+        return tuple(_norm_key(rec.get(k)) for k in keys)
+
+    problems: list[str] = []
+    incoming_records = incoming.to_dict("records")
+    seen: dict[tuple, int] = {}
+    for i, rec in enumerate(incoming_records, start=2):  # 1-based plus the header row
+        k = key_of(rec)
+        if all(v is None for v in k):
+            problems.append(f"File row {i}: the business key ({key_label}) is empty.")
+        elif k in seen:
+            problems.append(f"File row {i} repeats the key of file row {seen[k]} ({key_label}).")
+        else:
+            seen[k] = i
+    by_key: dict[tuple, dict[str, Any]] = {}
+    duplicate_current = set()
+    for rec in current.to_dict("records"):
+        k = key_of(rec)
+        if k in by_key:
+            duplicate_current.add(k)
+        else:
+            by_key[k] = rec
+    if duplicate_current:
+        problems.append(
+            f"The list itself has {len(duplicate_current)} duplicated key(s) ({key_label}); "
+            "fix them in the grid before a merge or replace import."
+        )
+    if problems:
+        return ChangeSet(), problems
+
+    file_columns = set(incoming.columns)
+    changes = ChangeSet()
+    matched: set[tuple] = set()
+    for i, rec in enumerate(incoming_records, start=2):
+        label = f"file row {i}"
+        cur = by_key.get(key_of(rec))
+        if cur is None:
+            changes.inserts.append(RowInsert(dict(rec), label=label))
+            continue
+        matched.add(key_of(rec))
+        diffs = {
+            col.name: rec.get(col.name)
+            for col in form.user_columns
+            if col.name in file_columns and not _values_equal(col, rec.get(col.name), cur.get(col.name))
+        }
+        if diffs:
+            changes.updates.append(
+                RowUpdate(
+                    str(cur[ID_COLUMN]), diffs, expected_version=cur.get(VERSION_COLUMN), label=label
+                )
+            )
+    if mode == "replace":
+        for k, cur in by_key.items():
+            if k not in matched:
+                changes.deletes.append(
+                    RowDelete(
+                        str(cur[ID_COLUMN]),
+                        expected_version=cur.get(VERSION_COLUMN),
+                        label=describe_row(form, cur),
+                    )
+                )
+    for ins in changes.inserts:
+        for col in form.user_columns:
+            value = ins.values.get(col.name)
+            if col.required and is_missing(value):
+                problems.append(f"{ins.label}: '{col.name}' is required.")
+            elif not is_missing(value) and col.options and str(value) not in col.options:
+                problems.append(f"{ins.label}: '{col.name}' must be one of: {', '.join(col.options)}.")
+    for upd in changes.updates:
+        for col in form.user_columns:
+            if col.name not in upd.changes:
+                continue
+            value = upd.changes[col.name]
+            if col.required and is_missing(value):
+                problems.append(f"{upd.label}: '{col.name}' is required.")
+            elif not is_missing(value) and col.options and str(value) not in col.options:
+                problems.append(f"{upd.label}: '{col.name}' must be one of: {', '.join(col.options)}.")
+    return changes, problems
+
+
+def _values_equal(col: ColumnDef, a: Any, b: Any) -> bool:
+    if is_missing(a) and is_missing(b):
+        return True
+    if is_missing(a) or is_missing(b):
+        return False
+    try:
+        if col.data_type in (DataType.INTEGER, DataType.DOUBLE, DataType.DECIMAL):
+            return float(a) == float(b)
+        if col.data_type is DataType.BOOLEAN:
+            return bool(a) == bool(b)
+        if col.data_type in (DataType.DATE, DataType.TIMESTAMP):
+            return pd.Timestamp(a) == pd.Timestamp(b)
+    except (TypeError, ValueError):
+        return False
+    return str(a) == str(b)
+
+
 # --------------------------------------------------------------------------------------
 # Guarded service facade
 # --------------------------------------------------------------------------------------
@@ -274,14 +415,18 @@ class FormService:
 
     def create_form(self, form: FormDef, rows: pd.DataFrame | None = None) -> FormDef:
         self.require(form.function, Role.ADMIN)
+        require_metadata("form", form.description, form.owner, form.owner_email)
         return self.backend.create_form(form, self.user, rows)
 
     def update_form_metadata(self, form: FormDef) -> FormDef:
         self.require(form.function, Role.ADMIN)
+        require_metadata("form", form.description, form.owner, form.owner_email)
         return self.backend.update_form_metadata(form, self.user)
 
     def add_column(self, form: FormDef, column: ColumnDef) -> FormDef:
         self.require(form.function, Role.ADMIN)
+        if not (column.description or "").strip():
+            raise ValueError(f"Column '{column.name}' needs a description.")
         return self.backend.add_column(form, column, self.user)
 
     def drop_column(self, form: FormDef, column_name: str) -> FormDef:
@@ -293,6 +438,12 @@ class FormService:
         self.require_global_admin("Deleting a form")
         log.info("%s dropping form %s", self.user.username, form.full_name)
         self.backend.drop_form(form, self.user)
+
+    def set_scd2(self, form: FormDef, enabled: bool) -> FormDef:
+        """FR-47: turn the optional Type 2 history table of a form on or off (function admins)."""
+        self.require(form.function, Role.ADMIN)
+        log.info("%s sets SCD2 of %s to %s", self.user.username, form.full_name, enabled)
+        return self.backend.set_scd2(form, enabled, self.user)
 
     # -- files (CSV / Parquet in the function's volume) -------------------------------------
 
@@ -323,6 +474,7 @@ class FormService:
     def add_file(self, file: FileDef, data: bytes) -> FileDef:
         """Adding a file to a function is a function-admin act, like creating a form."""
         self.require(file.function, Role.ADMIN)
+        require_metadata("file", file.description, file.owner, file.owner_email)
         log.info("%s adding file %s (%d bytes)", self.user.username, file.full_name, len(data))
         return self.backend.put_file(file, data, self.user, replace=False)
 
@@ -334,6 +486,7 @@ class FormService:
 
     def update_file_metadata(self, file: FileDef) -> FileDef:
         self.require(file.function, Role.ADMIN)
+        require_metadata("file", file.description, file.owner, file.owner_email)
         return self.backend.update_file_metadata(file, self.user)
 
     def drop_file(self, file: FileDef) -> None:
@@ -346,11 +499,13 @@ class FormService:
 
     def create_function(self, function: FunctionDef) -> FunctionDef:
         self.require_global_admin("Creating a function")
+        require_metadata("function", function.description, function.owner, function.owner_email)
         return self.backend.create_function(function, self.user)
 
     def update_function(self, function: FunctionDef) -> FunctionDef:
         """Function admins edit the details; moving a function to another domain is a global-admin act."""
         self.require(function.name, Role.ADMIN)
+        require_metadata("function", function.description, function.owner, function.owner_email)
         if not self.permissions.is_global_admin:
             current = self.backend.get_function(function.name)
             if (function.domain or "") != (current.domain or ""):

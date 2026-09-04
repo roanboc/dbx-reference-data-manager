@@ -1,0 +1,5 @@
+# Literals the publish-safety scan may ignore (see scripts/scan_public_safe.py).
+# One per line; matched case-insensitively as a substring.
+
+# Fake workspace host used by the auth provider tests.
+https://x.cloud.databricks.com

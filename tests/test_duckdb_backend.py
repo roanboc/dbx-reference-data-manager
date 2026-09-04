@@ -1086,14 +1086,14 @@ def test_close_is_idempotent(backend: DuckDBBackend):
 def test_seeded_backend_contains_demo_content(seeded_backend: DuckDBBackend):
     domains = {d.name: d for d in seeded_backend.list_domains()}
     assert {n: d.function_count for n, d in domains.items()} == {
+        "customer": 1,
         "finance": 1,
         "people": 1,
         "research": 0,
-        "student": 1,
     }
     functions = {f.name: f for f in seeded_backend.list_functions()}
     assert set(functions) == {
-        "student__survey_service_improvement",
+        "customer__survey_service_improvement",
         "finance__cost_management",
         "hr__reference",
     }
@@ -1112,19 +1112,19 @@ def test_seeded_backend_contains_demo_content(seeded_backend: DuckDBBackend):
     assert functions["hr__reference"].domain == "people"
     forms = {(f.function, f.name): f for d in functions for f in seeded_backend.list_forms(d)}
     assert set(forms) == {
-        ("student__survey_service_improvement", "survey_questions"),
-        ("student__survey_service_improvement", "service_areas"),
+        ("customer__survey_service_improvement", "survey_questions"),
+        ("customer__survey_service_improvement", "service_areas"),
         ("finance__cost_management", "cost_centres"),
         ("finance__cost_management", "gl_account_mappings"),
         ("hr__reference", "employment_types"),
     }
-    questions = seeded_backend.get_form("student__survey_service_improvement", "survey_questions")
+    questions = seeded_backend.get_form("customer__survey_service_improvement", "survey_questions")
     assert questions.row_count == 6
     assert questions.column("category").options == [
-        "Teaching",
-        "Assessment",
+        "Product",
+        "Delivery",
         "Support",
-        "Facilities",
+        "Billing",
         "Overall",
     ]
     assert [c.name for c in questions.key_columns] == ["question_code"]
@@ -1141,18 +1141,18 @@ def test_seeded_backend_contains_demo_content(seeded_backend: DuckDBBackend):
 
 def test_domain_crud_and_function_assignment(backend: DuckDBBackend, admin: User):
     assert backend.list_domains() == []
-    created = backend.create_domain(DomainDef("student", "Student", "Student data", ""), admin)
+    created = backend.create_domain(DomainDef("customer", "Customer", "Customer data", ""), admin)
     assert (created.name, created.display_name, created.description, created.function_count) == (
-        "student",
-        "Student",
-        "Student data",
+        "customer",
+        "Customer",
+        "Customer data",
         0,
     )
     assert created.owner == admin.username  # defaults to the actor
     backend.create_domain(DomainDef("finance", "Finance"), admin)
-    assert [d.name for d in backend.list_domains()] == ["finance", "student"]
+    assert [d.name for d in backend.list_domains()] == ["customer", "finance"]
     with pytest.raises(ConflictError, match="already exists"):
-        backend.create_domain(DomainDef("student"), admin)
+        backend.create_domain(DomainDef("customer"), admin)
     with pytest.raises(ValueError):
         backend.create_domain(DomainDef("Bad Name"), admin)
     with pytest.raises(NotFoundError, match="Domain 'ghost' does not exist"):
@@ -1160,29 +1160,29 @@ def test_domain_crud_and_function_assignment(backend: DuckDBBackend, admin: User
     with pytest.raises(NotFoundError):
         backend.update_domain(DomainDef("ghost"), admin)
     updated = backend.update_domain(
-        DomainDef("student", "Students", "All student lists", "s@example.org"), admin
+        DomainDef("customer", "Customers", "All customer lists", "s@example.org"), admin
     )
     assert (updated.display_name, updated.description, updated.owner) == (
-        "Students",
-        "All student lists",
+        "Customers",
+        "All customer lists",
         "s@example.org",
     )
     # assigning a function to a domain
     with pytest.raises(NotFoundError, match="Domain 'ghost' does not exist"):
         backend.create_function(FunctionDef("survey", domain="ghost"), admin)
-    f = backend.create_function(FunctionDef("survey", domain="student"), admin)
-    assert f.domain == "student" and f.properties["rdm.domain"] == "student"
-    assert backend.get_domain("student").function_count == 1
-    assert _meta_count(backend, "functions", name="survey", domain_name="student") == 1
+    f = backend.create_function(FunctionDef("survey", domain="customer"), admin)
+    assert f.domain == "customer" and f.properties["rdm.domain"] == "customer"
+    assert backend.get_domain("customer").function_count == 1
+    assert _meta_count(backend, "functions", name="survey", domain_name="customer") == 1
     with pytest.raises(ConflictError, match="still has 1 function"):
-        backend.delete_domain("student", admin)
+        backend.delete_domain("customer", admin)
     f = backend.update_function(FunctionDef("survey", domain="finance"), admin)
     assert f.domain == "finance"
-    assert {d.name: d.function_count for d in backend.list_domains()} == {"finance": 1, "student": 0}
-    backend.delete_domain("student", admin)
+    assert {d.name: d.function_count for d in backend.list_domains()} == {"customer": 0, "finance": 1}
+    backend.delete_domain("customer", admin)
     assert [d.name for d in backend.list_domains()] == ["finance"]
     with pytest.raises(NotFoundError):
-        backend.delete_domain("student", admin)
+        backend.delete_domain("customer", admin)
     # clearing the assignment
     assert backend.update_function(FunctionDef("survey", domain=""), admin).domain == ""
     assert backend.get_domain("finance").function_count == 0
@@ -1443,3 +1443,100 @@ def test_files_persist_next_to_the_database(tmp_path, admin: User):
     finally:
         custom.close()
     assert (tmp_path / "elsewhere" / "fin" / "gl.csv").exists()  # only temp dirs are removed on close
+
+
+def test_owner_email_roundtrip_for_function_form_and_file(backend, admin):
+    backend.create_function(
+        FunctionDef("crm", description="CRM lists", owner="crm team", owner_email="crm@example.org"),
+        admin,
+    )
+    assert backend.get_function("crm").owner_email == "crm@example.org"
+    form = backend.create_form(
+        FormDef(
+            "crm",
+            "accounts",
+            description="Accounts",
+            owner="crm team",
+            owner_email="accounts@example.org",
+            columns=[ColumnDef("code")],
+        ),
+        admin,
+    )
+    assert form.owner_email == "accounts@example.org"
+    assert [f.owner_email for f in backend.list_forms("crm")] == ["accounts@example.org"]
+    form.owner_email = ""
+    assert backend.update_form_metadata(form, admin).owner_email == ""
+    file = backend.put_file(
+        FileDef("crm", "leads.csv", description="Leads", owner="crm", owner_email="leads@example.org"),
+        b"a,b\n1,2\n",
+        admin,
+    )
+    assert file.owner_email == "leads@example.org"
+    file.owner_email = "sales@example.org"
+    assert backend.update_file_metadata(file, admin).owner_email == "sales@example.org"
+    # a replacement without metadata keeps the previous e-mail
+    replaced = backend.put_file(FileDef("crm", "leads.csv"), b"a,b\n3,4\n", admin, replace=True)
+    assert replaced.owner_email == "sales@example.org"
+
+
+def test_scd2_history_windows_follow_the_row_lifecycle(backend, admin):
+    """FR-47: __START_AT/__END_AT windows in the organisation's Auto CDC notation."""
+    backend.create_function(FunctionDef("crm"), admin)
+    form = backend.create_form(
+        FormDef(
+            "crm",
+            "accounts",
+            scd2_enabled=True,
+            columns=[ColumnDef("code", DataType.STRING, is_key=True), ColumnDef("name")],
+        ),
+        admin,
+        rows=pd.DataFrame({"code": ["A"], "name": ["Alpha"]}),
+    )
+    assert form.scd2_enabled
+    hist = 'crm."_h__accounts"'
+    con = backend._conn  # noqa: SLF001 - white-box check of the history table
+    assert con.execute(f"SELECT count(*) FROM {hist} WHERE __END_AT IS NULL").fetchone()[0] == 1
+    rows = backend.read_rows(form)
+    rid = str(rows.iloc[0]["_id"])
+    # update: the old window closes, a new one opens with the new value
+    backend.apply_changes(form, ChangeSet(updates=[RowUpdate(rid, {"name": "Alpha 2"}, 1)]), admin)
+    open_rows = con.execute(f"SELECT name FROM {hist} WHERE __END_AT IS NULL").fetchall()
+    assert open_rows == [("Alpha 2",)]
+    assert con.execute(f"SELECT count(*) FROM {hist}").fetchone()[0] == 2
+    # delete: the window closes, nothing opens
+    backend.apply_changes(form, ChangeSet(deletes=[RowDelete(rid, 2)]), admin)
+    assert con.execute(f"SELECT count(*) FROM {hist} WHERE __END_AT IS NULL").fetchone()[0] == 0
+    # append feeds history; a conflicting update does not touch it
+    backend.append_rows(form, pd.DataFrame({"code": ["B"], "name": ["Beta"]}), admin)
+    assert con.execute(f"SELECT count(*) FROM {hist} WHERE __END_AT IS NULL").fetchone()[0] == 1
+    stale = backend.apply_changes(
+        form, ChangeSet(updates=[RowUpdate(rid, {"name": "ghost"}, 1)]), admin
+    )
+    assert stale.conflicts and con.execute(f"SELECT count(*) FROM {hist}").fetchone()[0] == 3
+
+
+def test_scd2_toggle_backfills_and_stops_maintenance(backend, admin):
+    backend.create_function(FunctionDef("crm"), admin)
+    form = backend.create_form(
+        FormDef("crm", "leads", columns=[ColumnDef("code")]),
+        admin,
+        rows=pd.DataFrame({"code": ["A", "B"]}),
+    )
+    assert not form.scd2_enabled
+    form = backend.set_scd2(form, True, admin)
+    assert form.scd2_enabled
+    con = backend._conn  # noqa: SLF001 - white-box check of the history table
+    hist = 'crm."_h__leads"'
+    assert con.execute(f"SELECT count(*) FROM {hist} WHERE __END_AT IS NULL").fetchone()[0] == 2
+    # history tables never appear as forms and do not count towards the function
+    assert [f.name for f in backend.list_forms("crm")] == ["leads"]
+    assert backend.get_function("crm").form_count == 1
+    # disabling stops maintenance but keeps the table
+    form = backend.set_scd2(form, False, admin)
+    backend.append_rows(form, pd.DataFrame({"code": ["C"]}), admin)
+    assert con.execute(f"SELECT count(*) FROM {hist}").fetchone()[0] == 2
+    # dropping the form drops its history
+    backend.drop_form(form, admin)
+    assert con.execute(
+        "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'crm' AND table_name = '_h__accounts'"
+    ).fetchone()[0] == 0

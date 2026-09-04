@@ -5,18 +5,53 @@ Databricks Asset Bundle (DAB). Everything the app needs in a workspace - the Uni
 catalog, the domain schemas with their grants, the SQL-warehouse binding and the app itself
 - is declared in `databricks.yml` and `resources/*.yml`.
 
-> Status: this scaffolding has been checked for YAML syntax and internal consistency only.
-> Run `databricks bundle validate` against your own workspace before the first deploy and
-> fix whatever it reports (host, groups, warehouse, CLI version differences).
+> Fill in the bundle variables for your own workspace before the first deploy: every value
+> that depends on an environment (`warehouse_id`, `storage_root`, `admin_group`,
+> `breakglass_group`, the workspace host) ships as an obvious placeholder. Run
+> `databricks bundle validate` after every configuration change.
+
+## Where the app runs
+
+The app needs one workspace: it hosts the Databricks App and the SQL warehouse it queries.
+Any other workspace on the same metastore can consume the reference data in its pipelines,
+read-only, without the app being deployed there.
+
+Two workspace-level choices are worth making deliberately:
+
+* **Which workspace hosts the app.** Users open the app there, so it is normally the
+  workspace they already sign in to, not a data-engineering workspace.
+* **Whether the catalog is visible everywhere.** By default a catalog is visible to every
+  workspace attached to the metastore. Restrict it if you want the app's workspace to be
+  the only one that can write.
+
+### Restricting the catalog to its workspaces
+
+The bundle schema has no isolation field, so isolation and the bindings are set with two
+CLI calls after the **first** deploy, run as the catalog owner or a metastore admin; both
+persist over redeploys:
+
+```bash
+# 1. Isolate the catalog; this auto-binds the workspace the call goes through (read-write),
+#    so run it against the workspace that hosts the app.
+databricks catalogs update <catalog name> --isolation-mode ISOLATED
+# 2. Add each consuming workspace read-only.
+databricks workspace-bindings update-bindings catalog <catalog name> --json \
+  '{"add":[{"workspace_id":<consuming workspace id>,"binding_type":"BINDING_TYPE_READ_ONLY"}]}'
+databricks workspace-bindings get-bindings catalog <catalog name>   # verify
+```
+
+A read-only binding blocks writes and DDL from that workspace, so pipelines there can read
+every form but never modify one; the app and the bundle manage the catalog only through the
+workspace that hosts the app.
 
 | File | Purpose |
 |---|---|
 | `app.yaml` | Databricks Apps runtime config (command + env). Used by `databricks apps deploy` and `databricks apps run-local`. |
-| `databricks.yml` | Bundle name, variables (`catalog`, `warehouse_id`, `admin_group`, `app_name`, `app_users_group`), targets `dev` and `prod`. |
-| `resources/catalog.yml` | The `_reference_data` catalog and its catalog-level grants. |
+| `databricks.yml` | Bundle name, variables (`catalog`, `warehouse_id`, `storage_root`, `admin_group`, `breakglass_group`, `app_name`, `app_users_group`, `auth_mode`, `debug_personas`) and the example `dev` target. |
+| `resources/catalog.yml` | The reference-data catalog and its catalog-level grants. |
 | `resources/schemas.yml` | One schema per business function (with its domain as a property), with Viewer / Editor / Function admin grants. |
 | `resources/app.yml` | The app: source path, env, warehouse binding, user-authorization scopes, who may open it. |
-| `.github/workflows/ci.yml` | Lint + tests on every push/PR; `bundle validate` + `deploy -t prod` from `main`. |
+| `.github/workflows/ci.yml` | Lint, tests and the publish-safety scan on every push/PR. Deployment is not automated: wire it up in your fork with your own credentials. |
 
 How the pieces fit at runtime:
 
@@ -55,19 +90,24 @@ domains, functions and forms and the audit trail in the `_catalog` schema
 
 Workspace
 
-* Unity Catalog enabled; the deploying identity may `CREATE CATALOG` on the metastore
-  (or an admin pre-creates the catalog and you adopt it, see §9).
+* Unity Catalog enabled; the deploying identity may `CREATE CATALOG` on the metastore.
+  On the frontend workspaces `CREATE CATALOG` is typically not granted: pre-create the
+  catalog from a workspace that does allow it, or as a metastore admin, then adopt it with
+  `databricks bundle deployment bind forms <catalog>` before the first deploy (see §9).
 * A SQL warehouse, ideally serverless (cold starts dominate the UX otherwise). Note its id
-  (`databricks warehouses list`). The deploying identity needs CAN_MANAGE on it so the bundle
-  can grant the app's service principal CAN_USE.
+  (`databricks warehouses list`). The deploying identity needs CAN_MANAGE on it: attaching
+  the warehouse as an app resource requires it, and the attachment is what grants the app's
+  service principal CAN_USE. On locked-down workspaces a workspace admin grants CAN_MANAGE
+  to the deploying identity once.
 * Databricks Apps available in the workspace, and the *user authorization* feature for apps
   enabled (if the app's Authorization tab does not offer it, a workspace admin has to enable
   the preview first).
 * Account-level groups for the roles. Unity Catalog grants only work with account groups,
-  not workspace-local ones. The defaults used by the bundle and the local demo are
-  `rdm_admins`, `student_readers`, `student_stewards`, `finance_admins`, `finance_readers`,
-  `finance_stewards`, `hr_readers`, `hr_stewards`; rename them in `resources/schemas.yml`
-  to match your directory.
+  not workspace-local ones. Set `admin_group` (global administrators) and
+  `breakglass_group` (a second group with the same privileges, so the catalog is never left
+  without an administrator) to groups that exist in your account; the local demo uses mock
+  groups (`rdm_admins`, `finance_stewards`, ...) that exist only in the DuckDB backend.
+  Add function groups in `resources/schemas.yml`.
 
 Your machine
 
@@ -78,19 +118,23 @@ Your machine
 
 ## 2. Configure the bundle
 
-1. `databricks.yml` - set `workspace.host` for `dev` and `prod`; for `prod` set
-   `run_as.service_principal_name` to the application ID of the service principal that CI
-   will authenticate as. **The identity that deploys and `run_as` must be the same** - the
-   CLI refuses to deploy apps with a different `run_as`.
-2. Variables (`databricks.yml` -> `variables`):
+1. `databricks.yml` - set `workspace.host` on the `dev` target to your workspace. If you
+   deploy from CI with a service principal, name it in `run_as.service_principal_name`:
+   **the identity that deploys and `run_as` must be the same** - the CLI refuses to deploy
+   apps with a different `run_as`.
+2. Variables (`databricks.yml` -> `variables`). Each one ships with a placeholder default;
+   replace them all before deploying:
 
-   | Variable | Default | Notes |
+   | Variable | Value | Notes |
    |---|---|---|
-   | `catalog` | `_reference_data` (`_reference_data_dev` in `dev`) | Created by the bundle. Must not already exist unless you bind it (§9). |
-   | `warehouse_id` | none | Required. `--var="warehouse_id=<id>"`, `BUNDLE_VAR_warehouse_id=<id>`, or a per-target value in `databricks.yml`. |
-   | `admin_group` | `rdm_admins` | Catalog administrators; also CAN_MANAGE on the app. |
-   | `app_name` | `reference-data-manager` (`-dev` in `dev`) | Lowercase, digits, hyphens; unique per workspace. |
+   | `catalog` | `_reference_data` | Created by the bundle. Must not already exist unless you bind it (§9). Give each environment its own name. |
+   | `warehouse_id` | your SQL warehouse | Or `--var="warehouse_id=<id>"` / `BUNDLE_VAR_warehouse_id`. Serverless recommended. |
+   | `storage_root` | your managed storage location | Only needed when the metastore has no default storage root; otherwise delete the line from `resources/catalog.yml`. |
+   | `admin_group` | an account group | Global administrators; also CAN_MANAGE on the app. |
+   | `breakglass_group` | an account group | Same privileges as `admin_group` everywhere. Use the same value if you run only one. |
+   | `app_name` | `reference-data-manager` | Lowercase, digits, hyphens; unique per workspace. |
    | `app_users_group` | `users` | Who may open the app. |
+   | `auth_mode` / `debug_personas` | `databricks` / `"false"` | Change only on a deployment holding test data (see below). |
 
 3. `resources/schemas.yml` - one block per function. Copy an existing block to add a
    function (name `<domain>__<area>`, lowercase, no leading underscore), set `comment`,
@@ -102,30 +146,39 @@ Your machine
    Optional: `RDM_ADMIN_CONTACT` (an e-mail address, URL or text) is shown in **Help > About** as
    the person or team to contact for use cases the app is not designed for.
 
-## 3. Deploy to `dev`
+## 3. Deploy
 
 ```bash
-export BUNDLE_VAR_warehouse_id=<warehouse id>       # or --var="warehouse_id=..."
-
-databricks bundle validate -t dev                   # resolves variables, checks the config
-databricks bundle deploy   -t dev                   # catalog, schemas, grants, app + source upload
-databricks bundle run reference_data_manager -t dev # starts the app (deploys the uploaded source)
-databricks bundle summary  -t dev                   # prints resource names and the app URL
-databricks bundle open reference_data_manager -t dev
+databricks bundle validate -t dev --profile <your profile>   # resolves variables, checks the config
+databricks bundle deploy   -t dev --profile <your profile>   # catalog, schemas, grants, app + source upload
+databricks bundle run reference_data_manager -t dev --profile <your profile>   # starts the app
+databricks bundle summary  -t dev --profile <your profile>   # prints resource names and the app URL
+databricks bundle open reference_data_manager -t dev --profile <your profile>
 ```
 
-What `dev` (mode `development`) does differently:
+Notes on the target:
 
-* Schema names are prefixed with `dev_<your short name>_`, so the sidebar shows functions
-  such as `dev_alice_student__survey_service_improvement`. Catalog and app names are not
-  prefixed; the target therefore overrides them (`_reference_data_dev`, `reference-data-manager-dev`).
-  Several developers sharing one workspace should pass distinct `--var="catalog=..."` and
-  `--var="app_name=..."` values, because each developer keeps a separate bundle state.
+* It deliberately does **not** use `mode: development`: the development-mode schema prefix
+  (`dev_<name>_`) would rename the registry schema, which the app resolves by the fixed
+  name `_catalog`, and hang every grant on the wrong schemas. Give each environment its own
+  catalog name instead.
+* One person deploys a target at a time; a second person needs distinct
+  `--var="catalog=..."` and `--var="app_name=..."` values, because each keeps a separate
+  bundle state.
 * The deployment runs as you, so you own the catalog and schemas; no `run_as`.
+* **Review personas** are optional: setting `auth_mode: mock` and `debug_personas: "true"`
+  lets anyone who can open the app switch between Global admin, Function admin, Editor and
+  Viewer in the header and experience each role on every function. Queries then run as the
+  app's service principal, so keep it to a catalog with test data; production always uses
+  `auth_mode: databricks`. In that mode the app's service principal needs the admin
+  privilege set on the catalog - add its client id to the catalog grant list (recreating
+  the app mints a new one, so update it then).
+* After the **first** deploy, isolate the catalog and add the read-only binding of the
+  data platform workspace ("Workspace topology" above); both are kept over redeploys.
 
-Iterating: after changing code run `databricks bundle deploy -t dev` followed by
-`databricks bundle run reference_data_manager -t dev`. Application logs are at
-`<app URL>/logz`. `databricks bundle destroy -t dev` removes the app, the schemas and the
+Iterating: after changing code run `databricks bundle deploy -t developer` followed by
+`databricks bundle run reference_data_manager -t developer`. Application logs are at
+`<app URL>/logz`. `databricks bundle destroy -t developer` removes the app, the schemas and the
 catalog - including their data.
 
 ## 4. Enable user authorization (on-behalf-of-user) and why
@@ -138,15 +191,15 @@ every statement runs as the signed-in user and Unity Catalog enforces the schema
 The app's role logic then only decides what to render.
 
 * Bundle deployments: already configured - `resources/app.yml` declares
-  `user_api_scopes: [sql, files.files, iam.current-user:read]`. `sql` allows warehouse
-  queries under the user's Unity Catalog permissions; `files.files` lets the app upload,
-  download and delete files in the function volumes as the user (Files API);
-  `iam.current-user:read` lets `DatabricksAuthProvider` read the user's group memberships
-  for the sidebar (a UI default scope, declared explicitly).
+  `user_api_scopes: [sql, files.files]`. `sql` allows warehouse queries under the user's
+  Unity Catalog permissions; `files.files` lets the app upload, download and delete files
+  in the function volumes as the user (Files API). Group memberships for the sidebar are
+  read through `iam.current-user:read`, a platform default scope that some workspaces
+  reject when declared explicitly - it is granted either way.
 * UI: Compute -> Apps -> *your app* -> **Authorization** -> enable *User authorization*,
   tick the `sql` scope, save. The app restarts.
 * CLI (apps deployed without the bundle):
-  `databricks apps update <app-name> --json '{"user_api_scopes": ["sql", "files.files", "iam.current-user:read"]}'`
+  `databricks apps update <app-name> --json '{"user_api_scopes": ["sql", "files.files"]}'`
 * Users see a consent screen listing the scopes on their first visit. Until they accept, no
   user token is forwarded and the app cannot run queries on their behalf.
 * Each user also needs **CAN USE on the SQL warehouse** - the query runs as them. Grant it to
@@ -188,7 +241,7 @@ headers for the CLI's signed-in user).
 ```dotenv
 RDM_BACKEND=databricks
 RDM_AUTH=databricks
-RDM_CATALOG=_reference_data_dev
+RDM_CATALOG=_reference_data
 DATABRICKS_HOST=https://<workspace>.cloud.databricks.com
 DATABRICKS_WAREHOUSE_ID=<warehouse id>
 # RDM_MAX_ROWS=5000
@@ -213,58 +266,111 @@ backend for UI work.
 
 ## 7. Run the contract tests against a dev catalog
 
-The contract suite (`tests/`, DESIGN.md §9) runs against DuckDB always and against the
-Databricks backend when `RDM_TEST_DATABRICKS=1`. Point it at a **dev** catalog only - the
-tests create and drop schemas and tables.
+The contract suite (`tests/`, DESIGN.md §9) runs against DuckDB always and, when
+`RDM_TEST_DATABRICKS=1`, against a real SQL warehouse (`tests/test_databricks_live.py`,
+which creates and drops a throwaway `zz_live_*` schema). Point it at a **dev** catalog only.
 
 ```bash
 export RDM_TEST_DATABRICKS=1
-export RDM_BACKEND=databricks
-export RDM_CATALOG=_reference_data_dev                  # never the production catalog
-export DATABRICKS_HOST=https://<workspace>.cloud.databricks.com
+export RDM_CATALOG=<your dev catalog>                   # never the production catalog
 export DATABRICKS_WAREHOUSE_ID=<warehouse id>
-export DATABRICKS_TOKEN=<token>               # or a CLI profile the SDK can resolve
-python -m pytest tests -k databricks
+export DATABRICKS_CONFIG_PROFILE=<your profile>         # or DATABRICKS_HOST + DATABRICKS_TOKEN
+python -m pytest tests/test_databricks_live.py
 ```
 
-The identity running the tests needs the Administrator set on the catalog (it is the
-`admin_group` member in `dev`, i.e. you). In CI this can be a job in the workspace or a
-second workflow job with the same secrets; it is intentionally not part of `ci.yml`.
+The identity running the tests needs the Administrator set on the catalog, i.e. membership
+of `admin_group`. It is intentionally not part of `ci.yml`, which runs credential-free.
 
-## 8. Deploy to `prod` (CI)
+## 8. Deploying a production target from CI
 
-`.github/workflows/ci.yml` runs `databricks bundle validate -t prod` and
-`databricks bundle deploy -t prod` (then `bundle run` to start the app) on `workflow_dispatch`
-and on every push to `main`, after lint and tests pass. Configure in the `prod` GitHub
-environment:
+Deployment is not wired into `ci.yml`, because it needs a workspace and credentials that
+only you have. To automate it, copy the `dev` target to a `prd` target (its own workspace
+host, its own catalog, `mode: production`, and `run_as` naming the service principal that
+will deploy), then add a workflow job that authenticates as that service principal -
+GitHub OIDC federation is the option that stores no token:
 
-* secrets `DATABRICKS_HOST`, `DATABRICKS_TOKEN` - token of **the service principal named in
-  `targets.prod.run_as`** (apps must be deployed by that identity). Prefer GitHub OIDC
-  federation (`DATABRICKS_AUTH_TYPE=github-oidc` + `DATABRICKS_CLIENT_ID`, commented in the
-  workflow) over a stored token.
-* variable `DATABRICKS_WAREHOUSE_ID` - mapped to `BUNDLE_VAR_warehouse_id`.
+```yaml
+env:
+  DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+  DATABRICKS_AUTH_TYPE: github-oidc
+  DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+  BUNDLE_VAR_warehouse_id: ${{ vars.DATABRICKS_WAREHOUSE_ID }}
+```
 
-The service principal needs: CREATE CATALOG on the metastore (first deploy), CAN_MANAGE on
-the warehouse, permission to create apps, and the `prod` `root_path`
-(`/Shared/.bundle/prod/rdm_reference_data_manager`) must be writable by it. It becomes the
-owner of the catalog and the schemas; the `admin_group` gets MANAGE on both so
-administrators can still alter and drop tables that the app or other users created.
+One-time steps by a workspace or metastore admin:
+
+* Create the production catalog (or grant the deploying service principal
+  `CREATE CATALOG` on the metastore for the first deploy). A pre-created catalog is
+  adopted with `databricks bundle deployment bind forms <catalog name> -t prd` before the
+  first deploy.
+* Grant the deploying service principal CAN_MANAGE on the production SQL warehouse (needed
+  to attach it as the app resource, which grants the app's own service principal CAN_USE).
+* After the first deploy, isolate the catalog and bind any consuming workspaces read-only
+  ("Restricting the catalog to its workspaces" above) - as the catalog owner or a
+  metastore admin.
+* Make the target's `root_path` writable by the service principal.
+
+The service principal becomes the owner of the catalog and the schemas; the admin groups
+get MANAGE on both so administrators can still alter and drop tables that the app or other
+users created.
 
 ## 9. Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
 | `no value assigned to required variable warehouse_id` | Pass `--var="warehouse_id=..."`, export `BUNDLE_VAR_warehouse_id`, or set it in the target. |
-| `apps do not support a setting a run_as user that is different from the owner` | `prod` is being deployed with credentials of a different identity than `run_as`. Use the service principal's own credentials (or remove `run_as` in a personal target). |
+| `User does not have CREATE CATALOG on Metastore` | Some workspaces do not grant it. Create the catalog from a workspace that does (or as a metastore admin) with the same `storage_root`, then `databricks bundle deployment bind forms <catalog name> -t <target>` and redeploy. |
+| `User needs MANAGE permission on the resource` when creating the app | Attaching the SQL warehouse as an app resource requires CAN_MANAGE on it for the deploying identity (§1). Ask a workspace admin to grant it. |
+| `Invalid update mask ... forward_user_access_token` on app update | The CLI's embedded provider sends a field the workspace's Apps API no longer accepts; upgrade the Databricks CLI (fixed in v1.15). |
+| Catalog not visible from a workspace that should read it | The catalog is `ISOLATED` and that workspace has no binding. Add it (read-only for consumers): see "Restricting the catalog to its workspaces". |
+| `apps do not support a setting a run_as user that is different from the owner` | The target is being deployed with the credentials of a different identity than `run_as`. Use the service principal's own credentials (or remove `run_as` in a personal target). |
 | Deploy fails: catalog already exists | The bundle creates the catalog and cannot adopt an existing one silently. Choose another `catalog` value, or bind the existing one: `databricks bundle deployment bind forms <catalog name> -t <target>` (see `databricks bundle deployment bind --help`). |
 | App starts but every query fails with a permission error on the warehouse | The **user** (with user authorization) or the app's service principal (without) lacks CAN USE on the warehouse - §4. The bundle only grants the service principal. |
 | `X-Forwarded-Access-Token` missing / app runs as the service principal / "insufficient scope" | User authorization not enabled, the `sql` scope not declared, or the user has not consented yet. Check the app's Authorization tab; users must reload and accept the consent screen. Scopes added later require re-consent. |
 | `No user identity headers found` | `RDM_AUTH=databricks` outside the Apps proxy. Use `databricks apps run-local` or `RDM_AUTH=mock` locally. |
 | Sidebar shows no functions for a user who "should" have access | The user's group has no `USE_SCHEMA`+`SELECT` on the schema, the group is workspace-local instead of account-level, or the grant was added outside the bundle and reverted by a deploy. Fix `resources/schemas.yml` and redeploy. |
 | Group memberships missing in the sidebar (roles look wrong) | `iam.current-user:read` scope missing (user authorization) or, in service-principal mode, the service principal cannot read users. Roles are still enforced by Unity Catalog; only rendering is affected. |
-| Function names look odd in `dev` (`dev_alice_...`) | Development-mode prefix on schemas; expected. `prod` uses the plain names. |
+| `Metastore storage root URL does not exist` on deploy | The metastore has no default storage root; set the `storage_root` variable (the catalog's managed location) for the target. |
+| `Could not find principal with name users` on a grant | Unity Catalog grants only accept account-level principals; use `account users` (or an account group), not the workspace-local `users` group. |
 | Uploading a file fails with a permission error, or files are listed without sizes | The user lacks `WRITE VOLUME` (upload/replace/delete) or `READ VOLUME` (list/download) on the function schema, the `files.files` scope is not declared, or the `_files` volume could not be created (`CREATE VOLUME`). Files landed outside the app are listed but unregistered until an admin describes them. |
 | A function shows under "Unassigned" | Its schema has no `rdm.domain` property / `rdm_domain` tag (created by the bundle without it, or outside the app). A global admin assigns the domain on the function page. |
 | Catalog name `_reference_data` (leading underscore) | Valid Unity Catalog name and a valid unquoted identifier in Databricks SQL; the backend quotes every identifier with backticks anyway. Some organisations reserve leading underscores for system objects in their naming policy - check yours, and note the app itself rejects leading underscores for *function* and *domain* names. |
 | App status `UNAVAILABLE` / crash loop after deploy | Open `<app URL>/logz`. Usual causes: dependency pin in `requirements.txt` incompatible with the Apps Python runtime, or a `PORT`/`DATABRICKS_APP_PORT` override in `app.yaml`/`config` (the runtime sets the port; `app.py` reads it). |
 | `DATABRICKS_WAREHOUSE_ID (or DATABRICKS_HTTP_PATH) must be set` | The `sql-warehouse` app resource is missing or its key differs from `valueFrom`/`value_from`. Check `resources/app.yml` (bundle) or the app's Resources tab (manual deploy). |
+
+## 10. Publish functions in Discover domains
+
+Unity Catalog has no *domain* securable, so the app's domain list is its own registry table
+`_catalog.domains`, and a function's domain is a schema property (`rdm.domain`) plus a schema
+tag (`rdm_domain`).
+
+> **Waiting on Databricks.** Native Unity Catalog domains are not available today. Until they
+> are, the registry plus the tag sync below is the bridge; when they arrive, the registry, the
+> `rdm.domain` property and this sync are intended to be replaced by the native objects. Keep
+> the app's domain names aligned with the organisation's published domain names.
+
+The workspace **Discover** page groups assets into *domains* (`domain:<Name>` in search).
+Domains are built on governed tags: an asset belongs to a domain when it carries the
+domain's tag. The app's own domain classifier (`rdm.domain` on each function schema) is
+independent of that, so the two are bridged by tagging:
+
+1. A curator creates and publishes the domain card once on the **Discover** page (UI only;
+   the governed tag of the same name is created with it), for each domain the app uses.
+2. An account admin grants the syncing identity the **ASSIGN** permission on those tag
+   policies (`roles/tagPolicy.assigner` in the account access-control rule set
+   `accounts/<account id>/tagPolicies/<policy id>/ruleSets/default`, granted per domain
+   tag to an account group); APPLY TAG on the schemas comes with the bundle's admin
+   grants.
+3. Run the sync after deploying or after assigning domains in the app:
+
+   ```bash
+   python scripts/sync_domain_tags.py --catalog <catalog name> --profile <your profile> [--include-tables] [--dry-run]
+   ```
+
+   It matches each schema's `rdm.domain` to a governed tag case-insensitively with
+   underscores as spaces (`customer_service` -> `Customer Service`), skips schemas
+   whose domain has no tag yet, and is idempotent. `--include-tables` also tags every
+   form so individual tables surface under the domain filter.
+
+Without the ASSIGN grant, assets can still be added manually: **Discover** page > domain >
+**Add to Domain**, or by applying the governed tag in Catalog Explorer.
