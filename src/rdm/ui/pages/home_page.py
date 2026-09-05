@@ -59,14 +59,19 @@ def render(ctx_: AppContext) -> dmc.Stack:
         "change is recorded.",
     )
     if not groups:
+        no_functions = not ctx_.backend.list_functions()
         return dmc.Stack(
             [
                 header,
                 _intro(),
                 empty_state(
-                    "No functions available",
-                    "You have not been granted access to any function. Ask a function administrator for Viewer or Editor access.",
-                    "tabler:lock",
+                    "No functions created" if no_functions else "No functions available",
+                    (
+                        "Run .\\.venv\\Scripts\\python.exe scripts\\seed_demo.py from the project root, then refresh."
+                        if no_functions
+                        else "You have not been granted access to any function. Ask a function administrator for Viewer or Editor access."
+                    ),
+                    "tabler:database-off" if no_functions else "tabler:lock",
                 ),
             ]
         )

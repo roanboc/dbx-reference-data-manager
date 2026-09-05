@@ -218,14 +218,20 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
     if caption:
         blocks.append(dmc.Text(caption, size="xs", c="dimmed"))
     if not groups:
+        no_functions = not ctx.backend.list_functions()
         blocks.append(
             dmc.Alert(
                 "No matches. Try another word."
                 if search
-                else "You have not been granted access to any function yet.",
+                else (
+                    "No functions have been created yet. Run .\\.venv\\Scripts\\python.exe "
+                    "scripts\\seed_demo.py from the project root, then refresh."
+                    if no_functions
+                    else "You have not been granted access to any function yet."
+                ),
                 color="gray",
                 variant="light",
-                icon=icon("tabler:search-off" if search else "tabler:lock"),
+                icon=icon("tabler:search-off" if search else "tabler:database-off" if no_functions else "tabler:lock"),
             )
         )
     current_function = _current_function(pathname)
