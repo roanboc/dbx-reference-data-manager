@@ -226,8 +226,8 @@ make screenshots        # regenerate docs/screenshots from a running local app (
 
 The test strategy is described in [docs/DESIGN.md](docs/DESIGN.md) §9: the DuckDB backend is
 the local runtime and contract target, the Databricks backend is covered by SQL-generation
-tests against a fake connection and, before a release, by the same contract suite against a
-development catalog (`RDM_TEST_DATABRICKS=1`).
+tests against a fake connection and, before a release, by a manual walk-through against a
+development catalog ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) §7).
 
 Notes
 

@@ -266,7 +266,7 @@ DuckDB is the local *runtime* backend; it is deliberately not the only truth:
 | Contract | `DatabaseBackend` behaviour against DuckDB (create/alter, read, save, conflicts, history, permissions) | every commit |
 | Server | Dash app boots, layout and callbacks resolve (Flask test client) | every commit |
 | Browser | Playwright + Chromium (`tests/test_browser.py`): colour scheme follows the system and the header control, icons render from local files, editor multi-row selection and staged delete, viewer single selection and read-only item form | every commit (CI installs Chromium; the tests skip when no browser is available) |
-| Real | `databricks apps run-local` against a dev workspace; the contract suite against a dev catalog with `RDM_TEST_DATABRICKS=1` (to be wired when a workspace is available) | before release |
+| Real | `databricks apps run-local` against a dev workspace with the walk-through in DEPLOYMENT.md §7; running the contract suite against a dev catalog (per-test schema prefix and teardown) is on the roadmap | before release |
 
 Known DuckDB/Databricks divergences (covered by the Databricks SQL-generation tests rather
 than by DuckDB): PRIMARY KEY enforcement, literal escaping, DROP COLUMN requirements,

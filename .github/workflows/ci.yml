@@ -49,8 +49,8 @@ jobs:
       - name: Install Chromium for Playwright
         run: python -m playwright install --with-deps chromium
 
-      # The Databricks contract tests run only with RDM_TEST_DATABRICKS=1 and workspace
-      # credentials (docs/DEPLOYMENT.md §7).
+      # The Databricks backend is covered by SQL-generation tests against a fake connection;
+      # a real workspace is exercised manually before a release (docs/DEPLOYMENT.md §7).
       - name: Pytest
         run: python -m pytest
 

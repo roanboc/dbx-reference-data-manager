@@ -211,21 +211,25 @@ Plain `python app.py --dev` with `RDM_AUTH=databricks` fails with "No user ident
 headers found" - that is expected: use `run-local`, or `RDM_AUTH=mock` with the DuckDB
 backend for UI work.
 
-## 7. Run the contract tests against a dev catalog
+## 7. Test against a dev workspace before a release
 
-The contract suite (`tests/`, DESIGN.md §9) runs against DuckDB always and against the
-Databricks backend when `RDM_TEST_DATABRICKS=1`. Point it at a **dev** catalog only - the
-tests create and drop schemas and tables.
+The automated suite covers the Databricks backend through SQL-generation tests against a fake
+connection (`tests/test_databricks_backend.py`); the contract tests in `tests/test_duckdb_backend.py`
+run on DuckDB only. Before a release, exercise the real backend against a **dev** catalog:
 
 ```bash
-export RDM_TEST_DATABRICKS=1
 export RDM_BACKEND=databricks
+export RDM_AUTH=databricks
 export RDM_CATALOG=_reference_data_dev                  # never the production catalog
 export DATABRICKS_HOST=https://<workspace>.cloud.databricks.com
 export DATABRICKS_WAREHOUSE_ID=<warehouse id>
-export DATABRICKS_TOKEN=<token>               # or a CLI profile the SDK can resolve
-python -m pytest tests -k databricks
+databricks apps run-local                               # see §6
 ```
+
+Walk through: create a domain and a function, grant a group, create a form from Excel, edit,
+bulk-update and save rows, restore a version, add / replace / delete a file, delete the form
+and the function. Running the DuckDB contract suite against a dev catalog is on the roadmap
+(DESIGN.md §9); it needs a per-test schema prefix and teardown that are not written yet.
 
 The identity running the tests needs the Administrator set on the catalog (it is the
 `admin_group` member in `dev`, i.e. you). In CI this can be a job in the workspace or a
