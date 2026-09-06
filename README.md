@@ -129,6 +129,10 @@ make seed               # creates data/rdm.duckdb (+ data/files/) with demo doma
 make run                # http://localhost:8050 (dev server with hot reload)
 ```
 
+Demonstrating it to someone? Use `make serve` instead: `make run` starts the Dash dev server,
+which shows the debug toolbar and renders a Werkzeug traceback into the page when something
+goes wrong. `make serve` runs the same app under gunicorn, as it runs in production.
+
 On Windows, the same without make:
 
 ```powershell

@@ -277,6 +277,7 @@ def step_source(state: dict[str, Any], max_rows: int) -> dmc.Stack:
                 className="rdm-dropzone",
                 multiple=False,
                 accept=".xlsx,.xls,.csv,.tsv",
+                max_size=get_settings().max_file_mb * 1024 * 1024,
             ),
             dmc.Group(
                 [

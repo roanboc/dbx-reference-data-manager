@@ -12,12 +12,13 @@ from rdm.config import Settings
 from rdm.models import Role
 from rdm.services import CatalogService, FormService
 from rdm.ui import ids
-from rdm.ui.context import AppContext
+from rdm.ui.context import AppContext, get_settings
 from rdm.ui.pages import (
     domain_page,
     domains_page,
     file_page,
     form_creator,
+    form_page,
     function_page,
     help_page,
     home_page,
@@ -511,3 +512,29 @@ def test_demo_data_tells_a_stewardship_story(seeded_backend):
     )
     authors = set(everything["changed_by"])
     assert {"alice.admin@example.org", "fiona.functionadmin@example.org", "eddie.editor@example.org"} <= authors
+
+
+def test_every_upload_dropzone_carries_the_configured_size_limit(seeded_backend):
+    """A dropzone with no max_size lets the browser start an upload the server will not want."""
+    from dash import dcc
+
+    ctx_ = make_ctx(seeded_backend, "admin")
+    trees = [
+        form_page.render(ctx_, "finance__cost_management", "cost_centres"),
+        # The wizard's dropzone lives in step 1, which a callback renders, not render().
+        form_creator.step_source(form_creator._default_state(), ctx_.settings.max_rows),
+        function_page.render(ctx_, "finance__cost_management"),
+        file_page.render(ctx_, "finance__cost_management", "gl_transactions.csv"),
+    ]
+    # The wizard renders invisible stand-ins for controls of steps it is not on; the real
+    # dropzones are the ones that declare which file types they accept.
+    real = [c for tree in trees for c in walk(tree) if isinstance(c, dcc.Upload) and getattr(c, "accept", None)]
+    assert {c.id for c in real} == {
+        ids.WIZ_UPLOAD,
+        ids.IMPORT_UPLOAD,
+        ids.ADD_FILE_UPLOAD,
+        ids.FILE_REPLACE_UPLOAD,
+    }
+    limit = get_settings().max_file_mb * 1024 * 1024
+    for upload in real:
+        assert getattr(upload, "max_size", None) == limit, upload.id

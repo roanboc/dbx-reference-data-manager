@@ -53,7 +53,7 @@ from rdm.ui.components import (
     page_title,
     role_badge,
 )
-from rdm.ui.context import AppContext, get_context, invalidate_metadata
+from rdm.ui.context import AppContext, get_context, get_settings, invalidate_metadata
 from rdm.ui.layout import function_href
 
 log = logging.getLogger(__name__)
@@ -578,6 +578,7 @@ def _import_modal(form: FormDef) -> dmc.Modal:
                     className="rdm-dropzone",
                     multiple=False,
                     accept=".xlsx,.xls,.csv,.tsv",
+                    max_size=get_settings().max_file_mb * 1024 * 1024,
                 ),
                 dmc.RadioGroup(
                     id=ids.IMPORT_MODE,
