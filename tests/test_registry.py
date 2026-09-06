@@ -216,16 +216,19 @@ def test_a_legacy_change_log_keeps_its_order_after_gaining_seq(tmp_path):
 # -- the one-time bootstrap an administrator runs ----------------------------------------
 
 
-def test_bootstrap_script_emits_the_declared_shape_and_nothing_else():
-    """The bootstrap DDL must come from the declaration, so it cannot drift from the app."""
+def _bootstrap():
     import importlib.util
     from pathlib import Path
 
     spec = importlib.util.spec_from_file_location("bootstrap", Path("scripts/bootstrap_catalog.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
 
-    ddl = module.statements("_reference_data")
+
+def test_bootstrap_script_emits_the_declared_shape_and_nothing_else():
+    """The bootstrap DDL must come from the declaration, so it cannot drift from the app."""
+    ddl = _bootstrap().statements("_reference_data")
     assert ddl[0].startswith("CREATE SCHEMA IF NOT EXISTS `_reference_data`.`_catalog`")
     assert len(ddl) == 1 + len(registry.REGISTRY_TABLES)
     for table, statement in zip(registry.REGISTRY_TABLES, ddl[1:], strict=True):
@@ -233,13 +236,26 @@ def test_bootstrap_script_emits_the_declared_shape_and_nothing_else():
     assert all("IF NOT EXISTS" in s for s in ddl)  # safe to re-run after every release
 
 
+def test_bootstrap_script_upgrades_a_catalog_that_predates_a_column():
+    """CREATE TABLE IF NOT EXISTS does nothing to an existing table, so the upgrade is ALTERs."""
+    module = _bootstrap()
+    present = {t.name: set(t.column_names) for t in registry.REGISTRY_TABLES}
+    assert module.upgrade_statements(present, "_reference_data") == []
+
+    present["functions"] -= {"owner_email", "doc_link"}
+    present["change_log"] -= {"meta_json"}
+    upgrades = module.upgrade_statements(present, "_reference_data")
+    assert len(upgrades) == 2
+    assert (
+        "ALTER TABLE `_reference_data`.`_catalog`.`functions` ADD COLUMNS "
+        "(`owner_email` STRING, `doc_link` STRING)" in upgrades
+    )
+    assert upgrades[1].endswith("ADD COLUMNS (`meta_json` STRING)")
+
+
 def test_bootstrap_script_refuses_a_catalog_name_that_is_not_an_identifier():
-    import importlib.util
-    from pathlib import Path
-
-    spec = importlib.util.spec_from_file_location("bootstrap", Path("scripts/bootstrap_catalog.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
+    module = _bootstrap()
     with pytest.raises(ValueError, match="Invalid catalog name"):
         module.statements("bad name; DROP TABLE x")
+    with pytest.raises(ValueError, match="Invalid catalog name"):
+        module.upgrade_statements({}, "bad name; DROP TABLE x")

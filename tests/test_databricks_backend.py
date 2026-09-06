@@ -1033,3 +1033,24 @@ def test_scd2_enable_creates_history_and_saves_maintain_windows():
     assert "__END_AT` = :now" in close and "IS NULL" in close
     [(open_, _)] = statements(conn, r"^INSERT INTO " + hist.replace("`", r"\`"))
     assert ":now, NULL FROM" in open_
+
+
+def test_replacing_a_file_never_asks_for_create_volume():
+    """Replace is an Editor action; CREATE VOLUME is a Function admin privilege.
+
+    The existing round-trip test only passes because one backend instance caches the volume
+    after the first upload. An editor whose first action in a fresh process is a replace would
+    have been asked for a privilege they do not hold.
+    """
+    files = FakeFiles()
+    files.store[VOLUME + "/gl.csv"] = b"a,b\n1,2\n"
+    b, conn = make_backend(
+        [
+            (r"^SELECT \* FROM `_reference_data`\.`_catalog`\.`files`", ["function_name", "name"], []),
+            (r"read_files", ["n"], [(2,)]),
+        ],
+        files=files,
+    )
+    b.put_file(FileDef("finance__cost", "gl.csv"), b"a,b\n3,4\n", ADMIN, replace=True)
+    assert not statements(conn, r"^CREATE VOLUME")
+    assert ("upload", VOLUME + "/gl.csv", True) in files.calls

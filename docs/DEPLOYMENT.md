@@ -199,9 +199,11 @@ python scripts/bootstrap_catalog.py --catalog <your catalog> \
 ```
 
 The statements are generated from `src/rdm/backend/registry.py`, the single declaration both
-backends build their DDL from, so the script cannot drift from what the app expects. Every
-statement is `IF NOT EXISTS`, so re-running it after a release is how a catalog picks up
-columns a newer declaration introduced (see [DATA_MODEL.md](DATA_MODEL.md)).
+backends build their DDL from, so the script cannot drift from what the app expects. Re-running
+it with `--apply` after a release is also the upgrade path: it compares each table with the
+declaration and adds the columns the release introduced (see [DATA_MODEL.md](DATA_MODEL.md)).
+`CREATE TABLE IF NOT EXISTS` on its own would not — it does nothing at all to a table that
+already exists — which is why the printed form is only what a *fresh* catalog needs.
 
 ## 4. Enable user authorization (on-behalf-of-user) and why
 

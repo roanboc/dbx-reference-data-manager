@@ -19,8 +19,11 @@ dependency on who happens to click first.
 
 The statements come from ``rdm.backend.registry``, the single declaration both backends
 generate their DDL from, so this script cannot drift from what the app expects. It is
-idempotent: every statement is ``IF NOT EXISTS``, and re-running it after a release adds the
-columns a newer declaration introduced.
+idempotent, and re-running it after a release is also the upgrade path: ``--apply`` compares
+each table with the declaration and adds the columns a newer release introduced (``CREATE
+TABLE IF NOT EXISTS`` alone would not — it does nothing at all to a table that exists). Without
+``--apply`` there is nothing to compare against, so the printed statements are what a *fresh*
+catalog needs.
 """
 
 from __future__ import annotations
@@ -48,6 +51,24 @@ def statements(catalog: str, meta_schema: str = "_catalog") -> list[str]:
     return out
 
 
+def upgrade_statements(present: dict[str, set[str]], catalog: str, meta_schema: str = "_catalog") -> list[str]:
+    """``ALTER TABLE ... ADD COLUMNS`` for every column a table is missing.
+
+    ``present`` maps a registry table name to the columns the catalog actually has. Kept pure
+    and separate from the connection so it can be tested without a workspace.
+    """
+    validate_identifier(catalog, "catalog name")
+    validate_identifier(meta_schema, "schema name")
+    out = []
+    for table in registry.REGISTRY_TABLES:
+        missing = registry.missing_columns(table, present.get(table.name, set()))
+        if not missing:
+            continue
+        added = ", ".join(f"`{name}` {table.type_of(name, 'databricks')}" for name, _ in missing)
+        out.append(f"ALTER TABLE `{catalog}`.`{meta_schema}`.`{table.name}` ADD COLUMNS ({added})")
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--catalog", default="_reference_data", help="the reference-data catalog")
@@ -59,7 +80,8 @@ def main() -> int:
 
     ddl = statements(args.catalog, args.meta_schema)
     if not args.apply:
-        print("-- Review these, then re-run with --apply (or hand them to a workspace admin).")
+        print("-- What a fresh catalog needs. Re-run with --apply to also upgrade an existing")
+        print("-- one: the columns a newer release added are only visible by inspecting it.")
         for statement in ddl:
             print(f"{statement};\n")
         return 0
@@ -70,17 +92,47 @@ def main() -> int:
     from databricks.sdk import WorkspaceClient
 
     w = WorkspaceClient(profile=args.profile) if args.profile else WorkspaceClient()
-    for statement in ddl:
+
+    def run(statement: str) -> bool:
         head = statement.split("(", 1)[0].strip()
         response = w.statement_execution.execute_statement(
-            statement=statement, warehouse_id=args.warehouse_id, catalog=args.catalog
+            statement=statement, warehouse_id=args.warehouse_id, catalog=args.catalog, wait_timeout="30s"
         )
         state = response.status.state.value if response.status and response.status.state else "UNKNOWN"
         if state not in {"SUCCEEDED", "PENDING", "RUNNING"}:
             error = response.status.error.message if response.status and response.status.error else state
             print(f"  FAILED  {head}\n          {error}")
-            return 1
+            return False
         print(f"  ok      {head}")
+        return True
+
+    for statement in ddl:
+        if not run(statement):
+            return 1
+
+    # Now the upgrade half: CREATE TABLE IF NOT EXISTS does nothing to a table that already
+    # exists, so a catalog from an earlier release still lacks whatever has been declared since.
+    present: dict[str, set[str]] = {}
+    for table in registry.REGISTRY_TABLES:
+        response = w.statement_execution.execute_statement(
+            statement=(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_schema = '{args.meta_schema}' AND table_name = '{table.name}'"
+            ),
+            warehouse_id=args.warehouse_id,
+            catalog=args.catalog,
+            wait_timeout="30s",
+        )
+        rows = response.result.data_array if response.result and response.result.data_array else []
+        present[table.name] = {str(r[0]) for r in rows}
+
+    upgrades = upgrade_statements(present, args.catalog, args.meta_schema)
+    for statement in upgrades:
+        if not run(statement):
+            return 1
+    if not upgrades:
+        print("  ok      every table already carries every declared column")
+
     print(f"\n{args.catalog}.{args.meta_schema} is ready.")
     return 0
 

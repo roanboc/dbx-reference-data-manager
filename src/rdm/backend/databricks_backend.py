@@ -1639,7 +1639,11 @@ class DatabricksBackend(DatabaseBackend):
             if existing is not None
             else None
         )
-        self._ensure_volume(file.function)
+        if not replace:
+            # Only creating a file may need the volume created. Replacing is an Editor action
+            # and the volume necessarily exists already, so issuing CREATE VOLUME there would
+            # ask an Editor for a privilege only Function admins hold.
+            self._ensure_volume(file.function)
         path = self._file_path(file.function, file.name)
         try:
             # overwrite only on an explicit replace: a new file can never clobber one that the
