@@ -20,6 +20,22 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - README rewritten around the business case and the governance model, with screenshots.
+- Final clean-up before the Databricks release: the Streamlit-era positional change-set
+  builder and other dead code are gone; the two backends share identifier quoting, search and
+  ordering, conflict messages and history decoding; the pages share one danger zone, dropzone,
+  upload preview, function card and stat tile; addresses live in `ui/routes.py`.
+- Consistency between the backends: audit entries are kept when a form is dropped, the file
+  count is the registry count, the Databricks backend reports a failed history write as a
+  warning after a save instead of hiding it, and legacy `.xls` uploads are no longer offered.
+
+### Fixed
+
+- Whole numbers above 2^53 typed as text or Decimal were rounded through `float()`.
+- An edited row that duplicated a business key of a row loaded *later* was not reported.
+- A malformed stored column configuration raised instead of being ignored.
+- The wizard's Source step swallowed its own validation messages ("Upload a file to continue").
+- The function danger zone counted files as forms; the Domains page rendered two components
+  with the same id; exporting to Excel had no error handling.
 - AG Grid row selection uses the current object API (`rowSelection`, `selectionColumnDef`);
   the deprecated `checkboxSelection` / `suppressRowClickSelection` options are gone.
 - Hard-coded light-only colours replaced by Mantine tokens; one grid CSS hook (`rdm-grid`)

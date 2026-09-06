@@ -4,24 +4,18 @@
 
 /* grids (AG Grid Quartz theme, dark variant switched by data-ag-theme-mode on <html>) */
 .rdm-grid {
-  --ag-font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --ag-font-family: var(--mantine-font-family);
   --ag-font-size: 13px;
   --ag-background-color: var(--mantine-color-body);
   --ag-foreground-color: var(--mantine-color-text);
   --ag-border-color: var(--mantine-color-default-border);
-  --ag-header-background-color: #f3f5f8;
+  --ag-header-background-color: var(--mantine-color-default-hover);
   --ag-odd-row-background-color: #fbfbfc;
-  --ag-row-hover-color: #eef2ff;
+  --ag-row-hover-color: var(--mantine-primary-color-light);
 }
-[data-mantine-color-scheme="dark"] .rdm-grid {
-  --ag-header-background-color: #2e2e2e;
-  --ag-odd-row-background-color: #282828;
-  --ag-row-hover-color: #2c3151;
-}
-.rdm-invalid { background-color: #fde8e8 !important; box-shadow: inset 0 0 0 1px var(--mantine-color-red-filled); }
-.rdm-new-row { background-color: #f1f8f4 !important; }
-[data-mantine-color-scheme="dark"] .rdm-invalid { background-color: #4a2424 !important; }
-[data-mantine-color-scheme="dark"] .rdm-new-row { background-color: #1f3a2d !important; }
+[data-mantine-color-scheme="dark"] .rdm-grid { --ag-odd-row-background-color: #282828; }
+.rdm-invalid { background-color: var(--mantine-color-red-light) !important; box-shadow: inset 0 0 0 1px var(--mantine-color-red-filled); }
+.rdm-new-row { background-color: var(--mantine-color-green-light) !important; }
 .rdm-audit { color: var(--mantine-color-dimmed); }
 .rdm-key-header { font-weight: 700; }
 

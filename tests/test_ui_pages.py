@@ -11,7 +11,7 @@ from rdm.backend.base import PermissionDenied
 from rdm.config import Settings
 from rdm.models import Role
 from rdm.services import CatalogService, FormService
-from rdm.ui import ids
+from rdm.ui import components, ids
 from rdm.ui.context import AppContext, grouped_navigation
 from rdm.ui.pages import (
     domain_page,
@@ -120,7 +120,7 @@ def test_help_about_tab_explains_the_app_to_everyone(seeded_backend):
         "About the Reference Data Manager",
         "How the data is organised",
         "Domain",
-        "Function (sub-domain)",
+        "A team or capability inside the domain",
         "Objects: forms and files",
         "The problem today",
         "What the app gives you",
@@ -450,5 +450,5 @@ def test_file_page_denies_viewer_without_access(seeded_backend):
 
 
 def test_upload_preview_helper(seeded_backend):
-    tree = function_page.upload_preview("campus.csv", b"a,b\n1,2\n3,4\n")
+    tree = components.upload_preview("campus.csv", b"a,b\n1,2\n3,4\n")
     assert "2 columns" in texts_in(tree)

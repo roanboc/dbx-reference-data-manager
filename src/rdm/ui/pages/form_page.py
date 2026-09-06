@@ -30,6 +30,7 @@ from rdm.models import (
     Role,
     ValidationIssue,
     humanize,
+    parse_options,
     qualified_name,
     sanitize_identifier,
 )
@@ -48,9 +49,12 @@ from rdm.ui import ids, uploads
 from rdm.ui.components import (
     TYPE_ICONS,
     copy_code,
+    danger_zone,
     databricks_path_block,
+    dropzone,
     empty_state,
     error_alert,
+    fmt_cell,
     icon,
     info_alert,
     issues_list,
@@ -60,7 +64,7 @@ from rdm.ui.components import (
     role_badge,
 )
 from rdm.ui.context import AppContext, get_context, invalidate_metadata
-from rdm.ui.layout import function_href
+from rdm.ui.routes import function_href
 
 log = logging.getLogger(__name__)
 TYPE_OPTIONS = [{"value": t.value, "label": f"{t.label} ({t.value})"} for t in DataType.editable_types()]
@@ -325,13 +329,13 @@ def _review_table(form: FormDef, rows: list[dict[str, Any]], changes: ChangeSet)
                         dmc.TableTd(u.label),
                         dmc.TableTd("edit"),
                         dmc.TableTd(humanize(col)),
-                        dmc.TableTd(_fmt(old)),
-                        dmc.TableTd(_fmt(new)),
+                        dmc.TableTd(fmt_cell(old)),
+                        dmc.TableTd(fmt_cell(new)),
                     ]
                 )
             )
     for i in changes.inserts:
-        summary = ", ".join(f"{humanize(k)}={_fmt(v)}" for k, v in i.values.items() if v is not None)
+        summary = ", ".join(f"{humanize(k)}={fmt_cell(v)}" for k, v in i.values.items() if v is not None)
         body.append(
             dmc.TableTr(
                 [
@@ -357,17 +361,6 @@ def _review_table(form: FormDef, rows: list[dict[str, Any]], changes: ChangeSet)
         )
     head = dmc.TableThead(dmc.TableTr([dmc.TableTh(h) for h in ("Row", "Change", "Column", "From", "To")]))
     return dmc.Table([head, dmc.TableTbody(body)], striped=True, withTableBorder=True, fz="xs")
-
-
-def _fmt(value: Any) -> str:
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    return str(value)
 
 
 def _settings_tab(form: FormDef, can_delete: bool, table_path: str, is_databricks: bool) -> dmc.Stack:
@@ -464,38 +457,13 @@ def _settings_tab(form: FormDef, can_delete: bool, table_path: str, is_databrick
     ]
     if can_delete:
         blocks.append(
-            dmc.Paper(
-                dmc.Stack(
-                    [
-                        dmc.Title("Danger zone", order=4, c="red"),
-                        dmc.Text(
-                            f"Delete '{form.title}' and all of its {form.row_count or 0:,} rows. This cannot be undone. "
-                            "Only global administrators can delete forms.",
-                            size="sm",
-                        ),
-                        dmc.Group(
-                            [
-                                dmc.TextInput(
-                                    id=ids.DROP_FORM_CONFIRM,
-                                    placeholder=f"type {form.name} to confirm",
-                                    w=320,
-                                ),
-                                dmc.Button(
-                                    "Delete form",
-                                    id=ids.DROP_FORM_SUBMIT,
-                                    color="red",
-                                    leftSection=icon("tabler:trash-x"),
-                                ),
-                            ],
-                            align="flex-end",
-                        ),
-                    ],
-                    gap="sm",
-                ),
-                withBorder=True,
-                p="md",
-                radius="md",
-                style={"borderColor": "var(--mantine-color-red-filled)"},
+            danger_zone(
+                f"Delete '{form.title}' and all of its {form.row_count or 0:,} rows. This cannot be undone. "
+                "Only global administrators can delete forms.",
+                ids.DROP_FORM_CONFIRM,
+                ids.DROP_FORM_SUBMIT,
+                "Delete form",
+                f"type {form.name} to confirm",
             )
         )
     else:
@@ -525,15 +493,7 @@ def _import_modal(form: FormDef) -> dmc.Modal:
                     size="sm",
                     c="dimmed",
                 ),
-                dcc.Upload(
-                    id=ids.IMPORT_UPLOAD,
-                    children=html.Div(
-                        ["Drag and drop or ", html.B("click to choose"), " an Excel or CSV file"]
-                    ),
-                    className="rdm-dropzone",
-                    multiple=False,
-                    accept=IMPORT_ACCEPT,
-                ),
+                dropzone(ids.IMPORT_UPLOAD, "an Excel or CSV file", IMPORT_ACCEPT),
                 dmc.Select(
                     id=ids.IMPORT_SHEET,
                     label="Sheet",
@@ -698,7 +658,7 @@ def item_body(form: FormDef, row: dict[str, Any], history: list[dict[str, Any]],
     ]
     audit = [
         dmc.Text(
-            f"{g.AUDIT_LABELS.get(c, humanize(c.lstrip('_')))}: {_fmt(row.get(c)) or '-'}",
+            f"{g.AUDIT_LABELS.get(c, humanize(c.lstrip('_')))}: {fmt_cell(row.get(c)) or '-'}",
             size="xs",
             c="dimmed",
         )
@@ -744,10 +704,10 @@ def item_body(form: FormDef, row: dict[str, Any], history: list[dict[str, Any]],
                     dmc.TableTr(
                         [
                             dmc.TableTd(str(rec.get("version", ""))),
-                            dmc.TableTd(_fmt(rec.get("changed_at"))),
-                            dmc.TableTd(_fmt(rec.get("changed_by"))),
+                            dmc.TableTd(fmt_cell(rec.get("changed_at"))),
+                            dmc.TableTd(fmt_cell(rec.get("changed_by"))),
                             dmc.TableTd(CHANGE_LABELS.get(rec.get("change_type"), rec.get("change_type"))),
-                            dmc.TableTd(_fmt(rec.get("changed_fields"))),
+                            dmc.TableTd(fmt_cell(rec.get("changed_fields"))),
                             dmc.TableTd(restore),
                         ]
                     )
@@ -959,29 +919,7 @@ def schema_panel(ctx_: AppContext, form: FormDef, role: Role) -> Any:
             "minWidth": 220,
             "headerTooltip": "Shown as a tooltip in the grid",
         },
-        {
-            "field": "required",
-            "headerName": "Required",
-            "editable": admin,
-            "cellRenderer": "agCheckboxCellRenderer",
-            "cellEditor": "agCheckboxCellEditor",
-            "maxWidth": 110,
-        },
-        {
-            "field": "key",
-            "headerName": "Business key",
-            "editable": admin,
-            "cellRenderer": "agCheckboxCellRenderer",
-            "cellEditor": "agCheckboxCellEditor",
-            "maxWidth": 130,
-        },
-        {
-            "field": "options",
-            "headerName": "Allowed values",
-            "editable": admin,
-            "minWidth": 200,
-            "headerTooltip": "Comma-separated; text columns only",
-        },
+        *g.rule_column_defs(admin),
     ]
     sys_cols = [c for c in form.columns if c.is_system]
     blocks = [
@@ -1001,7 +939,7 @@ def schema_panel(ctx_: AppContext, form: FormDef, role: Role) -> Any:
             columnDefs=defs,
             getRowId="params.data.name",
             defaultColDef={"resizable": True, "sortable": False},
-            dashGridOptions={"rowHeight": 34, "stopEditingWhenCellsLoseFocus": True, "singleClickEdit": True},
+            dashGridOptions=g.DEFINITION_GRID_OPTIONS,
             columnSize="responsiveSizeToFit",
             className=g.GRID_CLASS,
             style={"height": f"{min(120 + 34 * len(rows), 520)}px"},
@@ -1097,10 +1035,7 @@ def _current_row(rows_by_id: dict[str, dict[str, Any]], draft: Draft, rid: str) 
         values = draft.inserts.get(rid)
         return None if values is None else {ID_COLUMN: rid, VERSION_COLUMN: None, **values}
     base = rows_by_id.get(rid)
-    if base is None:
-        return None
-    edits = {k: v for k, v in draft.updates.get(rid, {}).items() if k != VERSION_COLUMN}
-    return {**base, **edits}
+    return None if base is None else {**base, **draft.edits(rid)}
 
 
 def register(app) -> None:
@@ -1218,9 +1153,6 @@ def register(app) -> None:
             )
         draft = Draft.from_dict(draft_raw)
         rows = rows or []
-        transaction: Any = no_update
-        result_block: Any = no_update
-        notifications: Any = no_update
 
         if trigger == ids.GRID and events:
             touched: dict[str, dict[str, Any]] = {}
@@ -1248,11 +1180,7 @@ def register(app) -> None:
 
         if trigger == ids.GRID_ADD:
             rid = draft.add_row()
-            row = {c_.name: None for c_ in form.columns}
-            row[ID_COLUMN] = rid
-            row[VERSION_COLUMN] = None
-            row[g.NEW_FLAG] = True
-            transaction = {"add": [row], "addIndex": 0}
+            transaction = {"add": [draft.new_row(form, rid)], "addIndex": 0}
             pending, save_disabled, _ = _pending_bar(form, rows, draft)
             return (
                 draft.to_dict(),
@@ -1346,6 +1274,10 @@ def register(app) -> None:
                 if result.applied
                 else notify("Nothing changed", color="gray")
             )
+            if result.warnings:  # the rows were written, something else was not (e.g. the history)
+                notifications += notify(
+                    " ".join(result.warnings), title="Saved with a warning", color="yellow", auto_close=False
+                )
             return (
                 draft.to_dict(),
                 None,
@@ -1497,13 +1429,17 @@ def register(app) -> None:
         triggered_value = ctx.triggered[0]["value"] if ctx.triggered else None
         if trigger is None or not triggered_value:
             return (no_update,) * 11  # mounted, not clicked
+
+        def warn(message: str, color: str = "yellow") -> tuple:
+            return (no_update,) * 4 + (notify(message, color=color),) + (no_update,) * 6
+
         c = get_context(persona)
         try:
             form, _role, editable = _load(c, key)
         except (BackendError, PermissionDenied) as exc:
-            return (no_update,) * 4 + (notify(str(exc), color="red"),) + (no_update,) * 6
+            return warn(str(exc), "red")
         if not editable:
-            return (no_update,) * 4 + (notify("You cannot edit this form.", color="red"),) + (no_update,) * 6
+            return warn("You cannot edit this form.", "red")
         draft = Draft.from_dict(draft_raw)
         rows_by_id = {str(r.get(ID_COLUMN)): r for r in (rows or [])}
         out: dict[str, Any] = {}
@@ -1519,9 +1455,7 @@ def register(app) -> None:
                 pending,
                 transaction,
                 save_disabled,
-                notify(message)
-                if message and color == "teal"
-                else (notify(message, color=color) if message else no_update),
+                notify(message, color=color) if message else no_update,
                 out.get("bulk_opened", no_update),
                 out.get("item_opened", no_update),
                 out.get("item_body", no_update),
@@ -1533,11 +1467,9 @@ def register(app) -> None:
         # -- bulk update of the selected rows --------------------------------------------
         if trigger == ids.BULK_SUBMIT:
             if not selected:
-                return (
-                    (no_update,) * 4 + (notify("No rows are selected.", color="yellow"),) + (no_update,) * 6
-                )
+                return warn("No rows are selected.")
             if not bulk_column:
-                return (no_update,) * 4 + (notify("Choose a column.", color="yellow"),) + (no_update,) * 6
+                return warn("Choose a column.")
             try:
                 value = bulk_value(form, bulk_column, None if bulk_clear else bulk_raw)
             except ValueError as exc:
@@ -1557,7 +1489,7 @@ def register(app) -> None:
         # -- item form: apply the field values to the row --------------------------------
         if trigger == ids.ITEM_SAVE:
             if not item_row:
-                return (no_update,) * 4 + (notify("Open a row first.", color="yellow"),) + (no_update,) * 6
+                return warn("Open a row first.")
             rid = str(item_row.get(ID_COLUMN))
             merged = dict(item_row)
             changed = 0
@@ -1589,18 +1521,9 @@ def register(app) -> None:
                 None,
             )
             if not item_row or record is None:
-                return (
-                    (no_update,) * 4
-                    + (notify("That version is no longer available.", color="yellow"),)
-                    + (no_update,) * 6
-                )
+                return warn("That version is no longer available.")
             rid, changed = restore_row(draft, form, item_row, record)
-            merged = {
-                **item_row,
-                **{k: v for k, v in draft.updates.get(rid, {}).items() if k != VERSION_COLUMN},
-            }
-            if is_temp_id(rid):
-                merged = {**item_row, **draft.inserts.get(rid, {})}
+            merged = {**item_row, **(draft.inserts.get(rid, {}) if is_temp_id(rid) else draft.edits(rid))}
             out["item_row"] = merged
             out["item_body"] = item_body(form, merged, item_history or [], editable)
             out["item_result"] = info_alert(
@@ -1614,39 +1537,24 @@ def register(app) -> None:
         if isinstance(trigger, dict) and trigger.get("type") == "history-restore":
             picked = next((s[0] for s in (history_selected or []) if s), None)
             if not picked:
-                return (
-                    (no_update,) * 4
-                    + (notify("Tick a history entry first.", color="yellow"),)
-                    + (no_update,) * 6
-                )
+                return warn("Tick a history entry first.")
             rid = str(picked.get(ID_COLUMN) or "")
-            current = _current_row(rows_by_id, draft, rid) if rid else None
             if rid in draft.deletes:  # undo a pending delete, then apply the version's values
                 draft.deletes.pop(rid, None)
                 base = rows_by_id.get(rid, {})
-                new_id, changed = restore_row(draft, form, base, picked)
-                merged = {
-                    **base,
-                    **{k: v for k, v in draft.updates.get(rid, {}).items() if k != VERSION_COLUMN},
-                }
+                restore_row(draft, form, base, picked)
                 return finish(
-                    {"add": [merged], "addIndex": 0}, "Row restored into the draft; press Save to persist."
+                    {"add": [{**base, **draft.edits(rid)}], "addIndex": 0},
+                    "Row restored into the draft; press Save to persist.",
                 )
+            current = _current_row(rows_by_id, draft, rid) if rid else None
             new_id, changed = restore_row(draft, form, current, picked)
             if is_temp_id(new_id):
-                row = {c_.name: None for c_ in form.columns}
-                row.update(draft.inserts.get(new_id, {}))
-                row[ID_COLUMN] = new_id
-                row[VERSION_COLUMN] = None
-                row[g.NEW_FLAG] = True
                 return finish(
-                    {"add": [row], "addIndex": 0},
+                    {"add": [draft.new_row(form, new_id)], "addIndex": 0},
                     "The deleted row is staged as a new row on the Data tab; press Save to persist.",
                 )
-            merged = {
-                **(current or {}),
-                **{k: v for k, v in draft.updates.get(new_id, {}).items() if k != VERSION_COLUMN},
-            }
+            merged = {**(current or {}), **draft.edits(new_id)}
             return finish(
                 {"update": [merged]} if changed else no_update,
                 f"Version restored into the draft ({changed} field(s) changed); press Save on the Data tab.",
@@ -1661,6 +1569,7 @@ def register(app) -> None:
 
     @app.callback(
         Output(ids.DOWNLOAD, "data", allow_duplicate=True),
+        Output(ids.NOTIFY, "sendNotifications", allow_duplicate=True),
         Input(ids.GRID_XLSX, "n_clicks"),
         State(ids.FORM_KEY, "data"),
         State(ids.PERSONA, "data"),
@@ -1668,17 +1577,20 @@ def register(app) -> None:
     )
     def export_xlsx(n, key, persona):
         if not n:
-            return no_update
+            return no_update, no_update
         c = get_context(persona)
-        form, _r, _e = _load(c, key)
-        df = c.forms.load_rows(form, limit=max(c.settings.max_rows, 100_000))
+        try:
+            form, _r, _e = _load(c, key)
+            df = c.forms.load_rows(form, limit=max(c.settings.max_rows, 100_000))
+        except (BackendError, PermissionDenied) as exc:
+            return no_update, notify(str(exc), title="Cannot export", color="red")
         cols = [col.name for col in form.user_columns if col.name in df.columns]
 
         def write(buffer):
             with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
                 df[cols].to_excel(writer, index=False, sheet_name=(form.name[:31] or "data"))
 
-        return dcc.send_bytes(write, f"{form.name}.xlsx")
+        return dcc.send_bytes(write, f"{form.name}.xlsx"), no_update
 
     @app.callback(
         Output(ids.HISTORY_PANEL, "children"),
@@ -1722,7 +1634,6 @@ def register(app) -> None:
         try:
             form, _role, _e = _load(c, key)
             updated = copy.deepcopy(form)
-            problems = []
             for rec in rows:
                 col = updated.column(rec.get("name"))
                 if col is None:
@@ -1730,13 +1641,9 @@ def register(app) -> None:
                 col.description = (rec.get("description") or "").strip()
                 col.nullable = not bool(rec.get("required"))
                 col.is_key = bool(rec.get("key"))
-                raw = (rec.get("options") or "").strip()
-                opts = [o.strip() for o in raw.split(",") if o.strip()] if raw else []
-                if opts and col.data_type is not DataType.STRING:
-                    problems.append(f"'{col.name}': allowed values are only supported for text columns.")
-                col.options = list(dict.fromkeys(opts))
-            if problems:
-                return error_alert(" ".join(problems), "Not saved"), no_update, no_update
+                col.options = parse_options(
+                    rec.get("options")
+                )  # text columns only: FormDef.validate() enforces it
             c.forms.update_form_metadata(updated)
         except (BackendError, PermissionDenied, ValueError) as exc:
             return error_alert(exc, "Not saved"), no_update, no_update
@@ -1949,15 +1856,11 @@ def register(app) -> None:
         extra = [h for h in raw.columns if h not in mapping.values()]
         if extra:
             blocks.append(dmc.Text("Ignored columns in the file: " + ", ".join(extra), size="xs", c="dimmed"))
-        preview_rows = g.rows_to_records(frame.head(15))
         blocks.append(
-            dag.AgGrid(
-                rowData=preview_rows,
-                columnDefs=[{"field": c_.name, "headerName": humanize(c_.name)} for c_ in form.user_columns],
-                defaultColDef={"resizable": True},
-                columnSize="autoSize",
-                className=g.GRID_CLASS,
-                style={"height": "300px"},
+            g.preview_grid(
+                g.rows_to_records(frame.head(15)),
+                [{"field": c_.name, "headerName": humanize(c_.name)} for c_ in form.user_columns],
+                "300px",
             )
         )
         blocks.append(dmc.Text(f"{len(frame):,} rows in the file (showing the first 15).", size="sm"))

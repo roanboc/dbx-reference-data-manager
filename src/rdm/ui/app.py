@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from urllib.parse import unquote
 
 import dash
 import dash_mantine_components as dmc
@@ -25,39 +24,12 @@ from rdm.ui.pages import (
     help_page,
     home_page,
 )
+from rdm.ui.routes import parse_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
 ASSETS = Path(__file__).resolve().parents[3] / "assets"
-
-
-def parse_path(pathname: str | None) -> tuple[str, str | None, str | None]:
-    """``/`` -> home, ``/dm/<domain>``, ``/fn/<function>``, ``/f/<function>/<form>``,
-    ``/file/<function>/<file>``, ``/new-form[/<function>]``, ``/new-file[/<function>]``,
-    ``/new-function``, ``/domains``, ``/help``."""
-    parts = [unquote(p) for p in (pathname or "/").split("/") if p]
-    if not parts:
-        return "home", None, None
-    if parts[0] == "f" and len(parts) >= 3:
-        return "form", parts[1], parts[2]
-    if parts[0] == "file" and len(parts) >= 3:
-        return "file", parts[1], parts[2]
-    if parts[0] == "fn" and len(parts) >= 2:
-        return "function", parts[1], None
-    if parts[0] == "dm" and len(parts) >= 2:
-        return "domain", parts[1], None
-    if parts[0] == "new-form":
-        return "new-form", parts[1] if len(parts) >= 2 else None, None
-    if parts[0] == "new-file":
-        return "new-file", parts[1] if len(parts) >= 2 else None, None
-    if parts[0] == "new-function":
-        return "new-function", None, None
-    if parts[0] == "domains":
-        return "domains", None, None
-    if parts[0] == "help":
-        return "help", None, None
-    return "home", None, None
 
 
 def create_app() -> dash.Dash:

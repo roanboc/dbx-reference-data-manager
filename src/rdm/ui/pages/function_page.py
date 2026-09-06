@@ -7,29 +7,30 @@ create functions, assign them to a domain and delete them.
 
 from __future__ import annotations
 
-import dash_ag_grid as dag
 import dash_mantine_components as dmc
 from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
 
 from rdm.backend.base import BackendError, NotFoundError, PermissionDenied
 from rdm.models import FileDef, FormDef, FunctionDef, Role, humanize, sanitize_identifier, split_file_name
-from rdm.services.files import FileError, check_upload, human_size, preview_bytes
-from rdm.ui import grid as g
+from rdm.services.files import FileError, check_upload, human_size
 from rdm.ui import ids, uploads
 from rdm.ui.components import (
-    ROLE_COLORS,
+    danger_zone,
     domain_badge,
+    dropzone,
     empty_state,
     error_alert,
+    global_admin_badge,
     icon,
     info_alert,
     link_button,
     notify,
     page_title,
     role_badge,
+    upload_preview,
 )
 from rdm.ui.context import AppContext, get_context, invalidate_metadata, navigation
-from rdm.ui.layout import domain_href, file_href, form_href, function_href, new_form_href
+from rdm.ui.routes import domain_href, file_href, form_href, function_href, new_form_href
 
 GRANTABLE = [Role.VIEWER, Role.EDITOR, Role.ADMIN]
 
@@ -57,7 +58,7 @@ def render(ctx_: AppContext, function_name: str) -> dmc.Stack:
     files = ctx_.forms.list_files(function.name)
     right = [role_badge(role)]
     if ctx_.permissions.is_global_admin:
-        right.insert(0, dmc.Badge("Global admin", color="orange", variant="light", size="sm"))
+        right.insert(0, global_admin_badge())
     domain_title = _domain_title(ctx_, function.domain) if function.domain else "No domain assigned"
     header = page_title(
         function.title,
@@ -243,14 +244,7 @@ def _add_file_form(ctx_: AppContext) -> dmc.Stack:
                 size="sm",
                 c="dimmed",
             ),
-            dcc.Upload(
-                id=ids.ADD_FILE_UPLOAD,
-                children=html.Div(["Drag and drop or ", html.B("click to choose"), " a CSV or Parquet file"]),
-                className="rdm-dropzone",
-                multiple=False,
-                accept=".csv,.parquet",
-                max_size=max_mb * 1024 * 1024,
-            ),
+            dropzone(ids.ADD_FILE_UPLOAD, "a CSV or Parquet file", ".csv,.parquet", max_mb * 1024 * 1024),
             html.Div(id=ids.ADD_FILE_PREVIEW),
             dmc.SimpleGrid(
                 [
@@ -335,31 +329,6 @@ def render_new_file(ctx_: AppContext, function_name: str | None = None) -> dmc.S
             ),
         ],
         gap="md",
-    )
-
-
-def upload_preview(name: str, data: bytes) -> dmc.Stack:
-    """Size, format and the first rows of an uploaded file (parsed locally, before storing)."""
-    fmt = split_file_name(name)[1]
-    frame = preview_bytes(data, fmt)
-    return dmc.Stack(
-        [
-            dmc.Text(
-                f"{name} · {fmt.upper()} · {human_size(len(data))} · {len(frame.columns)} columns "
-                f"(showing the first {len(frame)} rows)",
-                size="sm",
-                fw=500,
-            ),
-            dag.AgGrid(
-                rowData=g.records_from_frame(frame),
-                columnDefs=g.frame_column_defs(frame),
-                defaultColDef={"resizable": True},
-                columnSize="autoSize",
-                className=g.GRID_CLASS,
-                style={"height": "240px"},
-            ),
-        ],
-        gap="xs",
     )
 
 
@@ -552,43 +521,18 @@ def _admin(ctx_: AppContext, function: FunctionDef) -> dmc.Stack:
 def _danger_zone(function: FunctionDef, n_forms: int, n_files: int) -> dmc.Paper:
     """Deleting a function (dropping its schema) is a global-admin action and needs an empty function."""
     n_objects = n_forms + n_files
-    return dmc.Paper(
-        dmc.Stack(
-            [
-                dmc.Title("Danger zone", order=4, c="red"),
-                dmc.Text(
-                    f"Delete the function '{function.title}' (schema {function.name}). "
-                    + (
-                        f"It still holds {n_forms} form(s) and {n_files} file(s): delete or migrate them first."
-                        if n_objects
-                        else "Its grants and registry entry are removed as well. This cannot be undone."
-                    ),
-                    size="sm",
-                ),
-                dmc.Group(
-                    [
-                        dmc.TextInput(
-                            id=ids.DROP_FUNCTION_CONFIRM,
-                            placeholder=f"type {function.name} to confirm",
-                            w=360,
-                        ),
-                        dmc.Button(
-                            "Delete function",
-                            id=ids.DROP_FUNCTION_SUBMIT,
-                            color="red",
-                            disabled=bool(n_objects),
-                            leftSection=icon("tabler:trash-x"),
-                        ),
-                    ],
-                    align="flex-end",
-                ),
-            ],
-            gap="sm",
+    return danger_zone(
+        f"Delete the function '{function.title}' (schema {function.name}). "
+        + (
+            f"It still holds {n_forms} form(s) and {n_files} file(s): delete or migrate them first."
+            if n_objects
+            else "Its grants and registry entry are removed as well. This cannot be undone."
         ),
-        withBorder=True,
-        p="md",
-        radius="md",
-        style={"borderColor": "var(--mantine-color-red-filled)"},
+        ids.DROP_FUNCTION_CONFIRM,
+        ids.DROP_FUNCTION_SUBMIT,
+        "Delete function",
+        f"type {function.name} to confirm",
+        disabled=bool(n_objects),
     )
 
 
@@ -613,7 +557,7 @@ def grants_table(ctx_: AppContext, function: str, text: str | None) -> dmc.Table
                     dmc.TableTd(
                         dmc.Group([icon("tabler:users-group", 16), dmc.Text(principal, size="sm")], gap=6)
                     ),
-                    dmc.TableTd(dmc.Badge(role.label, color=ROLE_COLORS[role], variant="light", size="sm")),
+                    dmc.TableTd(role_badge(role)),
                     dmc.TableTd(
                         dmc.Button(
                             "Revoke",

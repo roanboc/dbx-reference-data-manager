@@ -7,7 +7,8 @@ import dash_mantine_components as dmc
 from dash import html
 
 from rdm.config import APP_TITLE
-from rdm.ui.components import icon
+from rdm.models import GLOBAL_ADMIN_LABEL, Role
+from rdm.ui.components import ROLE_COLORS, ROLE_ICONS, icon
 from rdm.ui.context import AppContext
 
 LEVELS = [
@@ -21,7 +22,7 @@ LEVELS = [
     (
         "tabler:folder",
         "violet",
-        "Function (sub-domain)",
+        "Function",
         "A team or capability inside the domain. Access is granted here.",
         "Cost Management",
     ),
@@ -76,15 +77,20 @@ NOT_FOR = [
 ]
 
 ROLES = [
-    ("tabler:eye", "gray", "Viewer", "reads, filters and exports."),
-    ("tabler:pencil", "blue", "Editor", "changes rows and replaces files."),
+    (ROLE_ICONS[Role.VIEWER], ROLE_COLORS[Role.VIEWER], Role.VIEWER.label, "reads, filters and exports."),
     (
-        "tabler:user-cog",
-        "grape",
-        "Function admin",
+        ROLE_ICONS[Role.EDITOR],
+        ROLE_COLORS[Role.EDITOR],
+        Role.EDITOR.label,
+        "changes rows and replaces files.",
+    ),
+    (
+        ROLE_ICONS[Role.ADMIN],
+        ROLE_COLORS[Role.ADMIN],
+        Role.ADMIN.label,
         "creates forms and files, defines columns, grants access.",
     ),
-    ("tabler:world-cog", "orange", "Global admin", "creates functions, maintains domains, deletes."),
+    ("tabler:world-cog", "orange", GLOBAL_ADMIN_LABEL, "creates functions, maintains domains, deletes."),
 ]
 
 

@@ -53,7 +53,8 @@ src/rdm/
   services/draft.py             Row-id keyed draft -> validated ChangeSet (row labels, business keys); bulk update and restore
   services/files.py             Upload checks and local preview for files
   services/excel_import.py      Excel/CSV parsing, type inference, column sanitising
-  ui/                       Dash shell, routing, pages, AG Grid configuration, in-app help
+  ui/                       Dash shell (layout.py), routes.py (hrefs + parse_path), pages/, components.py
+                            (shared building blocks), grid.py (AG Grid configuration), help/ (in-app guides)
 tests/                      Unit, backend contract, Dash server and browser tests
 ```
 

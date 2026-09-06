@@ -10,7 +10,7 @@ import dash_mantine_components as dmc
 from dash import Input, Output, State, ctx, dcc, html, no_update
 
 from rdm.backend.base import BackendError, PermissionDenied
-from rdm.models import ColumnDef, DataType, FormDef, humanize, sanitize_identifier
+from rdm.models import ColumnDef, DataType, FormDef, humanize, parse_options, sanitize_identifier
 from rdm.services.excel_import import (
     IMPORT_ACCEPT,
     ImportError_,
@@ -21,9 +21,9 @@ from rdm.services.excel_import import (
 )
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
-from rdm.ui.components import error_alert, icon, info_alert, issues_list, notify, page_title
+from rdm.ui.components import dropzone, error_alert, icon, info_alert, issues_list, notify, page_title
 from rdm.ui.context import AppContext, get_context, invalidate_metadata, navigation
-from rdm.ui.layout import form_href
+from rdm.ui.routes import form_href
 
 log = logging.getLogger(__name__)
 STEPS = [
@@ -88,6 +88,31 @@ def render(ctx_: AppContext, function: str | None = None) -> dmc.Stack:
         ],
         gap="md",
     )
+
+
+#: Starting columns when a form is defined by hand (a code and a name).
+SCRATCH_TEMPLATE = [
+    {
+        "name": "code",
+        "type": "STRING",
+        "description": "Unique code",
+        "required": True,
+        "key": True,
+        "options": "",
+        "samples": "",
+        "source": "",
+    },
+    {
+        "name": "name",
+        "type": "STRING",
+        "description": "",
+        "required": True,
+        "key": False,
+        "options": "",
+        "samples": "",
+        "source": "",
+    },
+]
 
 
 def _stubs(state: dict[str, Any], present: set[str]) -> html.Div:
@@ -211,16 +236,8 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
                         size="sm",
                         fw=500,
                     ),
-                    dag.AgGrid(
-                        rowData=[
-                            {str(k): g.to_json_value(v) for k, v in r.items()}
-                            for r in parsed.raw.head(10).to_dict("records")
-                        ],
-                        columnDefs=[{"field": str(c), "headerName": str(c)} for c in parsed.raw.columns],
-                        defaultColDef={"resizable": True},
-                        columnSize="autoSize",
-                        className=g.GRID_CLASS,
-                        style={"height": "280px"},
+                    g.preview_grid(
+                        g.records_from_frame(parsed.raw.head(10)), g.frame_column_defs(parsed.raw), "280px"
                     ),
                     *[dmc.Alert(w, color="yellow", variant="light") for w in parsed.warnings],
                 ],
@@ -236,18 +253,10 @@ def step_source(state: dict[str, Any]) -> dmc.Stack:
     )
     upload_block = dmc.Stack(
         [
-            dcc.Upload(
-                id=ids.WIZ_UPLOAD,
-                children=html.Div(
-                    [
-                        "Drag and drop or ",
-                        html.B("click to choose"),
-                        " an Excel or CSV file. The header row becomes the column names; types are inferred.",
-                    ]
-                ),
-                className="rdm-dropzone",
-                multiple=False,
-                accept=IMPORT_ACCEPT,
+            dropzone(
+                ids.WIZ_UPLOAD,
+                "an Excel or CSV file. The header row becomes the column names; types are inferred.",
+                IMPORT_ACCEPT,
             ),
             dmc.Group(
                 [
@@ -318,29 +327,7 @@ def step_columns(state: dict[str, Any]) -> dmc.Stack:
             "maxWidth": 140,
         },
         {"field": "description", "headerName": "Description", "editable": True, "minWidth": 220, "flex": 2},
-        {
-            "field": "required",
-            "headerName": "Required",
-            "editable": True,
-            "cellRenderer": "agCheckboxCellRenderer",
-            "cellEditor": "agCheckboxCellEditor",
-            "maxWidth": 110,
-        },
-        {
-            "field": "key",
-            "headerName": "Business key",
-            "editable": True,
-            "cellRenderer": "agCheckboxCellRenderer",
-            "cellEditor": "agCheckboxCellEditor",
-            "maxWidth": 130,
-        },
-        {
-            "field": "options",
-            "headerName": "Allowed values",
-            "editable": True,
-            "minWidth": 200,
-            "headerTooltip": "Comma-separated; text columns only",
-        },
+        *g.rule_column_defs(editable=True),
         {
             "field": "samples",
             "headerName": "Sample values",
@@ -436,11 +423,7 @@ def step_columns(state: dict[str, Any]) -> dmc.Stack:
                 columnDefs=defs,
                 getRowId="params.data.name + '|' + params.data.source",
                 defaultColDef={"resizable": True, "sortable": False},
-                dashGridOptions={
-                    "rowHeight": 34,
-                    "stopEditingWhenCellsLoseFocus": True,
-                    "singleClickEdit": True,
-                },
+                dashGridOptions=g.DEFINITION_GRID_OPTIONS,
                 columnSize="responsiveSizeToFit",
                 className=g.GRID_CLASS,
                 style={"height": f"{min(140 + 34 * max(len(rows), 3), 520)}px"},
@@ -580,17 +563,12 @@ def build_columns(rows: list[dict[str, Any]]) -> tuple[list[ColumnDef], list[str
         except ValueError:
             errors.append(f"'{name}': unknown type {r.get('type')!r}.")
             continue
-        raw_opts = (r.get("options") or "").strip()
-        opts = [o.strip() for o in raw_opts.split(",") if o.strip()] if raw_opts else []
-        if opts and dtype is not DataType.STRING:
-            errors.append(f"'{name}': allowed values are only supported for text columns.")
-            continue
         col = ColumnDef(
             name=name,
             data_type=dtype,
             description=(r.get("description") or "").strip(),
             nullable=not bool(r.get("required")),
-            options=list(dict.fromkeys(opts)),
+            options=parse_options(r.get("options")),
             is_key=bool(r.get("key")),
         )
         try:
@@ -705,13 +683,10 @@ def step_review(state: dict[str, Any]) -> dmc.Stack:
                 )
             )
         blocks.append(
-            dag.AgGrid(
-                rowData=g.rows_to_records(frame.head(10)),
-                columnDefs=[{"field": c.name, "headerName": humanize(c.name)} for c in columns],
-                defaultColDef={"resizable": True},
-                columnSize="autoSize",
-                className=g.GRID_CLASS,
-                style={"height": "260px"},
+            g.preview_grid(
+                g.rows_to_records(frame.head(10)),
+                [{"field": c.name, "headerName": humanize(c.name)} for c in columns],
+                "260px",
             )
         )
     else:
@@ -901,28 +876,7 @@ def register(app) -> None:
                         state["columns"] = _rows_from_parsed(parsed)
                     state["load_rows"] = True
                 elif not state.get("columns"):
-                    state["columns"] = [
-                        {
-                            "name": "code",
-                            "type": "STRING",
-                            "description": "Unique code",
-                            "required": True,
-                            "key": True,
-                            "options": "",
-                            "samples": "",
-                            "source": "",
-                        },
-                        {
-                            "name": "name",
-                            "type": "STRING",
-                            "description": "",
-                            "required": True,
-                            "key": False,
-                            "options": "",
-                            "samples": "",
-                            "source": "",
-                        },
-                    ]
+                    state["columns"] = [dict(r) for r in SCRATCH_TEMPLATE]
                     state["load_rows"] = False
                 state["step"] = 1
                 return state, None, no_update, no_update, no_update

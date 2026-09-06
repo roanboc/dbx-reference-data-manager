@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
-from urllib.parse import quote
-
 import dash_mantine_components as dmc
 from dash import dcc, html
 
 from rdm.config import APP_TITLE
 from rdm.services import NavDomain
 from rdm.ui import ids
-from rdm.ui.components import ROLE_COLORS, ROLE_ICONS, global_admin_badge, icon, link_button
+from rdm.ui.components import ROLE_ICONS, global_admin_badge, icon, link_button, role_badge
 from rdm.ui.context import AppContext
+from rdm.ui.routes import (
+    DOMAINS_HREF,
+    NEW_FILE_HREF,
+    NEW_FORM_HREF,
+    NEW_FUNCTION_HREF,
+    domain_href,
+    file_href,
+    form_href,
+    function_href,
+)
 
 THEME = {
     "primaryColor": "indigo",
@@ -19,33 +27,6 @@ THEME = {
     "defaultRadius": "md",
     "headings": {"fontWeight": "650"},
 }
-
-
-def form_href(function: str, form: str) -> str:
-    return f"/f/{quote(function)}/{quote(form)}"
-
-
-def function_href(function: str) -> str:
-    return f"/fn/{quote(function)}"
-
-
-def file_href(function: str, name: str) -> str:
-    return f"/file/{quote(function)}/{quote(name)}"
-
-
-def domain_href(domain: str) -> str:
-    return f"/dm/{quote(domain)}"
-
-
-DOMAINS_HREF = "/domains"
-NEW_FUNCTION_HREF = "/new-function"
-NEW_FORM_HREF = "/new-form"
-NEW_FILE_HREF = "/new-file"
-
-
-def new_form_href(function: str | None = None) -> str:
-    """The form wizard, with the function pre-selected when given."""
-    return f"{NEW_FORM_HREF}/{quote(function)}" if function else NEW_FORM_HREF
 
 
 COLOR_SCHEMES = [
@@ -283,12 +264,7 @@ def navbar(ctx: AppContext, groups: list[NavDomain], pathname: str, search: str 
                             dmc.Group(
                                 [
                                     dmc.Text(f.title, size="sm", fw=600),
-                                    dmc.Badge(
-                                        item.role.label,
-                                        size="xs",
-                                        color=ROLE_COLORS[item.role],
-                                        variant="light",
-                                    ),
+                                    role_badge(item.role, size="xs"),
                                 ],
                                 justify="space-between",
                                 wrap="nowrap",

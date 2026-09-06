@@ -17,24 +17,28 @@ from dash import Input, Output, State, dcc, html, no_update
 
 from rdm.backend.base import BackendError, PermissionDenied
 from rdm.models import FileDef, Role, qualified_name, volume_file_path
-from rdm.services.files import FileError, check_upload, human_size, preview_bytes
+from rdm.services.files import FileError, check_upload, human_size
 from rdm.ui import grid as g
 from rdm.ui import ids, uploads
 from rdm.ui.components import (
     TYPE_ICONS,
     copy_code,
+    danger_zone,
     databricks_path_block,
+    dropzone,
     empty_state,
     error_alert,
+    fmt_cell,
     icon,
     info_alert,
     meta_line,
     notify,
     page_title,
     role_badge,
+    upload_preview,
 )
 from rdm.ui.context import AppContext, get_context, invalidate_metadata
-from rdm.ui.layout import function_href
+from rdm.ui.routes import function_href
 
 log = logging.getLogger(__name__)
 PREVIEW_LIMIT = 200
@@ -220,8 +224,8 @@ def history_panel(ctx_: AppContext, file: FileDef) -> Any:
             dmc.TableTr(
                 [
                     dmc.TableTd(str(rec.get("version", ""))),
-                    dmc.TableTd(_fmt(rec.get("changed_at"))),
-                    dmc.TableTd(_fmt(rec.get("changed_by"))),
+                    dmc.TableTd(fmt_cell(rec.get("changed_at"))),
+                    dmc.TableTd(fmt_cell(rec.get("changed_by"))),
                     dmc.TableTd(CHANGE_LABELS.get(rec.get("change_type"), rec.get("change_type"))),
                     dmc.TableTd(
                         human_size(rec.get("size_bytes")) if rec.get("size_bytes") is not None else "-"
@@ -251,21 +255,6 @@ def history_panel(ctx_: AppContext, file: FileDef) -> Any:
         ],
         gap="xs",
     )
-
-
-def _fmt(value: Any) -> str:
-    if value is None:
-        return ""
-    try:
-        import pandas as pd
-
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    if hasattr(value, "strftime"):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
-    return str(value)
 
 
 def _settings_tab(file: FileDef, can_delete: bool, dbx_path: str, settings) -> dmc.Stack:
@@ -342,38 +331,13 @@ def _settings_tab(file: FileDef, can_delete: bool, dbx_path: str, settings) -> d
     ]
     if can_delete:
         blocks.append(
-            dmc.Paper(
-                dmc.Stack(
-                    [
-                        dmc.Title("Danger zone", order=4, c="red"),
-                        dmc.Text(
-                            f"Delete '{file.title}' ({human_size(file.size_bytes)}). The file is removed from the volume; "
-                            "the history of its uploads is kept. Only global administrators can delete files.",
-                            size="sm",
-                        ),
-                        dmc.Group(
-                            [
-                                dmc.TextInput(
-                                    id=ids.DROP_FILE_CONFIRM,
-                                    placeholder=f"type {file.name} to confirm",
-                                    w=340,
-                                ),
-                                dmc.Button(
-                                    "Delete file",
-                                    id=ids.DROP_FILE_SUBMIT,
-                                    color="red",
-                                    leftSection=icon("tabler:trash-x"),
-                                ),
-                            ],
-                            align="flex-end",
-                        ),
-                    ],
-                    gap="sm",
-                ),
-                withBorder=True,
-                p="md",
-                radius="md",
-                style={"borderColor": "var(--mantine-color-red-filled)"},
+            danger_zone(
+                f"Delete '{file.title}' ({human_size(file.size_bytes)}). The file is removed from the volume; "
+                "the history of its uploads is kept. Only global administrators can delete files.",
+                ids.DROP_FILE_CONFIRM,
+                ids.DROP_FILE_SUBMIT,
+                "Delete file",
+                f"type {file.name} to confirm",
             )
         )
     else:
@@ -397,15 +361,11 @@ def _replace_modal(ctx_: AppContext, file: FileDef) -> dmc.Modal:
                     size="sm",
                     c="dimmed",
                 ),
-                dcc.Upload(
-                    id=ids.FILE_REPLACE_UPLOAD,
-                    children=html.Div(
-                        ["Drag and drop or ", html.B("click to choose"), f" a {file.format.upper()} file"]
-                    ),
-                    className="rdm-dropzone",
-                    multiple=False,
-                    accept=f".{file.format}",
-                    max_size=max_mb * 1024 * 1024,
+                dropzone(
+                    ids.FILE_REPLACE_UPLOAD,
+                    f"a {file.format.upper()} file",
+                    f".{file.format}",
+                    max_mb * 1024 * 1024,
                 ),
                 html.Div(id=ids.FILE_REPLACE_PREVIEW),
                 dmc.Group(
@@ -498,28 +458,10 @@ def register(app) -> None:
             expected = key["name"].rsplit(".", 1)[-1]
             if fmt != expected:
                 raise FileError(f"Upload a {expected.upper()} file to replace {key['name']}.")
-            frame = preview_bytes(data, fmt)
+            preview = upload_preview(name, data)
         except FileError as exc:
             uploads.drop(token)
             return error_alert(exc, "Cannot use this file"), None, True
-        preview = dmc.Stack(
-            [
-                dmc.Text(
-                    f"{filename} · {human_size(len(data))} · {len(frame.columns)} columns (first {len(frame)} rows)",
-                    size="sm",
-                    fw=500,
-                ),
-                dag.AgGrid(
-                    rowData=g.records_from_frame(frame),
-                    columnDefs=g.frame_column_defs(frame),
-                    defaultColDef={"resizable": True},
-                    columnSize="autoSize",
-                    className=g.GRID_CLASS,
-                    style={"height": "240px"},
-                ),
-            ],
-            gap="xs",
-        )
         return preview, token, False
 
     @app.callback(

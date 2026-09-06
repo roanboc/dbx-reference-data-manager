@@ -9,6 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+import dash_ag_grid as dag
 import pandas as pd
 
 from rdm.models import (
@@ -166,11 +167,9 @@ def default_col_def(editable: bool) -> dict[str, Any]:
         "sortable": True,
         "filter": True,
         "resizable": True,
-        "floatingFilter": False,
         "editable": editable,
         "wrapHeaderText": True,
         "autoHeaderHeight": True,
-        "suppressKeyboardEvent": {"function": "false"},
     }
 
 
@@ -204,8 +203,42 @@ def grid_options(editable: bool) -> dict[str, Any]:
         "headerHeight": 38,
         "enableCellTextSelection": not editable,
         "ensureDomOrder": True,
-        "suppressMovableColumns": False,
     }
+
+
+def preview_grid(
+    rows: list[dict[str, Any]], column_defs: list[dict[str, Any]], height: str, **kwargs: Any
+) -> dag.AgGrid:
+    """A read-only grid for a handful of rows (upload previews, the wizard's review step)."""
+    return dag.AgGrid(
+        rowData=rows,
+        columnDefs=column_defs,
+        defaultColDef={"resizable": True},
+        columnSize="autoSize",
+        className=GRID_CLASS,
+        style={"height": height},
+        **kwargs,
+    )
+
+
+#: Options of the two column-definition grids (Schema tab, wizard Columns step).
+DEFINITION_GRID_OPTIONS = {"rowHeight": 34, "stopEditingWhenCellsLoseFocus": True, "singleClickEdit": True}
+
+
+def rule_column_defs(editable: bool) -> list[dict[str, Any]]:
+    """Required / Business key / Allowed values, as edited on the Schema tab and in the wizard."""
+    checkbox = {"cellRenderer": "agCheckboxCellRenderer", "cellEditor": "agCheckboxCellEditor"}
+    return [
+        {"field": "required", "headerName": "Required", "editable": editable, "maxWidth": 110, **checkbox},
+        {"field": "key", "headerName": "Business key", "editable": editable, "maxWidth": 130, **checkbox},
+        {
+            "field": "options",
+            "headerName": "Allowed values",
+            "editable": editable,
+            "minWidth": 200,
+            "headerTooltip": "Comma-separated; text columns only",
+        },
+    ]
 
 
 def row_class_rules() -> dict[str, str]:

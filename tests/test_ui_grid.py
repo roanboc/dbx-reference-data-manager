@@ -9,7 +9,7 @@ import pandas as pd
 
 from rdm.models import ID_COLUMN, VERSION_COLUMN, ColumnDef, DataType, FormDef, system_columns
 from rdm.ui import grid
-from rdm.ui.app import parse_path
+from rdm.ui.routes import parse_path
 
 
 def form() -> FormDef:

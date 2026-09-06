@@ -2,11 +2,13 @@
 
 **New form** starts a four-step wizard.
 
-1. **Source** - upload an Excel or CSV file, or start from scratch. From a file, the first
-   sheet's header row becomes the column names and the types are inferred from the values.
+1. **Source** - upload an Excel or CSV file, or start from scratch. From a file, choose the
+   sheet (when the workbook has several) and the header row; that row becomes the column names
+   and the types are inferred from the values.
 2. **Columns** - confirm the definition of every column (see below).
 3. **Details** - choose the function, the table name (lower_snake_case, becomes the Unity
-   Catalog table name), a display name, a description and an owner.
+   Catalog table name), a display name, a description, an owner and, for an uploaded file,
+   whether to load its rows.
 4. **Review** - check the definition and the rows that will be loaded, then **Create form**.
 
 ### The columns step
@@ -19,7 +21,7 @@
 | Required | The value can never be empty. |
 | Business key | The column (or combination of columns) that identifies a row, e.g. a code. The app refuses duplicates. |
 | Allowed values | A comma-separated list, e.g. `Active, Inactive, Retired`. The column becomes a dropdown and other values are rejected. Text columns only. When you upload a file, low-cardinality text columns get a suggestion you can edit or clear. |
-| Sample values | Read only: the first values found in your file, so you can check the inferred type. Empty when starting from scratch. |
+| Sample values | Read only: the first values found in your file, so you can check the inferred type. Not shown when starting from scratch. |
 
 Every form also gets the system columns `_id`, `_version`, `_created_at`, `_created_by`,
 `_updated_at` and `_updated_by`. They are managed by the app and shown through the

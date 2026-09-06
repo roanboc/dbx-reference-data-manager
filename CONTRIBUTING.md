@@ -22,9 +22,10 @@ Python 3.11 or later. Copy `.env.example` to `.env` for local settings; never co
 - `src/rdm/backend/` - the only place SQL is allowed. `base.py` is the interface, DuckDB
   implements it for local use and tests, `databricks_backend.py` for the SQL warehouse.
 - `src/rdm/services/` - role guards, navigation, drafts and change sets, Excel import, files.
-- `src/rdm/ui/` - the Dash app: `layout.py` (shell), `app.py` (routing), `pages/`,
-  `components.py`, `grid.py` (AG Grid configuration), `ids.py` (every component id),
-  `help/` (in-app guides in Markdown).
+- `src/rdm/ui/` - the Dash app: `layout.py` (shell), `routes.py` (addresses and their
+  parsing), `app.py` (callbacks that render the page), `pages/`, `components.py` (shared
+  building blocks: danger zone, dropzone, function card, stat tile, ...), `grid.py` (AG Grid
+  configuration), `ids.py` (every component id), `help/` (in-app guides in Markdown).
 - `docs/` - functional design, technical design, deployment; `resources/` and
   `databricks.yml` - the asset bundle.
 
@@ -35,7 +36,11 @@ Python 3.11 or later. Copy `.env.example` to `.env` for local settings; never co
   tests (`tests/test_databricks_backend.py`, fake connection).
 - **Guards live in the service layer**, never only in the UI: hiding a button is not access
   control (see `docs/DESIGN.md` §11).
-- **Component ids** go in `src/rdm/ui/ids.py`; pages never invent id strings.
+- **Component ids** go in `src/rdm/ui/ids.py`; pages never invent id strings. Addresses are
+  built with the helpers in `src/rdm/ui/routes.py`.
+- **Reuse the building blocks** in `components.py` (danger zone, dropzone, upload preview,
+  function card, stat tile, role badges) and `grid.py` (preview grid, definition grids) rather
+  than re-typing them in a page.
 - **Settings** are added in four places together: `src/rdm/config.py`, `.env.example`,
   `app.yaml` and `resources/app.yml` (and the table in the README).
 - **Colours** come from Mantine tokens (`var(--mantine-color-...)`) or are given for both

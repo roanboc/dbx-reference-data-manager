@@ -13,16 +13,18 @@ from rdm.backend.base import NotFoundError
 from rdm.services import NavFunction
 from rdm.ui import ids
 from rdm.ui.components import (
-    ROLE_COLORS,
     domain_badge,
     empty_state,
     error_alert,
+    function_card,
     icon,
     link_button,
+    matching_objects,
     page_title,
+    stat_tile,
 )
 from rdm.ui.context import AppContext, get_context, grouped_navigation
-from rdm.ui.layout import DOMAINS_HREF, file_href, form_href, function_href
+from rdm.ui.routes import DOMAINS_HREF
 
 
 def _functions_of(ctx_: AppContext, domain: str) -> list[NavFunction]:
@@ -66,10 +68,10 @@ def render(ctx_: AppContext, domain_name: str) -> dmc.Stack:
     )
     stats = dmc.SimpleGrid(
         [
-            _stat("Functions in the domain", domain.function_count or 0, "tabler:folders"),
-            _stat("Functions you can open", len(functions), "tabler:folder-open"),
-            _stat("Forms", n_forms, "tabler:table"),
-            _stat("Files", n_files, "tabler:file-spreadsheet"),
+            stat_tile("Functions in the domain", domain.function_count or 0, "tabler:folders"),
+            stat_tile("Functions you can open", len(functions), "tabler:folder-open"),
+            stat_tile("Forms", n_forms, "tabler:table"),
+            stat_tile("Files", n_files, "tabler:file-spreadsheet"),
         ],
         cols={"base": 2, "sm": 4},
     )
@@ -113,96 +115,20 @@ def function_cards(functions: list[NavFunction], text: str | None) -> dmc.Simple
     needle = (text or "").strip().lower()
     cards = []
     for item in functions:
+        matched = matching_objects(item, needle)
+        if matched is None:
+            continue
         f = item.function
-        forms, files = item.forms, item.files
-        if needle and needle not in f"{f.name} {f.title} {f.description} {f.owner}".lower():
-            forms = [x for x in forms if needle in f"{x.name} {x.title} {x.description}".lower()]
-            files = [x for x in files if needle in f"{x.name} {x.title} {x.description}".lower()]
-            if not forms and not files:
-                continue
-        links = [
-            dmc.Anchor(
-                dmc.Group([icon("tabler:table", 14), dmc.Text(x.title, size="sm")], gap=6),
-                href=form_href(f.name, x.name),
-                underline="never",
-            )
-            for x in forms
-        ] + [
-            dmc.Anchor(
-                dmc.Group(
-                    [
-                        icon("tabler:file-spreadsheet" if x.format == "csv" else "tabler:file-database", 14),
-                        dmc.Text(x.title, size="sm"),
-                        dmc.Badge(x.format.upper(), size="xs", variant="outline", color="gray"),
-                    ],
-                    gap=6,
-                ),
-                href=file_href(f.name, x.name),
-                underline="never",
-            )
-            for x in files
-        ] or [dmc.Text("No forms or files yet.", size="sm", c="dimmed")]
-        cards.append(
-            dmc.Card(
-                dmc.Stack(
-                    [
-                        dmc.Group(
-                            [
-                                dmc.Group([icon("tabler:folder", 18), dmc.Text(f.title, fw=600)], gap=6),
-                                dmc.Badge(
-                                    item.role.label, color=ROLE_COLORS[item.role], variant="light", size="sm"
-                                ),
-                            ],
-                            justify="space-between",
-                        ),
-                        dmc.Code(f.name),
-                        dmc.Text(f.description or "No description", size="sm", c="dimmed"),
-                        dmc.Text(
-                            " · ".join(
-                                x
-                                for x in [
-                                    f"{len(item.forms)} form(s)",
-                                    f"{len(item.files)} file(s)",
-                                    f"owner {f.owner}" if f.owner else "",
-                                ]
-                                if x
-                            ),
-                            size="xs",
-                            c="dimmed",
-                        ),
-                        dmc.Stack(links, gap=4),
-                        dmc.Group(
-                            [
-                                link_button(
-                                    "Open function",
-                                    function_href(f.name),
-                                    variant="light",
-                                    size="xs",
-                                    leftSection=icon("tabler:folder-open", 14),
-                                ),
-                                dmc.Anchor(
-                                    dmc.Button(
-                                        "Documentation",
-                                        variant="subtle",
-                                        size="xs",
-                                        leftSection=icon("tabler:external-link", 14),
-                                    ),
-                                    href=f.doc_link,
-                                    target="_blank",
-                                )
-                                if f.doc_link
-                                else None,
-                            ],
-                            gap="xs",
-                        ),
-                    ],
-                    gap="xs",
-                ),
-                withBorder=True,
-                radius="md",
-                padding="md",
-            )
+        meta = " · ".join(
+            x
+            for x in [
+                f"{len(item.forms)} form(s)",
+                f"{len(item.files)} file(s)",
+                f"owner {f.owner}" if f.owner else "",
+            ]
+            if x
         )
+        cards.append(function_card(item, *matched, meta, details=[dmc.Code(f.name)]))
     if not cards:
         if not functions:
             return empty_state(
@@ -212,22 +138,6 @@ def function_cards(functions: list[NavFunction], text: str | None) -> dmc.Simple
             )
         return empty_state("No matches", "Try another word.", "tabler:search-off")
     return dmc.SimpleGrid(cards, cols={"base": 1, "md": 2, "xl": 3}, spacing="md")
-
-
-def _stat(label: str, value: int, icon_name: str) -> dmc.Paper:
-    return dmc.Paper(
-        dmc.Group(
-            [
-                dmc.ThemeIcon(icon(icon_name, 20), size="lg", radius="md", variant="light"),
-                dmc.Stack(
-                    [dmc.Text(label, size="xs", c="dimmed"), dmc.Text(f"{value:,}", fw=700, size="xl")], gap=0
-                ),
-            ]
-        ),
-        withBorder=True,
-        p="md",
-        radius="md",
-    )
 
 
 def register(app) -> None:

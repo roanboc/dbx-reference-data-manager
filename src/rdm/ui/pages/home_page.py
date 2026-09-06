@@ -7,9 +7,9 @@ from dash import Input, Output, State, html
 
 from rdm.services import NavDomain
 from rdm.ui import ids
-from rdm.ui.components import ROLE_COLORS, empty_state, icon, link_button, page_title
+from rdm.ui.components import empty_state, function_card, icon, matching_objects, page_title, stat_tile
 from rdm.ui.context import AppContext, get_context, grouped_navigation
-from rdm.ui.layout import domain_href, file_href, form_href, function_href
+from rdm.ui.routes import domain_href
 
 
 def render(ctx_: AppContext) -> dmc.Stack:
@@ -37,11 +37,11 @@ def render(ctx_: AppContext) -> dmc.Stack:
     editable = sum(len(i.forms) + len(i.files) for i in items if i.role.can_edit)
     stats = dmc.SimpleGrid(
         [
-            _stat("Domains", len([g for g in groups if not g.is_unassigned]), "tabler:sitemap"),
-            _stat("Functions", len(items), "tabler:folders"),
-            _stat("Forms", n_forms, "tabler:table"),
-            _stat("Files", n_files, "tabler:file-spreadsheet"),
-            _stat("You can edit", editable, "tabler:pencil"),
+            stat_tile("Domains", len([g for g in groups if not g.is_unassigned]), "tabler:sitemap"),
+            stat_tile("Functions", len(items), "tabler:folders"),
+            stat_tile("Forms", n_forms, "tabler:table"),
+            stat_tile("Files", n_files, "tabler:file-spreadsheet"),
+            stat_tile("You can edit", editable, "tabler:pencil"),
         ],
         cols={"base": 2, "sm": 5},
     )
@@ -67,99 +67,14 @@ def cards(groups: list[NavDomain], text: str | None) -> dmc.Stack | dmc.Paper:
     sections = []
     for group in groups:
         d = group.domain
-        domain_matches = needle and needle in f"{d.name} {d.title} {d.description} {d.owner}".lower()
+        domain_matches = bool(needle) and needle in f"{d.name} {d.title} {d.description} {d.owner}".lower()
         out = []
         for item in group.functions:
+            matched = (item.forms, item.files) if domain_matches else matching_objects(item, needle)
+            if matched is None:
+                continue
             f = item.function
-            forms = item.forms
-            files = item.files
-            if (
-                needle
-                and not domain_matches
-                and needle not in f"{f.name} {f.title} {f.description} {f.owner}".lower()
-            ):
-                forms = [
-                    x for x in forms if needle in f"{x.name} {x.title} {x.description} {x.owner}".lower()
-                ]
-                files = [
-                    x for x in files if needle in f"{x.name} {x.title} {x.description} {x.owner}".lower()
-                ]
-                if not forms and not files:
-                    continue
-            links = [
-                dmc.Anchor(
-                    dmc.Group([icon("tabler:table", 14), dmc.Text(x.title, size="sm")], gap=6),
-                    href=form_href(f.name, x.name),
-                    underline="never",
-                )
-                for x in forms
-            ] + [
-                dmc.Anchor(
-                    dmc.Group(
-                        [
-                            icon(
-                                "tabler:file-spreadsheet" if x.format == "csv" else "tabler:file-database", 14
-                            ),
-                            dmc.Text(x.title, size="sm"),
-                            dmc.Badge(x.format.upper(), size="xs", variant="outline", color="gray"),
-                        ],
-                        gap=6,
-                    ),
-                    href=file_href(f.name, x.name),
-                    underline="never",
-                )
-                for x in files
-            ] or [dmc.Text("No forms or files yet.", size="sm", c="dimmed")]
-            actions = [
-                link_button(
-                    "Open function",
-                    function_href(f.name),
-                    variant="light",
-                    size="xs",
-                    leftSection=icon("tabler:folder-open", 14),
-                )
-            ]
-            if f.doc_link:
-                actions.append(
-                    dmc.Anchor(
-                        dmc.Button(
-                            "Documentation",
-                            variant="subtle",
-                            size="xs",
-                            leftSection=icon("tabler:external-link", 14),
-                        ),
-                        href=f.doc_link,
-                        target="_blank",
-                    )
-                )
-            out.append(
-                dmc.Card(
-                    dmc.Stack(
-                        [
-                            dmc.Group(
-                                [
-                                    dmc.Group([icon("tabler:folder", 18), dmc.Text(f.title, fw=600)], gap=6),
-                                    dmc.Badge(
-                                        item.role.label,
-                                        color=ROLE_COLORS[item.role],
-                                        variant="light",
-                                        size="sm",
-                                    ),
-                                ],
-                                justify="space-between",
-                            ),
-                            dmc.Text(f.description or "No description", size="sm", c="dimmed"),
-                            dmc.Text(f"Owner: {f.owner}" if f.owner else "", size="xs", c="dimmed"),
-                            dmc.Stack(links, gap=4),
-                            dmc.Group(actions, gap="xs"),
-                        ],
-                        gap="xs",
-                    ),
-                    withBorder=True,
-                    radius="md",
-                    padding="md",
-                )
-            )
+            out.append(function_card(item, *matched, f"owner {f.owner}" if f.owner else ""))
         if not out:
             continue
         sections.append(
@@ -191,22 +106,6 @@ def cards(groups: list[NavDomain], text: str | None) -> dmc.Stack | dmc.Paper:
     if not sections:
         return empty_state("No matches", "Try another word.", "tabler:search-off")
     return dmc.Stack(sections, gap="lg")
-
-
-def _stat(label: str, value: int, icon_name: str) -> dmc.Paper:
-    return dmc.Paper(
-        dmc.Group(
-            [
-                dmc.ThemeIcon(icon(icon_name, 20), size="lg", radius="md", variant="light"),
-                dmc.Stack(
-                    [dmc.Text(label, size="xs", c="dimmed"), dmc.Text(f"{value:,}", fw=700, size="xl")], gap=0
-                ),
-            ]
-        ),
-        withBorder=True,
-        p="md",
-        radius="md",
-    )
 
 
 def register(app) -> None:

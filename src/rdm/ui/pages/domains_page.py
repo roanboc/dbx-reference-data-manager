@@ -15,7 +15,7 @@ from rdm.models import DomainDef, sanitize_identifier
 from rdm.ui import ids
 from rdm.ui.components import error_alert, icon, info_alert, link_button, notify, page_title
 from rdm.ui.context import AppContext, get_context, invalidate_metadata
-from rdm.ui.layout import domain_href
+from rdm.ui.routes import domain_href
 
 CREATE_TITLE = "New domain"
 
