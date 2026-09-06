@@ -151,6 +151,10 @@ the regression it exists to catch.
 | SCD2: disabling left every validity window open | `__END_AT IS NULL` is published as "the current version", so the history advertised a superseded value — permanently, since re-enabling skipped exactly those rows | Disabling closes the open windows |
 | The two audit logs had different shapes and numbered history differently | A feature built and tested locally behaved differently in production | DuckDB gained `seq`; both number history entries the same way |
 | `Role[name]` raised `KeyError` on an unknown role | One grant row naming a role this build does not know broke permission resolution for everyone in that function | `Role.from_name` fails closed |
+| Deleting a form erased its audit trail on DuckDB, kept it on Databricks | The trail is the governance record and outlives the object it describes (FUNCTIONAL_DESIGN §7.5); the two backends disagreed and one contradicted the spec | DuckDB keeps it, as the spec and Databricks always did |
+| `INTEGER` values were parsed through `float()` | The column is a `BIGINT`: every value above 2^53 was silently rounded, with no error anywhere | Parsed exactly |
+| Business-key uniqueness was order dependent | Editing a row to duplicate one *further down the loaded page* passed validation and reached the table | Every surviving row is grouped under the key it will have after the save |
+| `put_file` issued `CREATE VOLUME` even when replacing | Replace is an Editor action; `CREATE VOLUME` is a Function admin privilege | Only creating a file ensures the volume |
 
 ### Things that were checked and are right as they are
 
@@ -220,6 +224,13 @@ In the order they pay off. All are additive; none needs a migration.
    UTC, so this is currently harmless — but NTZ is what the app means), and the audit table
    would benefit from `CLUSTER BY (schema_name, table_name, changed_at)`, which is the kind of
    thing that is cheap at creation and expensive to add to a table with history in it.
+   Both are one line in `registry.py` / `sql_utils.py` once a workspace can confirm them.
 6. **Give `change_log` a growth story.** No clustering, no partitioning and a client-side
    History tab that one large import buries. `batch_id` is already written, so grouping a save
-   into one entry is the cheap first move.
+   into one entry is the cheap first move — and it is also what would let a whole save be
+   undone as a unit, which the per-row restore machinery could already do.
+7. **Check business keys against the table, not the page.** `_check_unique_keys` compares the
+   change set with the rows the grid has loaded (`RDM_MAX_ROWS`, default 5,000). On a longer
+   list a duplicate outside the loaded page is not seen, and the append import checks no keys
+   at all. Unity Catalog does not enforce `PRIMARY KEY`, so the app is the only guard: one
+   `SELECT` of the affected key values before the save closes it.
