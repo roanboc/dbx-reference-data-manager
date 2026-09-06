@@ -68,10 +68,11 @@ tests/                      Unit, backend contract and Dash server tests
 | File attributes | `_catalog.files` | `<catalog>._catalog.files` (same shape) |
 | Form description | `COMMENT ON TABLE` | table `COMMENT` |
 | Column description | `COMMENT ON COLUMN` | column `COMMENT` |
-| Display name, owner, column config | `_catalog.object_properties` | `TBLPROPERTIES ('rdm.display_name', 'rdm.owner', 'rdm.column_config')`, mirrored to tags `rdm_display_name` / `rdm_owner` (bulk-readable from `information_schema.table_tags`) |
+| Display name, owner, column config, form settings | `_catalog.object_properties` | `TBLPROPERTIES ('rdm.display_name', 'rdm.owner', 'rdm.column_config', 'rdm.settings')`, mirrored to tags `rdm_display_name` / `rdm_owner` (bulk-readable from `information_schema.table_tags`) |
 | Function description / owner / doc link | `_catalog.object_properties` (DuckDB cannot comment schemas) | `COMMENT ON SCHEMA` + `DBPROPERTIES` + schema tags |
 | Registry | `_catalog.domains` / `functions` / `forms` / `files` | same tables in `<catalog>._catalog` |
 | Change history | `_catalog.change_log` | `<catalog>._catalog.change_log` (same shape) + Delta Change Data Feed |
+| Shape of the registry and the audit trail | generated from `backend/registry.py` | generated from the same declaration; `tests/test_registry.py` fails if the two dialects drift apart |
 | Permissions | `_catalog.grants` (persona groups) | UC schema/catalog privileges via `information_schema` |
 | Functions and grants | created/granted in the app | app (`CREATE SCHEMA`, `GRANT`) and bundle; the bundle owns the complete grant list |
 
@@ -92,7 +93,24 @@ read-only, and never converted. `read_rows` always returns a frame with dtypes f
 RDM type (`normalise_frame`), whatever the driver returned: INTEGER→`Int64`, DECIMAL→`Decimal`
 objects, DATE→`date` objects, TIMESTAMP→naive UTC `datetime64[us]`, BOOLEAN→`boolean`.
 
-### 3.2 System columns (SharePoint-style)
+### 3.2 How the model is allowed to grow
+
+Anything the app knows about an object that SQL cannot express is stored in one of three
+places, and each has an additive contract so that the next field is not a migration:
+
+| Where | Holds | Adding to it |
+|---|---|---|
+| `rdm.column_config` (table property) | per-column rules: allowed values, business keys | a key in `COLUMN_RULE_KEYS`; backends unchanged |
+| `rdm.settings` (table property) | per-form options: none yet, by design | a key in `SETTINGS_KEYS`; storage unchanged |
+| `_catalog` registry (Delta / DuckDB tables) | what the app records about domains, functions, forms, files and every change | one entry in `backend/registry.py`; both DDLs and both upgrade paths follow |
+
+Both JSON documents carry a version and **preserve keys the reading build does not know**, so
+two app versions can share one catalog without either silently stripping the other's data;
+registry reads are `SELECT *` and registry writers name their columns, so an added column can
+break neither. [DATA_MODEL.md](DATA_MODEL.md) is the full contract and the record of the review
+that established it.
+
+### 3.3 System columns (SharePoint-style)
 
 | Column | Type | Purpose |
 |---|---|---|
@@ -224,6 +242,14 @@ import (append) cover bulk changes instead.
   production and does not depend on Delta log retention. `get_history(row_id=...)` reads the
   same table for one row (item form, restore). Delta Change Data Feed stays enabled on every
   form for downstream pipelines and is the fallback if the audit table is missing.
+* The audit entry says what kind of object changed (`object_type`) and carries a free-form
+  `meta_json` envelope, so recording a definition change, a grant or an approval later needs
+  new values rather than a new shape. `before_json` / `after_json` stay opaque snapshots -
+  that is what lets the trail outlive any change to the form it describes.
+* The optional per-form Type 2 table (FR-47) is maintained whenever it **exists**, not only
+  while the flag is on, because it outlives `set_scd2(False)`; and disabling closes every open
+  window, because `__END_AT IS NULL` is published to consumers as "this is the current
+  version" and must not go on advertising a value the form no longer holds.
 * Type 2 dimensions should be built downstream from CDF (Lakeflow Declarative Pipelines
   `AUTO CDC ... STORED AS SCD TYPE 2`), not maintained by hand in the grid.
 * The app does not add business validity dates: it tracks *who changed what and when* with

@@ -4,7 +4,8 @@ Dash app on Databricks Apps for governed reference data (replaces SharePoint lis
 Hierarchy: **domain** (registry classifier) > **function** (Unity Catalog schema) >
 **form** (Delta table) | **file** (CSV/Parquet in the function's `_files` volume).
 Read this file first and only explore what it does not answer. Deep rationale and the
-decision log live in [docs/DESIGN.md](docs/DESIGN.md).
+decision log live in [docs/DESIGN.md](docs/DESIGN.md); how the persisted model is meant to
+grow is [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 
 ## Commands
 
@@ -54,6 +55,15 @@ Use the project venv (`.venv`); the Makefile wraps the same targets (`make check
   are closed/opened inside each backend's `apply_changes`/`_append_rows`; tables whose name
   starts with `_` are app-managed and excluded from form listings and counts. The window
   columns are app constants — quote them literally, never through `validate_identifier`.
+  The table **outlives the flag**: key its maintenance on whether it exists, never on
+  `form.scd2_enabled`, and keep `__END_AT IS NULL` honest — disabling closes every open
+  window, because consumers read it as "this is the current version".
+- **Object names are the key.** Domains, functions, forms and files are identified by their
+  name everywhere: the registry, `change_log`, the SCD2 table, `object_properties` and the
+  URL. So names never change — there is no rename, no move between functions, and a name
+  that is dropped and recreated inherits the old object's history. If that ever has to
+  change, mint a surrogate `object_id` first (see `docs/DATA_MODEL.md`); history written
+  before it exists can never be re-attributed.
 
 ## Established idioms (copy these; do not invent new ones)
 
@@ -75,9 +85,17 @@ Use the project venv (`.venv`); the Makefile wraps the same targets (`make check
   `[data-mantine-color-scheme="dark"]`, never `prefers-color-scheme`.
 - **Import modes** (FR-43) are built in the service (`build_import_changeset`) on the
   ChangeSet machinery — merge/replace never added backend methods; keep it that way.
-- **New registry column?** Add it to both DDLs, DuckDB `_migrate_meta` (ALTER only when the
-  table pre-exists), and rely on the Databricks `_registry_upsert` self-heal (`ADD COLUMNS`
-  on the unresolved-column error). Registry reads use `SELECT *` and stay schema-tolerant.
+- **New registry column?** One entry in `backend/registry.py` — both DDLs, the local upgrade
+  and the production reconcile are generated from it, and `tests/test_registry.py` fails if
+  the two dialects drift apart. Make it nullable (rows written before it existed have no
+  value), never rename or retype an existing one, and name the columns in any writer you add:
+  reads use `SELECT *` and stay shape-tolerant, writers must not depend on arity.
+- **New per-column rule or per-form option?** It goes in a metadata document, not in a new
+  table property and not in the backends: a column rule (allowed values, a pattern, a
+  default) in `rdm.column_config` via `COLUMN_RULE_KEYS`, a form-level option (approval,
+  retention, notification) in `rdm.settings` via `SETTINGS_KEYS`. Both round-trip keys this
+  build does not know (`ColumnDef.extra` / `FormDef.settings`), so never rebuild a document
+  from the model fields alone — go through `parse_document` / `build_document` (`models.py`).
 - Page modules expose `render(ctx, ...)` and `register(app)`; both are wired in
   `ui/app.py` (`parse_path` for routes). Sections use `# -- name ----` comment headers.
 - Backend contract change = update `base.py` ABC + **both** backends + both test suites.
