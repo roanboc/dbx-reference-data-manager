@@ -64,7 +64,12 @@ def coerce_value(col: ColumnDef, value: Any) -> Any:
                     raise CoercionError("must be a whole number")
                 return int(value)
             s = str(value).strip().replace(",", "").replace(" ", "")
-            f = float(s)
+            try:
+                # int() first and exactly: the column is a BIGINT, and going through float()
+                # silently rounds everything above 2**53 (9007199254740993 -> ...92).
+                return int(s)
+            except ValueError:
+                f = float(s)  # "1.0", "1e3" and friends; a non-number raises below
             if not f.is_integer():
                 raise CoercionError("must be a whole number")
             return int(f)

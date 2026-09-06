@@ -164,12 +164,16 @@ def _check_unique_keys(form: FormDef, snapshot: pd.DataFrame, changes: ChangeSet
         return []
     deleted = {d.row_id for d in changes.deletes}
     updates = {u.row_id: u.changes for u in changes.updates}
-    seen: dict[tuple, str] = {}
+    column_label = ", ".join(keys)
     issues: list[ValidationIssue] = []
 
     def key_of(values: Mapping[str, Any]) -> tuple:
         return tuple(_norm_key(values.get(k)) for k in keys)
 
+    # Every surviving row under the key it will have *after* the save. Grouping first rather
+    # than checking as we go matters: an edited row can collide with a row further down the
+    # snapshot, which a single forward pass never sees.
+    by_key: dict[tuple, list[tuple[str, str, bool]]] = {}  # key -> [(row id, label, changed)]
     if not snapshot.empty and ID_COLUMN in snapshot.columns:
         for rec in snapshot[[ID_COLUMN, *[k for k in keys if k in snapshot.columns]]].to_dict("records"):
             rid = str(rec[ID_COLUMN])
@@ -179,18 +183,28 @@ def _check_unique_keys(form: FormDef, snapshot: pd.DataFrame, changes: ChangeSet
             key = key_of(merged)
             if all(k is None for k in key):
                 continue
-            label = describe_row(form, merged)
-            if key in seen and rid in updates:
-                issues.append(ValidationIssue(label, ", ".join(keys), f"duplicates existing {seen[key]}"))
-            seen.setdefault(key, describe_row(form, rec))
+            by_key.setdefault(key, []).append((rid, describe_row(form, merged), rid in updates))
+
+    for entries in by_key.values():
+        if len(entries) < 2:
+            continue
+        # Only rows this save touched are the user's to fix: a duplicate that was already in
+        # the table is reported when someone edits it, not the moment the form is opened.
+        for rid, label, changed in entries:
+            if not changed:
+                continue
+            other = next(lbl for other_rid, lbl, _ in entries if other_rid != rid)
+            issues.append(ValidationIssue(label, column_label, f"duplicates existing {other}"))
+
     for ins in changes.inserts:
         key = key_of(ins.values)
         if all(k is None for k in key):
             continue
-        if key in seen:
-            issues.append(ValidationIssue(ins.label, ", ".join(keys), f"duplicates {seen[key]}"))
+        existing = by_key.get(key)
+        if existing:
+            issues.append(ValidationIssue(ins.label, column_label, f"duplicates {existing[0][1]}"))
         else:
-            seen[key] = ins.label
+            by_key[key] = [("", ins.label, True)]
     return issues
 
 

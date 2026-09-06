@@ -200,12 +200,8 @@ def test_coerce_integer_errors(value, message):
         coerce_value(INTEGER, value)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG rdm/services/form_service.py coerce_value: INTEGER strings go through float(), so BIGINT values "
-    "above 2**53 are silently rounded (e.g. '9007199254740993' -> 9007199254740992).",
-)
 def test_coerce_integer_keeps_precision_above_2_pow_53():
+    """The column is a BIGINT; going through float() would round it away."""
     assert coerce_value(INTEGER, "9007199254740993") == 9007199254740993
 
 
@@ -606,12 +602,8 @@ def test_build_changeset_update_duplicates_earlier_row():
     assert [str(i) for i in issues] == ["Row code=A001, column 'code': duplicates existing Row code=A001"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG rdm/services/form_service.py _check_unique_keys: duplicate detection is order dependent - an "
-    "edited row that duplicates a *later* unchanged row is not reported (only 'key in seen and rid in updates').",
-)
 def test_build_changeset_update_duplicates_later_row():
+    """Uniqueness must not depend on where in the loaded page the other row happens to sit."""
     form = make_form()
     snapshot = make_snapshot(form, SNAPSHOT_ROWS)
     _, issues = build_changeset(form, snapshot, EditorState(edited_rows={0: {"code": "B002"}}))
@@ -1041,3 +1033,31 @@ def test_build_import_changeset_rejects_bad_files(backend, admin, sample_form):
     assert any("business key columns" in p for p in problems)
     with pytest.raises(ValueError, match="Unknown import mode"):
         build_import_changeset(sample_form, current, pd.DataFrame(), "upsert")
+
+
+def test_build_changeset_reports_both_rows_when_two_edits_collide():
+    form = make_form()
+    snapshot = make_snapshot(form, SNAPSHOT_ROWS)
+    state = EditorState(edited_rows={0: {"code": "SAME"}, 1: {"code": "same"}})
+    _, issues = build_changeset(form, snapshot, state)
+    assert len(issues) == 2
+    assert all("duplicates" in str(i) for i in issues)
+
+
+def test_build_changeset_ignores_a_duplicate_nobody_touched():
+    """A pre-existing duplicate is the data's problem, not this save's; editing one reports it."""
+    form = make_form()
+    snapshot = make_snapshot(form, [{"code": "DUP", "qty": 1}, {"code": "dup", "qty": 2}])
+    _, issues = build_changeset(form, snapshot, EditorState())
+    assert issues == []
+    _, issues = build_changeset(form, snapshot, EditorState(edited_rows={0: {"qty": 9}}))
+    assert len(issues) == 1 and "duplicates" in str(issues[0])
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("9007199254740993", 9007199254740993), ("-9007199254740993", -9007199254740993),
+     ("9223372036854775807", 9223372036854775807), ("1.0", 1), ("1e3", 1000), ("1,234", 1234)],
+)
+def test_coerce_integer_parses_exactly(raw, expected):
+    assert coerce_value(INTEGER, raw) == expected
