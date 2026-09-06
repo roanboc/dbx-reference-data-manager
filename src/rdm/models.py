@@ -306,6 +306,19 @@ class Role(enum.IntEnum):
     def can_admin(self) -> bool:
         return self >= Role.ADMIN
 
+    @classmethod
+    def from_name(cls, name: str) -> Role:
+        """Resolve a stored role name, failing *closed* on anything unknown.
+
+        Roles are persisted by name, so a grant written by a build that knows a role this one
+        does not (an approver, a contributor) must not be able to break permission resolution
+        for everybody. An unrecognised name grants nothing.
+        """
+        try:
+            return cls[str(name).strip().upper()]
+        except KeyError:
+            return cls.NONE
+
 
 @dataclass(frozen=True)
 class User:

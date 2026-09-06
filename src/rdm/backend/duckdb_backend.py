@@ -1020,13 +1020,14 @@ class DuckDBBackend(DatabaseBackend):
         seq = cur.execute(f"SELECT nextval('{META_SCHEMA}.change_log_seq')").fetchone()[0]
         cur.execute(
             f"INSERT INTO {qualified([META_SCHEMA, 'change_log'])} "
-            "(id, seq, schema_name, table_name, row_id, change_type, changed_at, changed_by, batch_id, "
-            "before_json, after_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, seq, schema_name, table_name, object_type, row_id, change_type, changed_at, changed_by, "
+            "batch_id, before_json, after_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 seq,
                 seq,
                 form.function,
                 form.name,
+                "file" if isinstance(form, FileDef) else "form",
                 row_id,
                 change_type,
                 when,
@@ -1205,6 +1206,17 @@ class DuckDBBackend(DatabaseBackend):
                     ).fetchall()
                 ]
                 self._scd2_open(cur, form, [str(i) for i in ids], utcnow())
+            elif self._table_exists(cur, form.function, scd2_table_name(form.name)):
+                # Close every open window. ``__END_AT IS NULL`` is published to consumers as
+                # "this is the current version", so leaving windows open after the app stops
+                # maintaining them would advertise values the form no longer holds. Closing
+                # them says "tracking stopped here", and makes a later re-enable open a fresh
+                # window for every current row instead of skipping the ones still open.
+                cur.execute(
+                    f'UPDATE {self._h(form)} SET "{SCD2_END_COLUMN}" = ? '
+                    f'WHERE "{SCD2_END_COLUMN}" IS NULL',
+                    [utcnow()],
+                )
             self._set_props(
                 cur, "table", form.function, form.name, {PROP_SCD2: "true" if enabled else ""}
             )
@@ -1274,7 +1286,8 @@ class DuckDBBackend(DatabaseBackend):
         with self._cursor() as cur:
             rows = cur.execute(
                 f"SELECT changed_at, changed_by, change_type, row_id, before_json, after_json "
-                f"FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ?"
+                f"FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ? "
+                "AND (object_type = 'form' OR object_type IS NULL)"
                 f"{row_filter} ORDER BY seq DESC LIMIT ?",
                 params,
             ).fetchall()
@@ -1532,7 +1545,7 @@ class DuckDBBackend(DatabaseBackend):
         catalog_role = Role.NONE
         per_function: dict[str, Role] = {}
         for schema, role_name in rows:
-            role = Role[role_name]
+            role = Role.from_name(role_name)
             if schema == CATALOG_LEVEL:
                 catalog_role = max(catalog_role, role)
             else:
@@ -1546,7 +1559,7 @@ class DuckDBBackend(DatabaseBackend):
                 f"SELECT principal, role FROM {qualified([META_SCHEMA, 'grants'])} WHERE schema_name = ? ORDER BY principal",
                 [function],
             ).fetchall()
-        return [(p, Role[r]) for p, r in rows]
+        return [(p, Role.from_name(r)) for p, r in rows]
 
     def list_groups(self, query: str | None = None) -> list[str]:
         with self._cursor() as cur:

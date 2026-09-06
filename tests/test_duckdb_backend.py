@@ -1584,3 +1584,58 @@ def test_scd2_enabled_after_a_column_was_added_records_every_column(backend, adm
     assert con.execute('SELECT code, note FROM crm."_h__leads" WHERE __END_AT IS NULL').fetchall() == [
         ("B", "n")
     ]
+
+
+def test_disabling_scd2_closes_the_open_windows(backend, admin):
+    """``__END_AT IS NULL`` means "current version" to consumers, so it must not go stale.
+
+    Regression: disabling SCD2 left every window open, a later edit made the history disagree
+    with the form, and re-enabling skipped exactly the rows whose window was still open - so
+    the history table advertised a superseded value as current, permanently.
+    """
+    backend.create_function(FunctionDef("crm"), admin)
+    form = backend.create_form(
+        FormDef("crm", "accounts", scd2_enabled=True, columns=[ColumnDef("code"), ColumnDef("name")]),
+        admin,
+        rows=pd.DataFrame({"code": ["A"], "name": ["Alpha"]}),
+    )
+    con = backend._conn  # noqa: SLF001 - white-box check of the history table
+    hist = 'crm."_h__accounts"'
+    assert con.execute(f"SELECT count(*) FROM {hist} WHERE __END_AT IS NULL").fetchone()[0] == 1
+
+    form = backend.set_scd2(form, False, admin)
+    assert con.execute(f"SELECT count(*) FROM {hist} WHERE __END_AT IS NULL").fetchone()[0] == 0
+
+    row = backend.read_rows(form).iloc[0]
+    backend.apply_changes(
+        form,
+        ChangeSet(updates=[RowUpdate(str(row[ID_COLUMN]), {"name": "Alpha 2"}, int(row[VERSION_COLUMN]))]),
+        admin,
+    )
+    form = backend.set_scd2(form, True, admin)
+    assert con.execute(f"SELECT name FROM {hist} WHERE __END_AT IS NULL").fetchall() == [("Alpha 2",)]
+
+
+def test_the_audit_trail_says_what_kind_of_object_changed(backend, admin):
+    backend.create_function(FunctionDef("crm"), admin)
+    form = backend.create_form(
+        FormDef("crm", "accounts", columns=[ColumnDef("code")]), admin, rows=pd.DataFrame({"code": ["A"]})
+    )
+    backend.put_file(FileDef("crm", "leads.csv"), b"a,b\n1,2\n", admin)
+    kinds = dict(
+        backend._conn.execute(  # noqa: SLF001
+            "SELECT table_name, object_type FROM _catalog.change_log GROUP BY table_name, object_type"
+        ).fetchall()
+    )
+    assert kinds == {form.name: "form", "leads.csv": "file"}
+
+
+def test_a_role_name_this_build_does_not_know_grants_nothing(backend, admin):
+    """Roles are persisted by name: an unknown one must fail closed, not break the catalogue."""
+    _functions(backend, admin, "crm")
+    backend._conn.execute(  # noqa: SLF001
+        "INSERT INTO _catalog.grants (schema_name, principal, role) VALUES ('crm', 'newcomers', 'APPROVER')"
+    )
+    permissions = backend.get_permissions(User("bob", groups=("newcomers",)))
+    assert permissions.role_for("crm") is Role.NONE
+    assert backend.list_function_grants("crm") == [("newcomers", Role.NONE)]

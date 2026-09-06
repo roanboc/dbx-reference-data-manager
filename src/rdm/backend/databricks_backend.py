@@ -1296,6 +1296,15 @@ class DatabricksBackend(DatabaseBackend):
                 f"WHERE NOT EXISTS (SELECT 1 FROM {self._h(form)} h "
                 f"WHERE h.{_q(ID_COLUMN)} = t.{_q(ID_COLUMN)} AND h.`{SCD2_END_COLUMN}` IS NULL)"
             )
+        elif self._table_exists(form.function, scd2_table_name(form.name)):
+            # Close every open window: ``__END_AT IS NULL`` means "current version" to every
+            # consumer, so windows left open after the app stops maintaining them would keep
+            # advertising values the form no longer holds. See DuckDBBackend.set_scd2.
+            self._run(
+                f"UPDATE {self._h(form)} SET `{SCD2_END_COLUMN}` = :now "
+                f"WHERE `{SCD2_END_COLUMN}` IS NULL",
+                {"now": utcnow()},
+            )
         self._run(
             f"ALTER TABLE {self._t(form)} SET TBLPROPERTIES ({lit(PROP_SCD2)} = {lit('true' if enabled else '')})"
         )
@@ -1385,6 +1394,7 @@ class DatabricksBackend(DatabaseBackend):
             "seq": seq,
             "schema_name": form.function,
             "table_name": form.name,
+            "object_type": "file" if isinstance(form, FileDef) else "form",
             "row_id": row_id,
             "change_type": change_type,
             "changed_at": when.strftime("%Y-%m-%dT%H:%M:%S.%f"),
@@ -1392,12 +1402,13 @@ class DatabricksBackend(DatabaseBackend):
             "batch_id": batch,
             "before_json": json.dumps(before) if before is not None else None,
             "after_json": json.dumps(after) if after is not None else None,
+            "meta_json": None,
         }
 
-    AUDIT_SCHEMA = (
-        "ARRAY<STRUCT<id:STRING,seq:BIGINT,schema_name:STRING,table_name:STRING,row_id:STRING,change_type:STRING,"
-        "changed_at:TIMESTAMP_NTZ,changed_by:STRING,batch_id:STRING,before_json:STRING,after_json:STRING>>"
-    )
+    #: Payload shape and column list of the audit writer, both generated from the registry
+    #: declaration so a new audit column is a change in one place.
+    AUDIT_SCHEMA = registry.CHANGE_LOG.databricks_struct()
+    AUDIT_COLUMNS = registry.CHANGE_LOG.databricks_write_columns
 
     def audit_table_ddl(self) -> str:
         """DDL for the audit table, generated from :mod:`rdm.backend.registry`.
@@ -1410,10 +1421,10 @@ class DatabricksBackend(DatabaseBackend):
     def _write_audit(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
             return
+        columns = ", ".join(self.AUDIT_COLUMNS)
         statement = (
-            f"INSERT INTO {self._audit()} (id, seq, schema_name, table_name, row_id, change_type, changed_at, changed_by, "
-            f"batch_id, before_json, after_json)\nSELECT id, seq, schema_name, table_name, row_id, change_type, changed_at, "
-            f"changed_by, batch_id, before_json, after_json FROM ({self._from_json(self.AUDIT_SCHEMA)}) AS s"
+            f"INSERT INTO {self._audit()} ({columns})\n"
+            f"SELECT {columns} FROM ({self._from_json(self.AUDIT_SCHEMA)}) AS s"
         )
         for i in range(0, len(rows), JSON_ROWS_CHUNK):
             payload = json.dumps(rows[i : i + JSON_ROWS_CHUNK])
@@ -1445,8 +1456,9 @@ class DatabricksBackend(DatabaseBackend):
                     params["row_id"] = row_id
                 rows, _ = self._run(
                     f"SELECT changed_at, changed_by, change_type, row_id, before_json, after_json FROM {self._audit()} "
-                    f"WHERE schema_name = :schema AND table_name = :table{row_filter} "
-                    "ORDER BY changed_at DESC, seq DESC LIMIT " + str(int(limit)),
+                    "WHERE schema_name = :schema AND table_name = :table "
+                    "AND (object_type = 'form' OR object_type IS NULL)"
+                    f"{row_filter} ORDER BY changed_at DESC, seq DESC LIMIT " + str(int(limit)),
                     params,
                 )
                 self._audit_ready = True

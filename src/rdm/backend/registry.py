@@ -91,6 +91,21 @@ class RegistryTable:
         body = ",\n  ".join(cols)
         return f"CREATE TABLE IF NOT EXISTS {qualified_name} (\n  {body}{key})"
 
+    @property
+    def databricks_write_columns(self) -> tuple[str, ...]:
+        """The columns a Databricks writer names, identity first."""
+        identity = (self.databricks_identity.split()[0],) if self.databricks_identity else ()
+        return (*identity, *self.column_names)
+
+    def databricks_struct(self) -> str:
+        """``from_json`` struct for a payload carrying whole rows of this table."""
+        fields = []
+        if self.databricks_identity:
+            name, kind = self.databricks_identity.split()[:2]
+            fields.append(f"{name}:{kind}")
+        fields += [f"{name}:{_DATABRICKS_TYPES[kind]}" for name, kind in self.columns]
+        return f"ARRAY<STRUCT<{','.join(fields)}>>"
+
     def databricks_ddl(self, qualified_name: str) -> str:
         cols = [f"{name} {_DATABRICKS_TYPES[kind]}{self._not_null(name)}" for name, kind in self.columns]
         if self.databricks_identity:
@@ -171,7 +186,12 @@ FILES = RegistryTable(
 
 #: The audit trail: one entry per changed row and save, and per file upload, replacement and
 #: deletion. ``before_json``/``after_json`` are opaque snapshots, which is what lets the audit
-#: survive any later change to the forms it describes.
+#: survive any later change to the forms it describes. ``object_type`` says what kind of thing
+#: changed - today ``form`` or ``file``, with room for the definition and grant changes that
+#: are recorded nowhere yet - and ``meta_json`` is the envelope for whatever a future entry has
+#: to carry (the schema a snapshot was written under, an approval, a correlation id). Both are
+#: here now because this is the one table every save writes to, and widening it later is the
+#: expensive kind of change.
 #:
 #: ``seq`` is the ordinal each backend sorts the history by. The two fill it with the
 #: strongest thing their engine offers, which is also why ``id`` is declared per dialect:
@@ -192,6 +212,7 @@ CHANGE_LOG = RegistryTable(
         ("seq", NUMBER),
         ("schema_name", TEXT),
         ("table_name", TEXT),
+        ("object_type", TEXT),
         ("row_id", TEXT),
         ("change_type", TEXT),
         ("changed_at", MOMENT),
@@ -199,6 +220,7 @@ CHANGE_LOG = RegistryTable(
         ("batch_id", TEXT),
         ("before_json", TEXT),
         ("after_json", TEXT),
+        ("meta_json", TEXT),
     ),
     comment="Row-level change history written by the Reference Data Manager app",
 )
