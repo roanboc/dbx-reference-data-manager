@@ -104,3 +104,15 @@ def test_page_callback_routes(client, pathname, persona, expected):
     resp = client.post("/_dash-update-component", data=json.dumps(body), content_type="application/json")
     assert resp.status_code == 200
     assert expected in json.dumps(resp.get_json())
+
+
+def test_unhandled_callback_errors_are_logged_rather_than_swallowed(caplog):
+    """With debug off, an unhandled exception is a 500 the browser ignores: log it at least."""
+    import logging
+
+    from rdm.ui.app import _on_callback_error, create_app
+
+    assert create_app()._on_error is _on_callback_error
+    with caplog.at_level(logging.ERROR, logger="rdm.ui.app"):
+        _on_callback_error(RuntimeError("boom"))
+    assert "Unhandled callback error" in caplog.text and "boom" in caplog.text

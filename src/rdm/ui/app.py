@@ -59,6 +59,18 @@ def parse_path(pathname: str | None) -> tuple[str, str | None, str | None]:
     return "home", None, None
 
 
+def _on_callback_error(error: Exception) -> None:
+    """Log an exception no callback handled, instead of letting the button do nothing.
+
+    Every mutation callback catches ``BackendError``/``PermissionDenied``/``ValueError`` and
+    shows the user a notification. Anything else reaches Dash, which - with debug off, as in
+    production - answers 500 and leaves the browser with an unchanged page: the button spins
+    down and nothing happens, with no record of why. This at least puts the traceback in the
+    app's log, where Databricks Apps surfaces it at ``<app URL>/logz``.
+    """
+    log.exception("Unhandled callback error: %s", error)
+
+
 def create_app() -> dash.Dash:
     app = dash.Dash(
         __name__,
@@ -67,6 +79,7 @@ def create_app() -> dash.Dash:
         suppress_callback_exceptions=True,
         assets_folder=str(ASSETS),
         update_title=None,
+        on_error=_on_callback_error,
     )
     app.layout = layout.shell()
     register_shell_callbacks(app)

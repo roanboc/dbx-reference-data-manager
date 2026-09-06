@@ -20,3 +20,6 @@ data/files/
 # Test artefacts
 test-results/
 screenshots/
+
+# Runtime logs from a local run
+*.log
