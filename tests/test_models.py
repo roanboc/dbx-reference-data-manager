@@ -13,7 +13,9 @@ from rdm.models import (
     DEFAULT_DECIMAL_PRECISION,
     DEFAULT_DECIMAL_SCALE,
     ID_COLUMN,
+    MAX_DOCUMENT_BYTES,
     MAX_IDENTIFIER_LENGTH,
+    METADATA_VERSION,
     RESERVED_WORDS,
     SYSTEM_COLUMNS,
     UPDATED_AT_COLUMN,
@@ -489,12 +491,6 @@ def test_apply_column_config_ignores_garbage(raw):
     assert target.column("code").is_key
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AttributeError,
-    reason="BUG rdm/models.py FormDef.apply_column_config: a non-dict 'columns' value (str/list/None) "
-    "reaches cols.get() outside the try block and raises AttributeError instead of being ignored.",
-)
 @pytest.mark.parametrize(
     "raw", [{"columns": "abc"}, {"columns": None}, {"columns": [1]}, '{"columns": "abc"}']
 )
@@ -620,3 +616,104 @@ def test_file_def_properties_and_validation():
     with pytest.raises(ValueError, match="extension"):
         FileDef("fin", "x.xlsx").validate()
     assert FunctionDef("fin", file_count=2).file_count == 2
+
+
+# --------------------------------------------------------------------------------------
+# Forward compatibility of the persisted metadata documents (METADATA_VERSION)
+# --------------------------------------------------------------------------------------
+
+
+def _future_config() -> dict:
+    """A column_config document as a *newer* build of the app would write it."""
+    return {
+        "version": METADATA_VERSION + 1,
+        "columns": {
+            "code": {"options": ["A", "B"], "key": True, "pattern": "^[A-Z]$", "default": "A"},
+            "plain": {"unit": "EUR"},
+        },
+        "lineage": {"source": "sap"},
+    }
+
+
+def _round_trip_form() -> FormDef:
+    return _form(*system_columns(), ColumnDef("code"), ColumnDef("plain"))
+
+
+def test_column_config_preserves_keys_this_build_does_not_understand():
+    """An older build must never silently strip what a newer one stored (METADATA_VERSION)."""
+    form = _round_trip_form()
+    form.apply_column_config(json.dumps(_future_config()))
+
+    # the keys this build owns still become model fields...
+    assert form.column("code").options == ["A", "B"]
+    assert form.column("code").is_key is True
+    # ...and everything else survives untouched, on the column and at the top level.
+    assert form.column("code").extra == {"pattern": "^[A-Z]$", "default": "A"}
+    assert form.column("plain").extra == {"unit": "EUR"}
+    assert form.config_extra == {"lineage": {"source": "sap"}}
+    assert json.loads(form.column_config_json()) == _future_config()
+
+
+def test_column_config_round_trip_keeps_a_newer_version_number():
+    form = _round_trip_form()
+    form.apply_column_config(json.dumps(_future_config()))
+    assert form.config_version == METADATA_VERSION + 1
+    assert form.column_config()["version"] == METADATA_VERSION + 1
+
+
+def test_column_config_edits_win_over_preserved_keys():
+    form = _round_trip_form()
+    form.apply_column_config(json.dumps(_future_config()))
+    form.column("code").options = ["C"]
+    form.column("code").is_key = False
+    entry = form.column_config()["columns"]["code"]
+    assert entry == {"options": ["C"], "pattern": "^[A-Z]$", "default": "A"}
+
+
+def test_column_config_of_a_fresh_form_is_at_the_current_version():
+    cfg = _configured_form().column_config()
+    assert cfg["version"] == METADATA_VERSION
+    assert set(cfg) == {"version", "columns"}
+
+
+def test_apply_column_config_clears_extras_of_columns_without_an_entry():
+    form = _round_trip_form()
+    form.apply_column_config(json.dumps(_future_config()))
+    form.apply_column_config({"version": METADATA_VERSION, "columns": {}})
+    assert form.column("code").extra == {}
+    assert form.config_extra == {}
+
+
+def test_settings_document_round_trip_preserves_everything():
+    form = _round_trip_form()
+    form.apply_settings('{"version": 9, "approval_required": true, "retention_days": 90}')
+    assert form.settings == {"approval_required": True, "retention_days": 90}
+    assert form.settings_version == 9
+    assert json.loads(form.settings_json()) == {
+        "version": 9,
+        "approval_required": True,
+        "retention_days": 90,
+    }
+
+
+def test_settings_default_to_an_empty_document():
+    form = _round_trip_form()
+    assert form.settings == {}
+    assert form.settings_document() == {"version": METADATA_VERSION}
+
+
+@pytest.mark.parametrize("raw", [None, "", "not json", "[1, 2]", 42, {}])
+def test_apply_settings_ignores_garbage(raw):
+    form = _round_trip_form()
+    form.apply_settings(raw)
+    assert form.settings == {}
+
+
+def test_documents_larger_than_the_budget_are_refused_with_a_readable_message():
+    form = _form(ColumnDef("code", options=[f"value-{i:04d}" for i in range(500)]))
+    with pytest.raises(ValueError, match="column configuration of this form is too large"):
+        form.column_config_json()
+    # ...but such a document still *loads*, so an oversized form stays openable.
+    other = _form(ColumnDef("code"))
+    other.apply_column_config({"columns": {"code": {"options": ["x" * MAX_DOCUMENT_BYTES]}}})
+    assert other.column("code").options == ["x" * MAX_DOCUMENT_BYTES]

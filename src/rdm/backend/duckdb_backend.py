@@ -31,6 +31,7 @@ from typing import Any
 import duckdb
 import pandas as pd
 
+from rdm.backend import registry
 from rdm.backend.base import BackendError, ConflictError, DatabaseBackend, NotFoundError
 from rdm.backend.sql_utils import escape_literal_duckdb as lit
 from rdm.backend.sql_utils import (
@@ -58,6 +59,7 @@ from rdm.models import (
     PROP_OWNER,
     PROP_OWNER_EMAIL,
     PROP_SCD2,
+    PROP_SETTINGS,
     SCD2_END_COLUMN,
     SCD2_START_COLUMN,
     SYSTEM_COLUMNS,
@@ -175,9 +177,17 @@ class DuckDBBackend(DatabaseBackend):
             cur.close()
 
     def _ensure_meta(self) -> None:
-        with self._cursor() as cur:
+        """Create or upgrade the local ``_catalog`` schema, transactionally.
+
+        Everything the app keeps about itself is declared in :mod:`rdm.backend.registry`; what
+        is missing from an existing database is added from that declaration, so opening an
+        older database upgrades it and opening a newer one leaves its extra columns alone.
+        """
+        with self._tx() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_ident(META_SCHEMA)}")
             self._migrate_meta(cur)
+            # Local emulation of what Unity Catalog provides natively; not part of the registry
+            # contract, because production has no equivalent table to keep in step with.
             cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "object_properties"])} (
                         object_type VARCHAR NOT NULL,
@@ -195,81 +205,43 @@ class DuckDBBackend(DatabaseBackend):
                         PRIMARY KEY (schema_name, principal))"""
             )
             cur.execute(f"CREATE SEQUENCE IF NOT EXISTS {qualified([META_SCHEMA, 'change_log_seq'])}")
+            for table in registry.REGISTRY_TABLES:
+                cur.execute(table.duckdb_ddl(qualified([META_SCHEMA, table.name])))
+                self._reconcile(cur, table)
+
+    @staticmethod
+    def _reconcile(cur, table: registry.RegistryTable) -> None:
+        """Add the columns an existing registry table is missing (never drop or retype).
+
+        This is the whole upgrade path for a registry field: declare it in
+        :mod:`rdm.backend.registry` and every database picks it up on the next open.
+        """
+        present = {
+            c
+            for (c,) in cur.execute(
+                "SELECT column_name FROM duckdb_columns() WHERE schema_name = ? AND table_name = ?",
+                [META_SCHEMA, table.name],
+            ).fetchall()
+        }
+        for name, _kind in registry.missing_columns(table, present):
             cur.execute(
-                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "change_log"])} (
-                        id          BIGINT PRIMARY KEY,
-                        schema_name VARCHAR NOT NULL,
-                        table_name  VARCHAR NOT NULL,
-                        row_id      VARCHAR,
-                        change_type VARCHAR NOT NULL,
-                        changed_at  TIMESTAMP NOT NULL,
-                        changed_by  VARCHAR,
-                        batch_id    VARCHAR,
-                        before_json VARCHAR,
-                        after_json  VARCHAR)"""
+                f"ALTER TABLE {qualified([META_SCHEMA, table.name])} "
+                f"ADD COLUMN {quote_ident(name)} {table.type_of(name, 'duckdb')}"
             )
-            cur.execute(
-                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "domains"])} (
-                        name         VARCHAR PRIMARY KEY,
-                        display_name VARCHAR,
-                        description  VARCHAR,
-                        owner        VARCHAR,
-                        created_at   TIMESTAMP,
-                        created_by   VARCHAR,
-                        updated_at   TIMESTAMP,
-                        updated_by   VARCHAR)"""
-            )
-            cur.execute(
-                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "functions"])} (
-                        name         VARCHAR PRIMARY KEY,
-                        domain_name  VARCHAR,
-                        display_name VARCHAR,
-                        description  VARCHAR,
-                        owner        VARCHAR,
-                        owner_email  VARCHAR,
-                        doc_link     VARCHAR,
-                        created_at   TIMESTAMP,
-                        created_by   VARCHAR,
-                        updated_at   TIMESTAMP,
-                        updated_by   VARCHAR)"""
-            )
-            cur.execute(
-                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "forms"])} (
-                        function_name VARCHAR NOT NULL,
-                        name          VARCHAR NOT NULL,
-                        display_name  VARCHAR,
-                        description   VARCHAR,
-                        owner         VARCHAR,
-                        owner_email   VARCHAR,
-                        created_at    TIMESTAMP,
-                        created_by    VARCHAR,
-                        updated_at    TIMESTAMP,
-                        updated_by    VARCHAR,
-                        PRIMARY KEY (function_name, name))"""
-            )
-            cur.execute(
-                f"""CREATE TABLE IF NOT EXISTS {qualified([META_SCHEMA, "files"])} (
-                        function_name VARCHAR NOT NULL,
-                        name          VARCHAR NOT NULL,
-                        display_name  VARCHAR,
-                        description   VARCHAR,
-                        owner         VARCHAR,
-                        owner_email   VARCHAR,
-                        size_bytes    BIGINT,
-                        row_count     BIGINT,
-                        created_at    TIMESTAMP,
-                        created_by    VARCHAR,
-                        updated_at    TIMESTAMP,
-                        updated_by    VARCHAR,
-                        PRIMARY KEY (function_name, name))"""
-            )
+        if table is registry.CHANGE_LOG and "seq" not in present and present:
+            # Entries written before ``seq`` existed: the old sequence id is exactly the
+            # ordinal it now carries, so history keeps its order across the upgrade.
+            cur.execute(f"UPDATE {qualified([META_SCHEMA, table.name])} SET seq = CAST(id AS BIGINT)")
 
     @staticmethod
     def _migrate_meta(cur) -> None:
-        """Upgrade a local database created before functions and domains were separated.
+        """Rename what a *renamed* concept left behind; adding columns is not done here.
 
         The old ``domains`` registry (with a ``doc_link`` column) described what are now
-        *functions*; the old ``forms`` registry keyed forms by ``domain``.
+        *functions*; the old ``forms`` registry keyed forms by ``domain``. Renames are the only
+        thing that cannot be expressed additively, so they are the only thing in this function;
+        every new registry column is picked up by :meth:`_reconcile` from
+        :mod:`rdm.backend.registry` instead.
         """
         cols = {
             (t, c)
@@ -286,18 +258,6 @@ class DuckDBBackend(DatabaseBackend):
             cur.execute(
                 f"ALTER TABLE {qualified([META_SCHEMA, 'forms'])} RENAME COLUMN domain TO function_name"
             )
-        # Registries created before owner_email existed gain the column; fresh databases get it from the DDL.
-        existing_tables = {
-            t
-            for (t,) in cur.execute(
-                "SELECT DISTINCT table_name FROM duckdb_columns() WHERE schema_name = ?", [META_SCHEMA]
-            ).fetchall()
-        }
-        for table in ("functions", "forms", "files"):
-            if table in existing_tables:
-                cur.execute(
-                    f"ALTER TABLE {qualified([META_SCHEMA, table])} ADD COLUMN IF NOT EXISTS owner_email VARCHAR"
-                )
 
     # -- registry (mirrors the Databricks ``_catalog`` tables) -----------------------------
 
@@ -453,7 +413,8 @@ class DuckDBBackend(DatabaseBackend):
             )
             if value is not None and value != "":
                 cur.execute(
-                    f"INSERT INTO {qualified([META_SCHEMA, 'object_properties'])} VALUES (?, ?, ?, ?, ?)",
+                    f"INSERT INTO {qualified([META_SCHEMA, 'object_properties'])} "
+                    "(object_type, schema_name, table_name, key, value) VALUES (?, ?, ?, ?, ?)",
                     [object_type, schema, table, key, str(value)],
                 )
 
@@ -520,7 +481,9 @@ class DuckDBBackend(DatabaseBackend):
             if exists:
                 raise ConflictError(f"Domain '{domain.name}' already exists.")
             cur.execute(
-                f"INSERT INTO {qualified([META_SCHEMA, 'domains'])} VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO {qualified([META_SCHEMA, 'domains'])} "
+                "(name, display_name, description, owner, created_at, created_by, updated_at, updated_by) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     domain.name,
                     domain.display_name,
@@ -805,6 +768,7 @@ class DuckDBBackend(DatabaseBackend):
                 tags=tags,
             )
             form.apply_column_config(props.get(PROP_COLUMN_CONFIG))
+            form.apply_settings(props.get(PROP_SETTINGS))
             form.row_count = cur.execute(f"SELECT count(*) FROM {self._t(form)}").fetchone()[0]
             if form.has_system_columns:
                 row = cur.execute(
@@ -859,6 +823,7 @@ class DuckDBBackend(DatabaseBackend):
                     PROP_OWNER_EMAIL: form.owner_email,
                     PROP_SCD2: "true" if form.scd2_enabled else "",
                     PROP_COLUMN_CONFIG: form.column_config_json(),
+                    PROP_SETTINGS: form.settings_json() if form.settings else "",
                     "created_by": actor.username,
                     "created_at": utcnow().isoformat(),
                 },
@@ -920,6 +885,7 @@ class DuckDBBackend(DatabaseBackend):
                     PROP_OWNER: form.owner,
                     PROP_OWNER_EMAIL: form.owner_email,
                     PROP_COLUMN_CONFIG: form.column_config_json(),
+                    PROP_SETTINGS: form.settings_json() if form.settings else "",
                 },
             )
             self._set_props(
@@ -947,7 +913,9 @@ class DuckDBBackend(DatabaseBackend):
             cur.execute(
                 f"COMMENT ON COLUMN {self._t(form)}.{quote_ident(column.name)} IS {lit(column.description or '')}"
             )
-            if form.scd2_enabled:
+            # The history table is maintained whenever it exists, not only while the flag is
+            # on: it outlives set_scd2(False), so keying this on the flag let it fall behind.
+            if self._table_exists(cur, form.function, scd2_table_name(form.name)):
                 cur.execute(
                     f"ALTER TABLE {self._h(form)} ADD COLUMN {quote_ident(column.name)} {native_type_duckdb(column)}"
                 )
@@ -966,7 +934,7 @@ class DuckDBBackend(DatabaseBackend):
             if column_name not in names:
                 raise NotFoundError(f"Column '{column_name}' does not exist.")
             cur.execute(f"ALTER TABLE {self._t(form)} DROP COLUMN {quote_ident(column_name)}")
-            if form.scd2_enabled:
+            if self._table_exists(cur, form.function, scd2_table_name(form.name)):
                 cur.execute(f"ALTER TABLE {self._h(form)} DROP COLUMN {quote_ident(column_name)}")
             form.columns = [c for c in form.columns if c.name != column_name]
             self._set_props(
@@ -1047,10 +1015,16 @@ class DuckDBBackend(DatabaseBackend):
         after: dict | None,
         when: datetime,
     ) -> None:
+        # ``seq`` carries the same value as the local id: it is what both backends order the
+        # history by, and Databricks fills it with a per-batch ordinal (Delta has no sequence).
+        seq = cur.execute(f"SELECT nextval('{META_SCHEMA}.change_log_seq')").fetchone()[0]
         cur.execute(
             f"INSERT INTO {qualified([META_SCHEMA, 'change_log'])} "
-            f"VALUES (nextval('{META_SCHEMA}.change_log_seq'), ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, seq, schema_name, table_name, row_id, change_type, changed_at, changed_by, batch_id, "
+            "before_json, after_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
+                seq,
+                seq,
                 form.function,
                 form.name,
                 row_id,
@@ -1165,21 +1139,43 @@ class DuckDBBackend(DatabaseBackend):
         return [c.name for c in self._load_columns(cur, form.function, form.name)]
 
     def _scd2_create(self, cur, form: FormDef) -> None:
-        cols = ", ".join(quote_ident(c) for c in self._scd2_columns(cur, form))
-        cur.execute(
-            f"CREATE TABLE IF NOT EXISTS {self._h(form)} AS "
-            f"SELECT {cols}, CAST(NULL AS TIMESTAMP) AS \"{SCD2_START_COLUMN}\", "
-            f"CAST(NULL AS TIMESTAMP) AS \"{SCD2_END_COLUMN}\" FROM {self._t(form)} WHERE 1 = 0"
-        )
+        """Create the history table, or bring an existing one back in step with the form.
+
+        The history table outlives the flag, so it can fall behind the form: turning SCD2
+        off, adding or removing a column and turning it on again used to leave a table whose
+        shape no longer matched, and every later save failed. Missing columns are added here
+        (never dropped - a column removed from the form keeps its recorded history).
+        """
+        history = scd2_table_name(form.name)
+        columns = self._load_columns(cur, form.function, form.name)
+        if not self._table_exists(cur, form.function, history):
+            cols = ", ".join(quote_ident(c.name) for c in columns)
+            cur.execute(
+                f"CREATE TABLE {self._h(form)} AS "
+                f"SELECT {cols}, CAST(NULL AS TIMESTAMP) AS \"{SCD2_START_COLUMN}\", "
+                f"CAST(NULL AS TIMESTAMP) AS \"{SCD2_END_COLUMN}\" FROM {self._t(form)} WHERE 1 = 0"
+            )
+            return
+        present = {c.name for c in self._load_columns(cur, form.function, history)}
+        for col in columns:
+            if col.name not in present:
+                cur.execute(
+                    f"ALTER TABLE {self._h(form)} ADD COLUMN {quote_ident(col.name)} "
+                    f"{col.native_type or native_type_duckdb(col)}"
+                )
 
     def _scd2_open(self, cur, form: FormDef, row_ids: list[str], now: datetime) -> None:
         """One new open window per row, valid from ``now`` (the save/backfill timestamp)."""
         if not row_ids:
             return
-        cols = ", ".join(quote_ident(c) for c in self._scd2_columns(cur, form))
+        names = self._scd2_columns(cur, form)
+        cols = ", ".join(quote_ident(c) for c in names)
+        # The target columns are named, so a history table that still carries a column the
+        # form has dropped keeps working (that column is simply left NULL).
+        target = ", ".join([*(quote_ident(c) for c in names), f'"{SCD2_START_COLUMN}"', f'"{SCD2_END_COLUMN}"'])
         markers = ", ".join("?" for _ in row_ids)
         cur.execute(
-            f"INSERT INTO {self._h(form)} SELECT {cols}, ?, NULL FROM {self._t(form)} "
+            f"INSERT INTO {self._h(form)} ({target}) SELECT {cols}, ?, NULL FROM {self._t(form)} "
             f"WHERE {quote_ident(ID_COLUMN)} IN ({markers})",
             [now, *row_ids],
         )
@@ -1277,14 +1273,16 @@ class DuckDBBackend(DatabaseBackend):
         params.append(int(limit))
         with self._cursor() as cur:
             rows = cur.execute(
-                f"SELECT id, changed_at, changed_by, change_type, row_id, before_json, after_json "
+                f"SELECT changed_at, changed_by, change_type, row_id, before_json, after_json "
                 f"FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ?"
-                f"{row_filter} ORDER BY id DESC LIMIT ?",
+                f"{row_filter} ORDER BY seq DESC LIMIT ?",
                 params,
             ).fetchall()
         user_cols = [c.name for c in form.user_columns]
         records = []
-        for version, changed_at, changed_by, change_type, rid, before_json, after_json in rows:
+        n = len(rows)
+        for i, (changed_at, changed_by, change_type, rid, before_json, after_json) in enumerate(rows):
+            version = n - i  # the entry's position in the history shown, as on Databricks
             before = json.loads(before_json) if before_json else {}
             after = json.loads(after_json) if after_json else {}
             snapshot = after if change_type != "delete" else before
@@ -1466,13 +1464,15 @@ class DuckDBBackend(DatabaseBackend):
         placeholders = ", ".join("?" for _ in FILE_CHANGE_TYPES)
         with self._cursor() as cur:
             rows = cur.execute(
-                f"SELECT id, changed_at, changed_by, change_type, before_json, after_json "
+                f"SELECT changed_at, changed_by, change_type, before_json, after_json "
                 f"FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ? "
-                f"AND change_type IN ({placeholders}) ORDER BY id DESC LIMIT ?",
+                f"AND change_type IN ({placeholders}) ORDER BY seq DESC LIMIT ?",
                 [file.function, file.name, *FILE_CHANGE_TYPES, int(limit)],
             ).fetchall()
         records = []
-        for version, changed_at, changed_by, change_type, before_json, after_json in rows:
+        n = len(rows)
+        for i, (changed_at, changed_by, change_type, before_json, after_json) in enumerate(rows):
+            version = n - i
             snapshot = (
                 json.loads(after_json) if after_json else (json.loads(before_json) if before_json else {})
             )
@@ -1572,6 +1572,7 @@ class DuckDBBackend(DatabaseBackend):
             )
             if role is not Role.NONE:
                 cur.execute(
-                    f"INSERT INTO {qualified([META_SCHEMA, 'grants'])} VALUES (?, ?, ?)",
+                    f"INSERT INTO {qualified([META_SCHEMA, 'grants'])} "
+                    "(schema_name, principal, role) VALUES (?, ?, ?)",
                     [function, principal, role.name],
                 )

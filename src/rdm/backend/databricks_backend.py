@@ -49,6 +49,7 @@ from typing import Any
 
 import pandas as pd
 
+from rdm.backend import registry
 from rdm.backend.base import BackendError, ConflictError, DatabaseBackend, NotFoundError
 from rdm.backend.sql_utils import escape_literal_databricks as lit
 from rdm.backend.sql_utils import (
@@ -74,6 +75,7 @@ from rdm.models import (
     PROP_OWNER,
     PROP_OWNER_EMAIL,
     PROP_SCD2,
+    PROP_SETTINGS,
     SCD2_END_COLUMN,
     SCD2_START_COLUMN,
     SYSTEM_COLUMNS,
@@ -221,6 +223,7 @@ class DatabricksBackend(DatabaseBackend):
         self._files: Any = None
         self._lock = threading.RLock()
         self._audit_ready: bool | None = None
+        self._registry_ready: set[str] = set()
         self._volumes_ready: set[str] = set()
 
     # -- connection --------------------------------------------------------------------------
@@ -598,38 +601,41 @@ class DatabricksBackend(DatabaseBackend):
 
     # -- registry tables ---------------------------------------------------------------------
 
-    REGISTRY_DDL = {
-        "domains": (
-            "CREATE TABLE IF NOT EXISTS {t} (name STRING NOT NULL, display_name STRING, description STRING, owner STRING, "
-            "created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
-            "USING DELTA COMMENT 'Domains (business classifier above functions) maintained by the Reference Data Manager'"
-        ),
-        "functions": (
-            "CREATE TABLE IF NOT EXISTS {t} (name STRING NOT NULL, domain_name STRING, display_name STRING, "
-            "description STRING, owner STRING, owner_email STRING, doc_link STRING, created_at TIMESTAMP_NTZ, "
-            "created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
-            "USING DELTA COMMENT 'Registry of functions (schemas) maintained by the Reference Data Manager'"
-        ),
-        "forms": (
-            "CREATE TABLE IF NOT EXISTS {t} (function_name STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
-            "description STRING, owner STRING, owner_email STRING, created_at TIMESTAMP_NTZ, created_by STRING, "
-            "updated_at TIMESTAMP_NTZ, updated_by STRING) USING DELTA COMMENT 'Registry of forms maintained by the Reference Data Manager'"
-        ),
-        "files": (
-            "CREATE TABLE IF NOT EXISTS {t} (function_name STRING NOT NULL, name STRING NOT NULL, display_name STRING, "
-            "description STRING, owner STRING, owner_email STRING, size_bytes BIGINT, row_count BIGINT, "
-            "created_at TIMESTAMP_NTZ, created_by STRING, updated_at TIMESTAMP_NTZ, updated_by STRING) "
-            "USING DELTA COMMENT 'Registry of files (CSV/Parquet in the function volumes) maintained by the Reference Data Manager'"
-        ),
-    }
+    def registry_ddl(self, table: str) -> str:
+        """DDL for one ``_catalog`` table, generated from :mod:`rdm.backend.registry`."""
+        return registry.BY_NAME[table].databricks_ddl(self._reg(table))
+
+    def _ensure_registry(self, table: str) -> None:
+        """Create the registry table and add whatever columns it is missing, once per process.
+
+        This is the whole upgrade path in production: a field declared in
+        :mod:`rdm.backend.registry` appears in catalogs created before it existed the first
+        time this build writes to them. It replaces a self-heal that matched one hard-coded
+        column name in the driver's error text, which by construction only ever worked for
+        that one column and silently dropped the whole write for any other.
+        """
+        if table in self._registry_ready:
+            return
+        self._run(self.registry_ddl(table))
+        spec = registry.BY_NAME[table]
+        rows, _ = self._run(
+            f"SELECT column_name FROM {self._info('columns')} "
+            "WHERE table_catalog = :catalog AND table_schema = :schema AND table_name = :table",
+            {"catalog": self.catalog, "schema": self.meta_schema, "table": table},
+        )
+        missing = registry.missing_columns(spec, {str(r[0]) for r in rows})
+        if missing:
+            added = ", ".join(f"{_q(name)} {spec.type_of(name, 'databricks')}" for name, _ in missing)
+            self._run(f"ALTER TABLE {self._reg(table)} ADD COLUMNS ({added})")
+        self._registry_ready.add(table)
 
     def _registry_upsert(
         self, table: str, key: dict[str, Any], values: dict[str, Any], actor: User, strict: bool = False
     ) -> None:
-        """Idempotent MERGE into a registry table; creates the table on first use.
+        """Idempotent MERGE into a registry table; creates and upgrades it on first use.
 
         Best effort for the function/form registries (they mirror catalog objects); ``strict``
-        for the domain list, which lives only in the registry.
+        for the domain list and the file registry, which live only in the registry.
         """
         now = utcnow()
         params = {**key, **values, "now": now, "actor": actor.username}
@@ -647,26 +653,20 @@ class DatabricksBackend(DatabaseBackend):
         )
         try:
             self._run(statement, params)
-        except NotFoundError:
-            try:
-                self._run(self.REGISTRY_DDL[table].format(t=self._reg(table)))
-                self._run(statement, params)
-            except BackendError as exc:
-                if strict:
-                    raise
-                log.warning("Registry table %s unavailable: %s", table, exc)
-        except BackendError as exc:
-            # Registries created before owner_email existed migrate on first write.
-            if "owner_email" in str(exc).lower():
-                try:
-                    self._run(f"ALTER TABLE {self._reg(table)} ADD COLUMNS (`owner_email` STRING)")
-                    self._run(statement, params)
-                    return
-                except BackendError as migrate_exc:
-                    exc = migrate_exc
-            if strict:
-                raise exc
-            log.warning("Registry update for %s failed: %s", table, exc)
+            return
+        except BackendError as first:
+            failure = first
+        # Either the table is not there yet, or it predates a column this build writes. Both
+        # are the same repair, and it is cheap enough to try once before giving up.
+        try:
+            self._ensure_registry(table)
+            self._run(statement, params)
+            return
+        except BackendError as repair_failure:
+            failure = repair_failure
+        if strict:
+            raise failure
+        log.warning("Registry update for %s failed: %s", table, failure)
 
     def _register_domain(self, domain: DomainDef, actor: User, strict: bool = False) -> None:
         self._registry_upsert(
@@ -820,6 +820,14 @@ class DatabricksBackend(DatabaseBackend):
             )
         return forms
 
+    def _table_exists(self, function: str, name: str) -> bool:
+        rows, _ = self._run(
+            f"SELECT 1 FROM {self._info('tables')} "
+            "WHERE table_catalog = :catalog AND table_schema = :schema AND table_name = :table",
+            {"catalog": self.catalog, "schema": function, "table": name},
+        )
+        return bool(rows)
+
     def _load_columns(self, function: str, name: str) -> list[ColumnDef]:
         rows, _ = self._run(
             f"SELECT column_name, full_data_type, is_nullable, comment, ordinal_position FROM {self._info('columns')} "
@@ -874,6 +882,7 @@ class DatabricksBackend(DatabaseBackend):
         form.owner_email = form.properties.get(PROP_OWNER_EMAIL, "")
         form.scd2_enabled = form.properties.get(PROP_SCD2, "") == "true"
         form.apply_column_config(form.properties.get(PROP_COLUMN_CONFIG))
+        form.apply_settings(form.properties.get(PROP_SETTINGS))
         form.created_at = to_db_scalar(created)
         form.updated_at = to_db_scalar(altered)
         form.updated_by = altered_by or ""
@@ -897,6 +906,7 @@ class DatabricksBackend(DatabaseBackend):
             PROP_OWNER_EMAIL: form.owner_email or "",
             PROP_SCD2: "true" if form.scd2_enabled else "",
             PROP_COLUMN_CONFIG: form.column_config_json(),
+            PROP_SETTINGS: form.settings_json() if form.settings else "",
         }
         return props
 
@@ -964,7 +974,8 @@ class DatabricksBackend(DatabaseBackend):
         self._run(
             f"ALTER TABLE {self._t(form)} ADD COLUMN {_q(column.name)} {native_type_databricks(column)}{comment}"
         )
-        if form.scd2_enabled:
+        # Keyed on the table, not the flag: the history table outlives set_scd2(False).
+        if self._table_exists(form.function, scd2_table_name(form.name)):
             self._run(
                 f"ALTER TABLE {self._h(form)} ADD COLUMN {_q(column.name)} {native_type_databricks(column)}"
             )
@@ -980,7 +991,7 @@ class DatabricksBackend(DatabaseBackend):
         if column_name not in {c.name for c in self._load_columns(form.function, form.name)}:
             raise NotFoundError(f"Column '{column_name}' does not exist.")
         self._run(f"ALTER TABLE {self._t(form)} DROP COLUMN {_q(column_name)}")
-        if form.scd2_enabled:
+        if self._table_exists(form.function, scd2_table_name(form.name)):
             self._run(f"ALTER TABLE {self._h(form)} DROP COLUMN {_q(column_name)}")
         form.columns = [c for c in form.columns if c.name != column_name]
         self._run(
@@ -1234,6 +1245,14 @@ class DatabricksBackend(DatabaseBackend):
             f"AS SELECT *, CAST(NULL AS TIMESTAMP) AS `{SCD2_START_COLUMN}`, "
             f"CAST(NULL AS TIMESTAMP) AS `{SCD2_END_COLUMN}` FROM {self._t(form)} WHERE 1 = 0"
         )
+        # The history table outlives the flag, so an existing one can have fallen behind the
+        # form (SCD2 off -> add a column -> SCD2 on). Add what it is missing; never drop, so a
+        # column removed from the form keeps the history already recorded for it.
+        present = {c.name for c in self._load_columns(form.function, scd2_table_name(form.name))}
+        missing = [c for c in self._load_columns(form.function, form.name) if c.name not in present]
+        if missing:
+            added = ", ".join(f"{_q(c.name)} {c.native_type or native_type_databricks(c)}" for c in missing)
+            self._run(f"ALTER TABLE {self._h(form)} ADD COLUMNS ({added})")
 
     def _scd2_sync(self, form: FormDef, row_ids: list[str], now: datetime) -> None:
         """Close and open validity windows for the rows a save touched.
@@ -1255,8 +1274,11 @@ class DatabricksBackend(DatabaseBackend):
                 f"AND f.{_q(UPDATED_AT_COLUMN)} = :now))",
                 params,
             )
+            names = [c.name for c in form.columns]
+            target = ", ".join([*(_q(c) for c in names), f"`{SCD2_START_COLUMN}`", f"`{SCD2_END_COLUMN}`"])
             self._run(
-                f"INSERT INTO {self._h(form)} SELECT *, :now, NULL FROM {self._t(form)} "
+                f"INSERT INTO {self._h(form)} ({target}) "
+                f"SELECT {', '.join(_q(c) for c in names)}, :now, NULL FROM {self._t(form)} "
                 f"WHERE {_q(ID_COLUMN)} IN ({markers}) AND {_q(UPDATED_AT_COLUMN)} = :now",
                 params,
             )
@@ -1265,8 +1287,12 @@ class DatabricksBackend(DatabaseBackend):
         scd2_table_name(form.name)  # length check before anything is written
         if enabled:
             self._scd2_create(form)
+            names = [c.name for c in self._load_columns(form.function, form.name)]
+            target = ", ".join([*(_q(c) for c in names), f"`{SCD2_START_COLUMN}`", f"`{SCD2_END_COLUMN}`"])
             self._run(
-                f"INSERT INTO {self._h(form)} SELECT *, {_q(UPDATED_AT_COLUMN)}, NULL FROM {self._t(form)} t "
+                f"INSERT INTO {self._h(form)} ({target}) "
+                f"SELECT {', '.join('t.' + _q(c) for c in names)}, t.{_q(UPDATED_AT_COLUMN)}, NULL "
+                f"FROM {self._t(form)} t "
                 f"WHERE NOT EXISTS (SELECT 1 FROM {self._h(form)} h "
                 f"WHERE h.{_q(ID_COLUMN)} = t.{_q(ID_COLUMN)} AND h.`{SCD2_END_COLUMN}` IS NULL)"
             )
@@ -1374,15 +1400,12 @@ class DatabricksBackend(DatabaseBackend):
     )
 
     def audit_table_ddl(self) -> str:
-        """DDL for the audit table (also created by the bundle's setup job)."""
-        return (
-            f"CREATE TABLE IF NOT EXISTS {self._audit()} (\n"
-            "  id STRING NOT NULL, seq BIGINT, schema_name STRING NOT NULL, table_name STRING NOT NULL, row_id STRING,\n"
-            "  change_type STRING NOT NULL, changed_at TIMESTAMP_NTZ NOT NULL, changed_by STRING, batch_id STRING,\n"
-            "  before_json STRING, after_json STRING\n"
-            ") USING DELTA COMMENT 'Row-level change history written by the Reference Data Manager app' "
-            "TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')"
-        )
+        """DDL for the audit table, generated from :mod:`rdm.backend.registry`.
+
+        Exposed because the bundle's setup job creates the same table: an editor saving a row
+        needs the table to exist but does not hold CREATE TABLE on ``_catalog``.
+        """
+        return registry.CHANGE_LOG.databricks_ddl(self._audit())
 
     def _write_audit(self, rows: list[dict[str, Any]]) -> None:
         if not rows:

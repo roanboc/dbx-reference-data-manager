@@ -394,6 +394,81 @@ class Permissions:
 
 
 # --------------------------------------------------------------------------------------
+# Persisted metadata contract
+# --------------------------------------------------------------------------------------
+
+#: Version of the metadata this build writes: the JSON documents (``rdm.column_config``,
+#: ``rdm.settings``) and the shape of the ``_catalog`` registry tables.
+#:
+#: The contract is **additive**. A new rule or setting is a new key, never a changed or
+#: removed one, so the version only has to move when a reader must behave *differently* -
+#: which is rare, because every reader keeps the keys it does not understand
+#: (:func:`parse_document`) and writes them back untouched (:func:`build_document`).
+#: That is what lets two app versions, or the app and an external tool, share one catalog:
+#: an older build editing a form cannot silently strip what a newer build stored.
+METADATA_VERSION = 1
+
+
+def parse_document(
+    raw: str | dict[str, Any] | None, known: frozenset[str]
+) -> tuple[int, dict[str, Any], dict[str, Any]]:
+    """Split a persisted JSON document into ``(version, known keys, unknown keys)``.
+
+    Garbage (unparsable text, a non-object, a missing document) yields empty dictionaries
+    rather than an error: metadata must never make a form unopenable.
+    """
+    if not raw:
+        return METADATA_VERSION, {}, {}
+    try:
+        doc = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return METADATA_VERSION, {}, {}
+    if not isinstance(doc, dict):
+        return METADATA_VERSION, {}, {}
+    try:
+        version = max(1, int(doc.get("version", METADATA_VERSION)))
+    except (TypeError, ValueError):
+        version = METADATA_VERSION
+    fields = {k: v for k, v in doc.items() if k in known}
+    unknown = {k: v for k, v in doc.items() if k not in known and k != "version"}
+    return version, fields, unknown
+
+
+def build_document(version: int, fields: dict[str, Any], unknown: dict[str, Any]) -> dict[str, Any]:
+    """Inverse of :func:`parse_document`: unknown keys first, known keys win, version last.
+
+    ``version`` is the one the document was read with, so a document written by a newer
+    build keeps its own version through a round trip here.
+    """
+    doc: dict[str, Any] = {k: v for k, v in unknown.items() if k != "version"}
+    doc.update(fields)
+    doc["version"] = max(METADATA_VERSION, version)
+    return doc
+
+
+#: Size budget for one persisted metadata document. A metadata document is stored as a single
+#: table property, and property values are bounded (the limit is metastore-dependent and has
+#: historically been a few kilobytes), so the app keeps its own conservative ceiling: it can
+#: then refuse in the user's terms instead of letting the ``ALTER TABLE`` fail - which would
+#: also lose the unrelated metadata set by the same statement. Only *writes* are checked; a
+#: document that is already too large still loads, it just cannot grow.
+MAX_DOCUMENT_BYTES = 4000
+
+
+def document_json(doc: dict[str, Any], what: str = "configuration") -> str:
+    """Compact, key-sorted JSON so an unchanged document produces an unchanged property."""
+    text = json.dumps(doc, separators=(",", ":"), sort_keys=True, default=str)
+    size = len(text.encode("utf-8"))
+    if size > MAX_DOCUMENT_BYTES:
+        raise ValueError(
+            f"The {what} of this form is too large to store ({size:,} bytes, maximum "
+            f"{MAX_DOCUMENT_BYTES:,}). Shorten the longest allowed-value lists, or keep such a "
+            f"list in its own form and reference it from the column description."
+        )
+    return text
+
+
+# --------------------------------------------------------------------------------------
 # Metadata objects
 # --------------------------------------------------------------------------------------
 
@@ -410,6 +485,9 @@ class ColumnDef:
     is_key: bool = False  # business key: combination must be unique
     native_type: str = ""  # type text reported by the backend, informative only
     position: int = 0
+    #: Column-config keys this build does not understand (written by a newer build or by a
+    #: tool), kept verbatim so saving the form does not discard them. See METADATA_VERSION.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_system(self) -> bool:
@@ -529,6 +607,7 @@ PROP_DISPLAY_NAME = "rdm.display_name"
 PROP_OWNER = "rdm.owner"
 PROP_OWNER_EMAIL = "rdm.owner_email"
 PROP_COLUMN_CONFIG = "rdm.column_config"
+PROP_SETTINGS = "rdm.settings"
 PROP_DOC_LINK = "rdm.doc_link"
 PROP_DOMAIN = "rdm.domain"
 PROP_SCD2 = "rdm.scd2"
@@ -536,6 +615,15 @@ TAG_DISPLAY_NAME = "rdm_display_name"
 TAG_OWNER = "rdm_owner"
 TAG_FORM = "rdm_form"
 TAG_DOMAIN = "rdm_domain"
+
+#: Top-level keys of ``rdm.column_config`` this build understands.
+COLUMN_CONFIG_KEYS = frozenset({"columns"})
+#: Keys of one column's entry in ``rdm.column_config`` this build understands.
+COLUMN_RULE_KEYS = frozenset({"options", "key"})
+#: Keys of ``rdm.settings`` this build interprets. Empty today: the document exists so the
+#: first per-form option (an approval step, a retention rule, a notification) is a change to
+#: this set and to the UI, and to nothing in the backends.
+SETTINGS_KEYS: frozenset[str] = frozenset()
 
 #: SCD Type 2 history tables use the organisation's standard notation (Databricks Auto CDC):
 #: a validity window per version, the current row has ``__END_AT IS NULL``.
@@ -571,6 +659,14 @@ class FormDef:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     updated_by: str = ""
+    #: Per-form settings that are neither a column rule nor a description (``rdm.settings``).
+    #: Free-form on purpose: this is where the next per-form option lands as an additive
+    #: change here, without a new property key, a backend change or a migration.
+    settings: dict[str, Any] = field(default_factory=dict)
+    settings_version: int = METADATA_VERSION
+    #: Version and unknown top-level keys of ``rdm.column_config``, preserved on write.
+    config_version: int = METADATA_VERSION
+    config_extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def full_name(self) -> str:
@@ -617,40 +713,60 @@ class FormDef:
             raise ValueError("A form needs at least one column.")
         return self
 
-    # -- column configuration persisted as one JSON property -------------------------------
+    # -- configuration persisted as JSON properties ----------------------------------------
+    #
+    # Two documents per form, both following the additive contract of METADATA_VERSION:
+    # ``rdm.column_config`` holds the per-column rules SQL cannot express (allowed values,
+    # business keys), ``rdm.settings`` holds per-form options. They are separate properties
+    # so that a form with long allowed-value lists cannot crowd its settings out of the
+    # property's size budget.
 
     def column_config(self) -> dict[str, Any]:
         cols: dict[str, Any] = {}
         for c in self.user_columns:
-            entry: dict[str, Any] = {}
+            entry: dict[str, Any] = {k: v for k, v in c.extra.items() if k not in COLUMN_RULE_KEYS}
             if c.options:
                 entry["options"] = list(c.options)
             if c.is_key:
                 entry["key"] = True
             if entry:
                 cols[c.name] = entry
-        return {"version": 1, "columns": cols}
+        return build_document(self.config_version, {"columns": cols}, self.config_extra)
 
     def column_config_json(self) -> str:
-        return json.dumps(self.column_config(), separators=(",", ":"), sort_keys=True)
+        return document_json(self.column_config(), "column configuration")
 
     def apply_column_config(self, raw: str | dict[str, Any] | None) -> None:
-        """Merge persisted options/keys back onto ``self.columns``. Ignores garbage."""
-        if not raw:
-            return
-        try:
-            cfg = json.loads(raw) if isinstance(raw, str) else raw
-            cols = cfg.get("columns", {}) if isinstance(cfg, dict) else {}
-        except (ValueError, AttributeError):
-            return
+        """Merge the persisted column rules back onto ``self.columns``. Ignores garbage.
+
+        Keys this build knows become model fields (``options``, ``key``); every other key is
+        kept on the column (:attr:`ColumnDef.extra`) or on the form (:attr:`config_extra`) so
+        that writing the form back preserves what a newer build stored.
+        """
+        self.config_version, fields, self.config_extra = parse_document(raw, COLUMN_CONFIG_KEYS)
+        cols = fields.get("columns")
+        if not isinstance(cols, dict):
+            cols = {}
         for c in self.columns:
             entry = cols.get(c.name)
             if not isinstance(entry, dict):
+                c.extra = {}
                 continue
             opts = entry.get("options")
             if isinstance(opts, list):
                 c.options = [str(o) for o in opts]
             c.is_key = bool(entry.get("key", False))
+            c.extra = {k: v for k, v in entry.items() if k not in COLUMN_RULE_KEYS}
+
+    def settings_document(self) -> dict[str, Any]:
+        return build_document(self.settings_version, {}, self.settings)
+
+    def settings_json(self) -> str:
+        return document_json(self.settings_document(), "settings")
+
+    def apply_settings(self, raw: str | dict[str, Any] | None) -> None:
+        """Load ``rdm.settings``. Every key is preserved; none is interpreted yet."""
+        self.settings_version, _, self.settings = parse_document(raw, SETTINGS_KEYS)
 
 
 @dataclass

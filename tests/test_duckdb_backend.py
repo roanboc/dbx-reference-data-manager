@@ -1540,3 +1540,47 @@ def test_scd2_toggle_backfills_and_stops_maintenance(backend, admin):
     assert con.execute(
         "SELECT count(*) FROM duckdb_tables() WHERE schema_name = 'crm' AND table_name = '_h__accounts'"
     ).fetchone()[0] == 0
+
+
+def test_scd2_history_table_is_reconciled_when_it_falls_behind_the_form(backend, admin):
+    """The history table outlives the flag, so it must be kept in step whatever the order.
+
+    Regression: turning SCD2 off, adding a column and turning it back on used to leave a
+    history table one column short, and every later save failed with a raw binder error.
+    """
+    backend.create_function(FunctionDef("crm"), admin)
+    form = backend.create_form(
+        FormDef("crm", "accounts", scd2_enabled=True, columns=[ColumnDef("code")]), admin
+    )
+    con = backend._conn  # noqa: SLF001 - white-box check of the history table
+    hist_cols = lambda: {  # noqa: E731
+        r[0]
+        for r in con.execute(
+            "SELECT column_name FROM duckdb_columns() "
+            "WHERE schema_name = 'crm' AND table_name = '_h__accounts'"
+        ).fetchall()
+    }
+
+    form = backend.set_scd2(form, False, admin)
+    form = backend.add_column(form, ColumnDef("label", DataType.STRING, description="d"), admin)
+    assert "label" in hist_cols()  # maintained while the flag is off, because the table exists
+
+    form = backend.set_scd2(form, True, admin)
+    result = backend.apply_changes(form, ChangeSet(inserts=[RowInsert({"code": "A", "label": "Alpha"})]), admin)
+    assert result.ok and result.inserted == 1
+    assert con.execute('SELECT label FROM crm."_h__accounts" WHERE __END_AT IS NULL').fetchall() == [
+        ("Alpha",)
+    ]
+
+
+def test_scd2_enabled_after_a_column_was_added_records_every_column(backend, admin):
+    backend.create_function(FunctionDef("crm"), admin)
+    form = backend.create_form(FormDef("crm", "leads", columns=[ColumnDef("code")]), admin)
+    form = backend.add_column(form, ColumnDef("note", DataType.STRING, description="d"), admin)
+    form = backend.set_scd2(form, True, admin)
+    result = backend.apply_changes(form, ChangeSet(inserts=[RowInsert({"code": "B", "note": "n"})]), admin)
+    assert result.ok
+    con = backend._conn  # noqa: SLF001
+    assert con.execute('SELECT code, note FROM crm."_h__leads" WHERE __END_AT IS NULL').fetchall() == [
+        ("B", "n")
+    ]
