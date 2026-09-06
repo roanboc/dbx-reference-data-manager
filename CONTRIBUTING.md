@@ -61,7 +61,7 @@ Python 3.11 or later. Copy `.env.example` to `.env` for local settings; never co
 | Backend contract on DuckDB | `tests/test_duckdb_backend.py` | always |
 | Dash server (layout, callbacks through the Flask client) | `tests/test_ui_app.py`, `test_ui_pages.py` | always |
 | Browser smoke (colour scheme, icons, selection, item form) | `tests/test_browser.py` | when Chromium is available (`make browsers`, or `RDM_TEST_BROWSER=/path/to/chromium`) |
-| Databricks contract | `tests/test_databricks_backend.py` with `RDM_TEST_DATABRICKS=1` | against a dev catalog only |
+| Databricks SQL generation | `tests/test_databricks_backend.py` (fake connection) | always; a real workspace is walked through manually before a release (`docs/DEPLOYMENT.md` §7) |
 
 ## Screenshots
 
