@@ -211,3 +211,35 @@ def test_a_legacy_change_log_keeps_its_order_after_gaining_seq(tmp_path):
         ).fetchall() == [(1, 1), (2, 2), (3, 3)]
     finally:
         backend.close()
+
+
+# -- the one-time bootstrap an administrator runs ----------------------------------------
+
+
+def test_bootstrap_script_emits_the_declared_shape_and_nothing_else():
+    """The bootstrap DDL must come from the declaration, so it cannot drift from the app."""
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("bootstrap", Path("scripts/bootstrap_catalog.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    ddl = module.statements("_reference_data")
+    assert ddl[0].startswith("CREATE SCHEMA IF NOT EXISTS `_reference_data`.`_catalog`")
+    assert len(ddl) == 1 + len(registry.REGISTRY_TABLES)
+    for table, statement in zip(registry.REGISTRY_TABLES, ddl[1:], strict=True):
+        assert statement == table.databricks_ddl(f"`_reference_data`.`_catalog`.`{table.name}`")
+    assert all("IF NOT EXISTS" in s for s in ddl)  # safe to re-run after every release
+
+
+def test_bootstrap_script_refuses_a_catalog_name_that_is_not_an_identifier():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("bootstrap", Path("scripts/bootstrap_catalog.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    with pytest.raises(ValueError, match="Invalid catalog name"):
+        module.statements("bad name; DROP TABLE x")

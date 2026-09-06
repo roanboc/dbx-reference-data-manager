@@ -1413,8 +1413,10 @@ class DatabricksBackend(DatabaseBackend):
     def audit_table_ddl(self) -> str:
         """DDL for the audit table, generated from :mod:`rdm.backend.registry`.
 
-        Exposed because the bundle's setup job creates the same table: an editor saving a row
-        needs the table to exist but does not hold CREATE TABLE on ``_catalog``.
+        The app creates the table on first write, but only for a caller that holds CREATE TABLE
+        on ``_catalog`` — which ``resources/schemas.yml`` grants to administrators only. An
+        administrator therefore runs ``scripts/bootstrap_catalog.py`` once after a deploy, so
+        that an editor's first save does not quietly fall back to the change feed.
         """
         return registry.CHANGE_LOG.databricks_ddl(self._audit())
 

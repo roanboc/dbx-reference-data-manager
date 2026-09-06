@@ -181,6 +181,28 @@ Iterating: after changing code run `databricks bundle deploy -t developer` follo
 `<app URL>/logz`. `databricks bundle destroy -t developer` removes the app, the schemas and the
 catalog - including their data.
 
+### Create the app's own tables once (run this after every deploy)
+
+The bundle creates the `_catalog` **schema**, not the registry and audit **tables** inside it.
+The app creates those itself on first write - but only for a caller holding `CREATE TABLE` on
+`_catalog`, which `resources/schemas.yml` grants to the administrator groups only. So whoever
+opens the app first decides what happens: an admin creates the tables for everybody, while an
+editor gets a warning in the log, a lost registry entry, and a History tab quietly falling back
+to the Delta change feed.
+
+Take that dependency out by running this once, as an administrator:
+
+```bash
+python scripts/bootstrap_catalog.py --catalog <your catalog>                       # review the DDL
+python scripts/bootstrap_catalog.py --catalog <your catalog> \
+    --warehouse-id <id> --profile <your profile> --apply
+```
+
+The statements are generated from `src/rdm/backend/registry.py`, the single declaration both
+backends build their DDL from, so the script cannot drift from what the app expects. Every
+statement is `IF NOT EXISTS`, so re-running it after a release is how a catalog picks up
+columns a newer declaration introduced (see [DATA_MODEL.md](DATA_MODEL.md)).
+
 ## 4. Enable user authorization (on-behalf-of-user) and why
 
 Recommended production mode (DESIGN.md §5). Without it the app talks to the warehouse as

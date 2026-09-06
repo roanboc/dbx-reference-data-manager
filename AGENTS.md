@@ -16,6 +16,7 @@ grow is [docs/DATA_MODEL.md](docs/DATA_MODEL.md).
 | Format | `python -m ruff format src tests app.py scripts` |
 | Run locally (DuckDB + mock auth) | `python app.py --dev` |
 | Seed demo data | `python scripts/seed_demo.py` |
+| Print/apply the `_catalog` DDL (Databricks, once per deploy) | `python scripts/bootstrap_catalog.py --catalog <c>` |
 
 Use the project venv (`.venv`); the Makefile wraps the same targets (`make check` = lint + test).
 
