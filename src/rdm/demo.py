@@ -12,11 +12,34 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from rdm.auth.provider import PERSONAS
 from rdm.backend.base import DatabaseBackend
 from rdm.backend.duckdb_backend import CATALOG_LEVEL
-from rdm.models import ColumnDef, DataType, DomainDef, FileDef, FormDef, FunctionDef, Role, User
+from rdm.models import (
+    ID_COLUMN,
+    VERSION_COLUMN,
+    ChangeSet,
+    ColumnDef,
+    DataType,
+    DomainDef,
+    FileDef,
+    FormDef,
+    FunctionDef,
+    Role,
+    RowDelete,
+    RowInsert,
+    RowUpdate,
+    User,
+)
 
 SEED_USER = User(username="seed@example.org", display_name="Seed script", groups=("rdm_admins",))
+
+#: The demo history is written as the *personas the reviewer can switch to*, not as invented
+#: names: switching to Fiona in the header then shows her own edits in the History tab, which is
+#: what makes "who changed what, and when" land.
+ALICE = PERSONAS["admin"].user
+FIONA = PERSONAS["function_admin"].user
+EDDIE = PERSONAS["editor"].user
 
 DEMO_DOMAINS: list[DomainDef] = [
     DomainDef(
@@ -369,3 +392,112 @@ def seed(backend: DatabaseBackend) -> None:
             }
         ),
     )
+
+    _seed_stewardship(backend)
+
+
+def _row_id(backend: DatabaseBackend, form: FormDef, key_column: str, key: str) -> tuple[str, int]:
+    """``(_id, _version)`` of the row with that business key, as a steward's browser would hold it."""
+    rows = backend.read_rows(form)
+    match = rows[rows[key_column] == key]
+    if match.empty:
+        raise ValueError(f"Demo data and demo history disagree: no {key_column} '{key}' in {form.full_name}.")
+    return str(match.iloc[0][ID_COLUMN]), int(match.iloc[0][VERSION_COLUMN])
+
+
+def _seed_stewardship(backend: DatabaseBackend) -> None:
+    """Replay a plausible few weeks of stewardship on top of the initial load.
+
+    Without this the demo database is 26 inserts by one user in one second: the History tab,
+    the per-row history in the item form and the Type 2 history table - three of the things the
+    app exists for - all have nothing to show. Every change here goes through the same
+    ``apply_changes`` path a steward's Save uses, so the audit trail is genuine rather than
+    written by hand.
+    """
+    cost_centres = backend.get_form("finance__cost_management", "cost_centres")
+    # Switch on the Type 2 history table (FR-47) *before* the edits, so the demo has a form
+    # whose validity windows were actually opened and closed by the changes below.
+    cost_centres = backend.set_scd2(cost_centres, True, SEED_USER)
+
+    rid, version = _row_id(backend, cost_centres, "cost_centre_code", "CC1002")
+    backend.apply_changes(
+        cost_centres,
+        ChangeSet(updates=[RowUpdate(rid, {"budget_holder": "a.mensah@example.org"}, version)]),
+        FIONA,
+    )
+    rid, version = _row_id(backend, cost_centres, "cost_centre_code", "CC2001")
+    backend.apply_changes(
+        cost_centres,
+        ChangeSet(updates=[RowUpdate(rid, {"annual_budget_gbp": 3_650_000.00}, version)]),
+        ALICE,
+    )
+    backend.apply_changes(
+        cost_centres,
+        ChangeSet(
+            inserts=[
+                RowInsert(
+                    {
+                        "cost_centre_code": "CC4001",
+                        "cost_centre_name": "Customer Success",
+                        "business_unit": "Commercial",
+                        "budget_holder": "c.success@example.org",
+                        "annual_budget_gbp": 420_000.00,
+                        "valid_from": date(2025, 4, 1),
+                    }
+                )
+            ]
+        ),
+        FIONA,
+    )
+    # CC3001 was closed with an end date in the initial load; reopening it gives the item form
+    # a row with two versions to show, and the history table a closed window beside an open one.
+    rid, version = _row_id(backend, cost_centres, "cost_centre_code", "CC3001")
+    backend.apply_changes(
+        cost_centres, ChangeSet(updates=[RowUpdate(rid, {"valid_to": None}, version)]), FIONA
+    )
+    rid, version = _row_id(backend, cost_centres, "cost_centre_code", "CC3001")
+    backend.apply_changes(
+        cost_centres,
+        ChangeSet(updates=[RowUpdate(rid, {"budget_holder": "r.kaur@example.org"}, version)]),
+        ALICE,
+    )
+    # A deletion, so the History tab has an entry that can be restored from (FR-24).
+    rid, version = _row_id(backend, cost_centres, "cost_centre_code", "CC9001")
+    backend.apply_changes(cost_centres, ChangeSet(deletes=[RowDelete(rid, version)]), ALICE)
+
+    # Eddie edits the Customer function, so his persona lands on a list he has changed himself.
+    questions = backend.get_form("customer__survey_service_improvement", "survey_questions")
+    rid, version = _row_id(backend, questions, "question_code", "CSAT-Q08")
+    backend.apply_changes(
+        questions, ChangeSet(updates=[RowUpdate(rid, {"is_active": False}, version)]), EDDIE
+    )
+    rid, version = _row_id(backend, questions, "question_code", "CSAT-Q01")
+    backend.apply_changes(questions, ChangeSet(updates=[RowUpdate(rid, {"weight": 1.5}, version)]), EDDIE)
+
+    employment_types = backend.get_form("hr__reference", "employment_types")
+    rid, version = _row_id(backend, employment_types, "code", "CAS")
+    backend.apply_changes(
+        employment_types,
+        ChangeSet(updates=[RowUpdate(rid, {"description": "Hourly paid, no guaranteed hours (2025 policy)"}, version)]),
+        ALICE,
+    )
+
+    for form in (cost_centres, questions, employment_types):
+        _assert_every_update_changed_something(backend, form)
+
+
+def _assert_every_update_changed_something(backend: DatabaseBackend, form: FormDef) -> None:
+    """Guard the demo story against silently becoming a wall of no-ops.
+
+    An update that writes the value a row already had is recorded, but shows no changed field
+    and opens a Type 2 window identical to the one it closed - so the History tab looks broken
+    in exactly the demo it exists for. Setting a value the seed data already contains is easy
+    to do by accident, so it fails the seed instead.
+    """
+    history = backend.get_history(form)
+    empty = history[(history["change_type"] == "update") & (history["changed_fields"] == "")]
+    if not empty.empty:
+        raise ValueError(
+            f"Demo history for {form.full_name} has {len(empty)} update(s) that changed nothing: "
+            f"pick a value the seeded rows do not already have."
+        )

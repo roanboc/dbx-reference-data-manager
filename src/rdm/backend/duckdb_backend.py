@@ -950,10 +950,10 @@ class DuckDBBackend(DatabaseBackend):
             cur.execute(f"DROP TABLE IF EXISTS {self._h(form)}")
             self._delete_props(cur, form.function, form.name)
             self._unregister_form(cur, form.function, form.name)
-            cur.execute(
-                f"DELETE FROM {qualified([META_SCHEMA, 'change_log'])} WHERE schema_name = ? AND table_name = ?",
-                [form.function, form.name],
-            )
+            # The audit trail is deliberately *not* deleted: it is the governance record of who
+            # changed what, it outlives the object it describes (FUNCTIONAL_DESIGN.md 7.5), and
+            # the Databricks backend keeps it. A form recreated under the same name therefore
+            # inherits those entries - names are the key, see docs/DATA_MODEL.md 3.
 
     # -- rows --------------------------------------------------------------------------------
 

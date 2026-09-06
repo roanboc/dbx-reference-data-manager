@@ -218,10 +218,20 @@ def validate_file_name(name: str) -> str:
     return name
 
 
+#: Words that are upper-cased rather than capitalised when a name is turned into a label, so a
+#: grid header reads "Annual Budget GBP" rather than "Annual Budget Gbp". Only add a word here
+#: when it is an acronym in every context: "id" is one, "it" would not be.
+ACRONYMS = frozenset(
+    {"api", "csv", "csat", "eur", "fte", "fx", "gbp", "gl", "hr", "id", "nps", "uc", "url", "usd", "vat"}
+)
+
+
 def humanize(name: str) -> str:
     """``cost_centre_code`` -> ``Cost Centre Code``; ``customer__survey`` -> ``Customer / Survey``."""
     parts = [p for p in name.split("__")]
-    words = [" ".join(w.capitalize() for w in p.split("_") if w) for p in parts]
+    words = [
+        " ".join(w.upper() if w in ACRONYMS else w.capitalize() for w in p.split("_") if w) for p in parts
+    ]
     return " / ".join(w for w in words if w) or name
 
 

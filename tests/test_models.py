@@ -134,7 +134,7 @@ def test_validate_identifier_error_mentions_kind():
     [
         ("cost_centre_code", "Cost Centre Code"),
         ("customer__survey", "Customer / Survey"),
-        ("hr__reference", "Hr / Reference"),
+        ("hr__reference", "HR / Reference"),
         ("single", "Single"),
         ("a__b__c", "A / B / C"),
         ("trailing_", "Trailing"),
@@ -333,7 +333,7 @@ def test_system_columns_definition():
 
 
 def test_function_title_and_validate():
-    assert FunctionDef("hr__reference").title == "Hr / Reference"
+    assert FunctionDef("hr__reference").title == "HR / Reference"
     assert FunctionDef("hr__reference", display_name="HR Reference").title == "HR Reference"
     assert FunctionDef("finance").validate().name == "finance"
     assert FunctionDef("finance", domain="people").validate().domain == "people"
@@ -608,7 +608,7 @@ def test_qualified_name_and_volume_file_path():
 def test_file_def_properties_and_validation():
     f = FileDef("finance__cost", "gl_transactions.csv", description="d")
     assert (f.stem, f.format, f.full_name) == ("gl_transactions", "csv", "finance__cost/gl_transactions.csv")
-    assert f.title == "Gl Transactions" and f.registered and f.size_bytes is None
+    assert f.title == "GL Transactions" and f.registered and f.size_bytes is None
     assert FileDef("finance__cost", "x.parquet", display_name="X").title == "X"
     assert f.validate() is f
     with pytest.raises(ValueError, match="Invalid function name"):
@@ -717,3 +717,19 @@ def test_documents_larger_than_the_budget_are_refused_with_a_readable_message():
     other = _form(ColumnDef("code"))
     other.apply_column_config({"columns": {"code": {"options": ["x" * MAX_DOCUMENT_BYTES]}}})
     assert other.column("code").options == ["x" * MAX_DOCUMENT_BYTES]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("annual_budget_gbp", "Annual Budget GBP"),
+        ("gl_account", "GL Account"),
+        ("default_fte", "Default FTE"),
+        ("csat_score", "CSAT Score"),
+        ("row_id", "Row ID"),
+        ("identity", "Identity"),  # a word that merely starts with an acronym is untouched
+        ("hr__reference", "HR / Reference"),
+    ],
+)
+def test_humanize_upper_cases_acronyms(name, expected):
+    assert humanize(name) == expected

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from rdm.auth.provider import PERSONAS, MockAuthProvider
@@ -467,3 +468,46 @@ def test_file_page_denies_viewer_without_access(seeded_backend):
 def test_upload_preview_helper(seeded_backend):
     tree = function_page.upload_preview("campus.csv", b"a,b\n1,2\n3,4\n")
     assert "2 columns" in texts_in(tree)
+
+
+# --------------------------------------------------------------------------------------
+# The demo content itself: what a showcase actually opens onto
+# --------------------------------------------------------------------------------------
+
+
+def test_demo_data_tells_a_stewardship_story(seeded_backend):
+    """History, per-row history and the Type 2 table are three of the things being demoed.
+
+    They are only worth opening if the seeded database contains changes by more than one
+    person, of more than one kind, that actually changed something.
+    """
+    form = seeded_backend.get_form("finance__cost_management", "cost_centres")
+    history = seeded_backend.get_history(form)
+
+    assert set(history["change_type"]) >= {"insert", "update", "delete"}
+    assert len(set(history["changed_by"])) >= 3
+    updates = history[history["change_type"] == "update"]
+    assert not updates.empty
+    assert all(fields for fields in updates["changed_fields"]), "an update that changed nothing"
+
+    # One form ships with FR-47 switched on, with windows the seeded changes opened and closed.
+    assert form.scd2_enabled
+    windows = seeded_backend._conn.execute(  # noqa: SLF001 - white-box check of the history table
+        'SELECT count(*) FILTER (WHERE __END_AT IS NULL), count(*) FILTER (WHERE __END_AT IS NOT NULL) '
+        'FROM finance__cost_management."_h__cost_centres"'
+    ).fetchone()
+    assert windows[0] > 0 and windows[1] > 0
+
+    # Each persona a reviewer can switch to has left a trace of their own.
+    everything = pd.concat(
+        [
+            seeded_backend.get_history(seeded_backend.get_form(f, t))
+            for f, t in (
+                ("finance__cost_management", "cost_centres"),
+                ("customer__survey_service_improvement", "survey_questions"),
+                ("hr__reference", "employment_types"),
+            )
+        ]
+    )
+    authors = set(everything["changed_by"])
+    assert {"alice.admin@example.org", "fiona.functionadmin@example.org", "eddie.editor@example.org"} <= authors

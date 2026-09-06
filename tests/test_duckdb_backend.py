@@ -919,9 +919,10 @@ def test_update_form_metadata_errors(backend: DuckDBBackend, admin: User, sample
         backend.update_form_metadata(FormDef(SAMPLE_FUNCTION, SAMPLE_FORM), admin)
 
 
-def test_drop_form_removes_table_metadata_and_history(
+def test_drop_form_removes_the_table_and_its_metadata_but_keeps_the_audit_trail(
     backend: DuckDBBackend, admin: User, sample_form: FormDef
 ):
+    """The audit trail outlives the form (FUNCTIONAL_DESIGN 7.5), as it does on Databricks."""
     assert _meta_count(backend, "object_properties", table_name=SAMPLE_FORM) > 0
     assert _meta_count(backend, "change_log", table_name=SAMPLE_FORM) == 4
     backend.drop_form(sample_form, admin)
@@ -929,18 +930,19 @@ def test_drop_form_removes_table_metadata_and_history(
         backend.get_form(SAMPLE_FUNCTION, SAMPLE_FORM)
     assert backend.list_forms(SAMPLE_FUNCTION) == []
     assert backend.get_function(SAMPLE_FUNCTION).form_count == 0
-    assert backend.get_history(sample_form).empty
     assert _meta_count(backend, "object_properties", table_name=SAMPLE_FORM) == 0
-    assert _meta_count(backend, "change_log", table_name=SAMPLE_FORM) == 0
+    assert _meta_count(backend, "change_log", table_name=SAMPLE_FORM) == 4
     with pytest.raises(NotFoundError):
         backend.drop_form(sample_form, admin)
-    # the name can be reused and starts from a clean slate
+    # The name can be reused; the table starts empty, and because objects are keyed by name
+    # the recreated form inherits the trail of its predecessor (docs/DATA_MODEL.md 3).
     recreated = backend.create_form(FormDef(SAMPLE_FUNCTION, SAMPLE_FORM, columns=[ColumnDef("only")]), admin)
     assert (
         recreated.row_count == 0
         and recreated.display_name == ""
         and [c.name for c in recreated.user_columns] == ["only"]
     )
+    assert _meta_count(backend, "change_log", table_name=SAMPLE_FORM) == 4
 
 
 # ======================================================================================
